@@ -14,6 +14,8 @@
 //! | `F6`..`F8`  | Reserved: inventory, suppliers, purchase orders |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
+//! | `Ctrl+Enter`| Take payment              |
+//! | `Ctrl+T`    | Light/dark                |
 
 use std::path::PathBuf;
 
@@ -91,6 +93,9 @@ impl PosShell {
         // the rest of the foreground: a modal inside a module's workspace would
         // be clipped to that panel and could not dim the list behind it.
         crate::modules::product_editor_modal(ui.ctx(), &mut self.state);
+        // Same reason: paying is the one flow that writes a sale, and it must own
+        // the screen while the cashier counts notes.
+        crate::checkout::payment_modal(ui.ctx(), &mut self.state);
         self.persist();
     }
 
@@ -171,12 +176,13 @@ impl PosShell {
             self.state.select(index);
         }
 
-        let (toggle_sidebar, open_palette, toggle_theme) = ctx.input(|input| {
+        let (toggle_sidebar, open_palette, toggle_theme, take_payment) = ctx.input(|input| {
             let command = input.modifiers.command;
             (
                 command && input.key_pressed(egui::Key::B),
                 command && input.key_pressed(egui::Key::P),
                 command && input.key_pressed(egui::Key::T),
+                command && input.key_pressed(egui::Key::Enter),
             )
         });
 
@@ -188,6 +194,12 @@ impl PosShell {
         }
         if toggle_theme {
             self.state.toggle_theme();
+        }
+        // Not while another modal owns the keyboard: the product form's Enter
+        // saves, and a payment opening behind it would be a second, invisible
+        // thing to dismiss.
+        if take_payment && self.state.product_editor.is_none() && self.state.payment.is_none() {
+            self.state.start_payment();
         }
     }
 

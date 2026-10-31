@@ -33,6 +33,7 @@ pub fn all() -> Vec<Command<State>> {
         .hint("F5"),
         Command::new("Toggle sidebar", State::toggle_sidebar).hint("Ctrl+B"),
         Command::new("Toggle theme", State::toggle_theme).hint("Ctrl+T"),
+        Command::new("Take payment", State::start_payment).hint("Ctrl+Enter"),
         Command::new("Clear cart", State::clear_cart),
     ]
 }

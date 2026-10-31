@@ -8,7 +8,7 @@ One of three repos:
 
 | Repo | Holds |
 |---|---|
-| `stride-libs` | shared crates: `ui-kit`, `ui-shell`, `storage`, `config`, `app-boot` |
+| `stride-libs` | shared crates: `ui-kit`, `ui-shell`, `storage`, `config`, `app-boot`, `money` |
 | `stride-pos` (this one) | the point-of-sale desktop app |
 | `stride-school` | school administration |
 
@@ -30,6 +30,7 @@ apps/pos/src/
   db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
   modules.rs    Sell / Dashboard / Products / Sales / Settings
+  checkout.rs   the payment modal and its change panel
   commands.rs   the Ctrl+P palette
   prefs.rs      active module + sidebar visibility
   settings.rs   terminal settings (appearance; tax and printer later)
@@ -51,13 +52,32 @@ Delete `pos.db` to start from an empty till; migrations re-run on next launch.
 
 ## Shared code
 
-The five shared crates come from `stride-libs` at a pinned `rev` in
+The shared crates come from `stride-libs` at a pinned `rev` in
 `Cargo.toml`. Do not edit that rev by hand: the procedure (and the rule that
 `Cargo.lock` lands in the same commit) is in `../libs/AGENTS.md`.
 
 ## State
 
 Sell's grid reads the `products` table, which Products writes; there is no
-sample data. Pay says a sale cannot be completed rather than faking one.
-Dashboard and Sales read the `sales` table, which stays empty until the sale
-flow writes to it. Settings sections are stubs.
+sample data. Dashboard and Sales read the `sales` table, which stays empty until
+someone pays.
+
+A sale writes three tables in one transaction:
+
+| Table | Holds |
+|---|---|
+| `sales` | one row per sale: exact `total_minor`, signed `rounding_minor`, tender and change |
+| `sale_lines` | what was sold, with the name and unit price copied at the time |
+| `payments` | one row per tender; append-only, `method` is free text |
+
+`sale_lines` copies the name and price on purpose: editing or deleting a product
+must not rewrite yesterday's receipt. `product_id` is a link for reporting only,
+and it goes `NULL` when the catalog row disappears.
+
+`paid = total + rounding`, and both `totals()` and the Sales list sum
+`total_minor + rounding_minor`, so revenue matches the drawer rather than the
+price list. The cash step per currency is in `currencies.rs` (`cash_step`), and
+`Money::round_to_step` does the arithmetic — it rounds half away from zero, so
+1340 UGX is 1300, not 1400.
+
+Settings sections are stubs.

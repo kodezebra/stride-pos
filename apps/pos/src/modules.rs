@@ -275,8 +275,17 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
 
     // Reserve the footer first so the line list scrolls instead of pushing the
     // total off the pane. A till whose total can scroll away is broken.
-    const FOOTER: f32 = 196.0;
-    let list_height = (ui.available_height() - FOOTER).max(120.0);
+    //
+    // The footer grows by one line when cash rounding applies, because that row
+    // only exists then and a fixed reserve would push the Pay button off the
+    // bottom at the window's narrow end.
+    let rounding_minor = state.cart_rounding_minor();
+    let footer = if rounding_minor == 0 {
+        196.0
+    } else {
+        196.0 + TYPE.small * 1.8
+    };
+    let list_height = (ui.available_height() - footer).max(120.0);
 
     if state.cart.is_empty() {
         // The cart *is* the pane, so its hint fills the space the lines would
@@ -359,7 +368,14 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     amount_row(ui, "Subtotal", &state.money(subtotal), false);
     amount_row(ui, "Tax", "not configured", false);
     ui.add_space(SPACING.xs);
+    // "Total" is the exact total, the number the receipt prints. The rounded
+    // cash amount is the payment screen's, and it says so there: a cart that
+    // showed 300 for a 340 basket would hide the 40 the shop is giving away.
     amount_row(ui, "Total", &state.money(subtotal), true);
+    if rounding_minor != 0 {
+        let due = state.money(state.due_minor());
+        components::caption(ui, &format!("Rounds to {due} in cash"));
+    }
     ui.add_space(SPACING.sm);
 
     if let Some(notice) = state.notice.as_deref() {
@@ -380,13 +396,15 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
         .corner_radius(egui::CornerRadius::same(ui_kit::tokens::RADII.sm as u8)),
     );
     if pay.clicked() {
-        // Deliberately not a fake success. The button is real, the flow is not,
-        // and the user is told which one they hit.
-        state.notice = Some("Payments arrive with the sale flow".to_owned());
+        state.start_payment();
     }
 }
 
-fn amount_row(ui: &mut egui::Ui, label: &str, amount: &str, strong: bool) {
+/// One label/amount row: the cart's totals and the payment screen's due.
+///
+/// Shared with `checkout` on purpose — the amount the cashier reads on the cart
+/// and the amount on the payment screen must sit on the same pixel.
+pub(crate) fn amount_row(ui: &mut egui::Ui, label: &str, amount: &str, strong: bool) {
     let palette = theme::current(ui.ctx());
     // One right-to-left row of a *fixed* height, amount first: the total must
     // end on the same pixel as the Pay button above it, and the row must claim
@@ -467,7 +485,7 @@ impl Module for Dashboard {
             components::empty_state_card(
                 ui,
                 "No sales recorded",
-                "Completed sales appear here as soon as the sale flow exists.",
+                "Completed sales appear here, newest first, as soon as the cart is paid.",
                 200.0,
             );
             return;
@@ -481,7 +499,7 @@ impl Module for Dashboard {
                     ui,
                     &format!("#{}", sale.id),
                     &sale.created_at,
-                    &state.money(sale.total_minor),
+                    &state.money(sale.paid_minor),
                     false,
                     index % 2 == 1,
                 );
@@ -899,7 +917,12 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
 }
 
 /// A single-line field at a fixed width, matching the height of `search_field`.
-fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) {
+pub(crate) fn text_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
     let palette = theme::current(ui.ctx());
     ui.scope(|ui| {
         ui.visuals_mut().widgets.inactive.bg_stroke =
@@ -909,8 +932,9 @@ fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) {
             egui::TextEdit::singleline(text)
                 .hint_text(hint)
                 .margin(egui::Margin::symmetric(12, 12)),
-        );
-    });
+        )
+    })
+    .inner
 }
 
 // ---------------------------------------------------------------------------
@@ -967,7 +991,7 @@ impl Module for Sales {
                             ui,
                             &format!("#{}", sale.id),
                             &sale.created_at,
-                            &state.money(sale.total_minor),
+                            &state.money(sale.paid_minor),
                             false,
                             index % 2 == 1,
                         );

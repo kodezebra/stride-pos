@@ -122,6 +122,29 @@ pub const GROUPS: &[(&str, &[Choice])] = &[
     ("Neighbours", NEIGHBOURS),
 ];
 
+/// The smallest coin the shop can hand back, in minor units.
+///
+/// Cash rounding is a shop's decision, but the step it rounds to is not: nobody
+/// in Kampala can tender 340 shillings when the smallest coin is 100. These are
+/// the smallest coins in circulation for the currencies this picker offers, and
+/// anything not listed rounds to its own minor unit — which is the same as not
+/// rounding at all.
+///
+/// A shop that wants a different step (a stall that never sees a 50 shilling
+/// coin, a supermarket that rounds to 500) needs a setting of its own. Until
+/// there is one, this is the default the payment screen applies and shows.
+pub fn cash_step(currency: Currency) -> i64 {
+    match currency.code() {
+        // 100 shillings, the smallest Ugandan coin.
+        "UGX" => 100,
+        // 1 shilling: the 50 cent coin no longer circulates.
+        "KES" => 100,
+        // 50 shillings — two decimal places, so 5000 minor units.
+        "TZS" => 5_000,
+        _ => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +164,28 @@ mod tests {
                     currency.code()
                 );
                 codes.push(currency);
+            }
+        }
+    }
+
+    /// The step is in minor units, so a currency with two decimal places needs
+    /// a hundred times the number a currency with none does for the same coin.
+    /// Getting that wrong rounds Kenya to the nearest 1/100 of a shilling.
+    #[test]
+    fn cash_steps_are_whole_coins() {
+        assert_eq!(cash_step(Currency::UGX), 100, "the 100 shilling coin");
+        assert_eq!(cash_step(Currency::KES), 100, "one shilling, in cents");
+        assert_eq!(cash_step(Currency::TZS), 5_000, "fifty shillings, in cents");
+        assert_eq!(cash_step(Currency::USD), 1, "no coin is bigger than a cent");
+
+        for (_, choices) in GROUPS {
+            for choice in *choices {
+                let currency = choice.currency().expect("tender");
+                assert!(
+                    cash_step(currency) >= 1,
+                    "{} cannot round to nothing",
+                    currency.code()
+                );
             }
         }
     }

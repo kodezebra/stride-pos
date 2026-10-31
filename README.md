@@ -7,8 +7,13 @@ machine.
 ## What it does
 
 **Sell** — search the product grid, tap items into the cart, change quantities,
-and watch the total. The Pay button is there, but taking payment is not
-connected yet.
+and watch the total. Pay takes the cash, shows the change, and writes the sale:
+the receipt lines, the payment, and the drawer's takings in one go.
+
+The total is exact. Where the smallest coin is worth more than one unit of the
+currency (UGX and KES round to 100, TZS to 5000), the cash due is rounded to the
+nearest coin and the difference is stored on the sale, so the books add up to
+what the drawer actually holds.
 
 **Dashboard** — takings, number of sales, and the latest transactions for today,
 the last 7 days, the last 30 days, or all time.
@@ -26,6 +31,7 @@ places for tax rules and terminal sync that are not filled in yet.
 | Key | Does |
 |---|---|
 | `F1` … `F5` | switch between the five sections |
+| `Ctrl+Enter` | take payment for the cart |
 | `Ctrl+P` | command palette — jump anywhere by name |
 | `Ctrl+B` | show or hide the sidebar |
 | `Ctrl+T` | light / dark |
@@ -43,13 +49,13 @@ empty till, delete it. Nothing is sent anywhere.
 
 ## Status
 
-This is an early build. You can build up a cart on the Sell screen, but a sale
-cannot be completed yet. The app says so on screen rather than pretending
-otherwise:
+This is an early build. You can sell: build a cart, take the cash, and the sale
+is recorded and shows up on the Dashboard and in Sales.
 
-- payments are not connected — Pay explains this
+- payments are cash only — mobile money and cards come later
 - the catalogue is entered by hand; importing a supplier's list comes later
 - receipts can be previewed but not printed
+- there is no staff sign-in yet, so the drawer has no name on it
 - each till runs alone; there is no sync between terminals yet
 
 ## Running it

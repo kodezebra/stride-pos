@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use money::{Currency, Money};
 use ui_kit::theme::Theme;
 
-use crate::db::Product;
+use crate::db::{Product, RecordedSale, SaleLine};
 use crate::settings::Settings;
 
 /// One line on the till. Money is integer minor units, always.
@@ -61,6 +61,21 @@ impl ProductDraft {
     }
 }
 
+/// The payment screen, open as a modal over the app.
+///
+/// Cash received is text, for the same reason a price is: it is mid-edit, and
+/// parsing on every keystroke would eat a half-typed `5000`. Empty means "the
+/// exact amount", which is what most cash sales are.
+pub struct Payment {
+    pub tendered: String,
+    pub error: Option<String>,
+    /// Set once the sale is written. The modal then shows the change instead of
+    /// the form, so the cashier reads the number before the drawer opens.
+    pub done: Option<RecordedSale>,
+    /// Put the cursor in the cash field on the first frame.
+    pub focus: bool,
+}
+
 pub struct State {
     pub store: storage::Store,
 
@@ -96,6 +111,9 @@ pub struct State {
     /// A product the operator asked to delete, waiting for confirmation. Inline
     /// in the row rather than a modal: the row is where the mistake would be.
     pub product_delete: Option<i64>,
+
+    /// The payment screen, when it is open.
+    pub payment: Option<Payment>,
 
     /// One-line feedback for an action that has no flow behind it yet. Cleared
     /// by the next action, so it never turns into a permanent lie in the UI.
@@ -154,6 +172,7 @@ impl State {
             categories,
             product_editor: None,
             product_delete: None,
+            payment: None,
             notice: None,
             settings,
             settings_path,
@@ -402,6 +421,116 @@ impl State {
     pub fn cart_total_minor(&self) -> i64 {
         self.cart.iter().map(CartLine::total_minor).sum()
     }
+
+    /// The cash adjustment for this cart: how far the exact total is from the
+    /// nearest coin the shop can hand back. Negative when the customer pays
+    /// less than the exact total, which is the common case — 340 shillings
+    /// against a 100 shilling coin rounds down to 300.
+    ///
+    /// The exact total is never changed; only what the drawer takes.
+    pub fn cart_rounding_minor(&self) -> i64 {
+        let total = self.cart_total_minor();
+        let step = crate::currencies::cash_step(self.currency);
+        match Money::new(total, self.currency).round_to_step(step) {
+            Some(rounded) => rounded.minor() - total,
+            // Only an overflowing total cannot round; it also cannot be paid.
+            None => 0,
+        }
+    }
+
+    /// What the customer must hand over.
+    pub fn due_minor(&self) -> i64 {
+        self.cart_total_minor() + self.cart_rounding_minor()
+    }
+
+    /// Open the payment screen. Does nothing when the cart is empty or the
+    /// screen is already open — both are "the operator pressed Pay twice".
+    pub fn start_payment(&mut self) {
+        if self.payment.is_some() || self.cart.is_empty() {
+            return;
+        }
+        self.notice = None;
+        self.payment = Some(Payment {
+            tendered: String::new(),
+            error: None,
+            done: None,
+            focus: true,
+        });
+    }
+
+    /// Parse the cash received and write the sale.
+    ///
+    /// Everything is checked before the first write: a rejected tender leaves
+    /// the cart exactly as it was, because a cashier who mistyped 500 instead of
+    /// 5000 should retype one field, not rebuild the basket.
+    pub fn confirm_payment(&mut self) {
+        let Some(payment) = self.payment.as_ref() else {
+            return;
+        };
+        if payment.done.is_some() {
+            return;
+        }
+
+        let due_minor = self.due_minor();
+        let tendered_text = payment.tendered.trim().to_owned();
+        let tendered_minor = if tendered_text.is_empty() {
+            due_minor
+        } else {
+            match Money::parse(&tendered_text, self.currency) {
+                Ok(amount) => amount.minor(),
+                Err(error) => return self.payment_error(error.to_string()),
+            }
+        };
+
+        if tendered_minor < due_minor {
+            return self.payment_error(format!(
+                "That is {} short.",
+                self.money(due_minor - tendered_minor)
+            ));
+        }
+
+        let lines: Vec<SaleLine> = self
+            .cart
+            .iter()
+            .map(|line| SaleLine {
+                product_id: Some(line.product_id),
+                name: line.name.clone(),
+                qty: line.qty,
+                unit_minor: line.unit_minor,
+            })
+            .collect();
+
+        match crate::db::record_sale(
+            &self.store,
+            &lines,
+            self.cart_rounding_minor(),
+            tendered_minor,
+        ) {
+            Ok(sale) => {
+                self.cart.clear();
+                if let Some(payment) = self.payment.as_mut() {
+                    payment.error = None;
+                    payment.done = Some(sale);
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "recording a sale failed");
+                self.payment_error(format!("Could not record the sale: {error}"));
+            }
+        }
+    }
+
+    /// Close the payment screen, sale or not. The cart survives a cancel: the
+    /// operator aborted the payment, not the sale.
+    pub fn close_payment(&mut self) {
+        self.payment = None;
+    }
+
+    fn payment_error(&mut self, message: impl Into<String>) {
+        if let Some(payment) = self.payment.as_mut() {
+            payment.error = Some(message.into());
+        }
+    }
 }
 
 /// The amount without its symbol, for putting in an edit field: `2800` in
@@ -410,7 +539,7 @@ impl State {
 /// [`Money::format`] is the one canonical rendering; this is the inverse the
 /// product form needs, and the test below pins the two together so a currency
 /// where they disagree fails here rather than in an operator's hands.
-fn plain_amount(minor: i64, currency: Currency) -> String {
+pub(crate) fn plain_amount(minor: i64, currency: Currency) -> String {
     let formatted = Money::new(minor, currency).format();
     match formatted.rsplit_once(' ') {
         Some((_, amount)) => amount.to_owned(),
@@ -444,6 +573,36 @@ pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Tax", "Sync"];
 mod tests {
     use super::*;
 
+    /// A till with a real database, because the payment path writes.
+    fn state(name: &str, currency: Currency) -> (State, PathBuf) {
+        let path = std::env::temp_dir().join(format!("pos-state-{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = storage::Store::open(&path).expect("open database");
+        store.migrate(crate::db::MIGRATIONS).expect("migrate");
+        // A cart only ever holds real products — `sale_lines.product_id` is a
+        // foreign key — so the first row is the one `line()` points at.
+        crate::db::insert_product(&store, "Test item", 100, "Test", None).expect("seed product");
+        let state = State::new(
+            store,
+            0,
+            Vec::new(),
+            Settings::default(),
+            PathBuf::from("settings.json"),
+            currency,
+            false,
+        );
+        (state, path)
+    }
+
+    fn line(name: &str, qty: i64, unit_minor: i64) -> CartLine {
+        CartLine {
+            product_id: 1,
+            name: name.to_owned(),
+            qty,
+            unit_minor,
+        }
+    }
+
     /// The edit field shows an amount without its symbol and the save path
     /// parses it back. If the two ever disagree, an operator opens a product,
     /// presses Save without touching anything, and the price changes.
@@ -461,5 +620,130 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The case the whole rounding path exists for: 340 shillings is not a
+    /// tendered amount, 300 is.
+    #[test]
+    fn the_due_rounds_to_the_smallest_coin() {
+        let (mut state, path) = state("rounding", Currency::UGX);
+
+        state.cart = vec![line("Sugar", 1, 340)];
+        assert_eq!(
+            state.cart_total_minor(),
+            340,
+            "the exact total is untouched"
+        );
+        assert_eq!(state.cart_rounding_minor(), -40);
+        assert_eq!(state.due_minor(), 300);
+
+        // An exact multiple does not move at all.
+        state.cart = vec![line("Sugar", 1, 300)];
+        assert_eq!(state.cart_rounding_minor(), 0);
+        assert_eq!(state.due_minor(), 300);
+
+        // A currency with a one-cent coin never rounds, so a card payment in
+        // dollars is never a cent short.
+        state.currency = Currency::USD;
+        state.cart = vec![line("Sugar", 1, 340)];
+        assert_eq!(state.cart_rounding_minor(), 0);
+        assert_eq!(state.due_minor(), 340);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_empties_the_cart_and_reports_the_change() {
+        let (mut state, path) = state("paid", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 340), line("Soap", 2, 500)];
+
+        state.start_payment();
+        state.payment.as_mut().expect("open").tendered = "2000".to_owned();
+        state.confirm_payment();
+
+        let sale = state
+            .payment
+            .as_ref()
+            .and_then(|payment| payment.done.clone())
+            .expect("the sale was recorded");
+        assert_eq!(sale.total_minor, 1_340);
+        assert_eq!(sale.rounding_minor, -40, "1340 rounds down to 1300");
+        assert_eq!(sale.paid_minor(), 1_300);
+        assert_eq!(sale.change_minor, 700);
+
+        assert!(state.cart.is_empty(), "the till is ready for the next sale");
+        assert_eq!(crate::db::totals(&state.store, 3), (1, 1_300));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_empty_cash_field_means_the_exact_amount() {
+        let (mut state, path) = state("exact", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 300)];
+
+        state.start_payment();
+        state.confirm_payment();
+
+        let sale = state
+            .payment
+            .as_ref()
+            .and_then(|payment| payment.done.clone())
+            .expect("the sale was recorded");
+        assert_eq!(sale.tendered_minor, 300);
+        assert_eq!(sale.change_minor, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A mistyped tender is the most common mistake at a till. It must cost one
+    /// field, not the basket.
+    #[test]
+    fn a_short_tender_keeps_the_cart_and_writes_nothing() {
+        let (mut state, path) = state("short", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 340)];
+
+        state.start_payment();
+        state.payment.as_mut().expect("open").tendered = "200".to_owned();
+        state.confirm_payment();
+
+        let payment = state.payment.as_ref().expect("still open");
+        assert!(payment.done.is_none(), "nothing was recorded");
+        assert_eq!(payment.error.as_deref(), Some("That is USh 100 short."));
+        assert_eq!(state.cart.len(), 1, "the basket is untouched");
+        assert_eq!(crate::db::totals(&state.store, 3), (0, 0));
+
+        // Correcting the field completes the sale.
+        state.payment.as_mut().expect("open").tendered = "500".to_owned();
+        state.confirm_payment();
+        assert!(state.payment.as_ref().expect("open").done.is_some());
+        assert!(state.cart.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelling_a_payment_keeps_the_cart() {
+        let (mut state, path) = state("cancel", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 340)];
+
+        state.start_payment();
+        state.close_payment();
+
+        assert!(state.payment.is_none());
+        assert_eq!(state.cart.len(), 1);
+        assert_eq!(crate::db::totals(&state.store, 3), (0, 0));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pay_does_nothing_on_an_empty_cart() {
+        let (mut state, path) = state("empty-pay", Currency::UGX);
+
+        state.start_payment();
+        assert!(state.payment.is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 }
