@@ -42,11 +42,12 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     let exact = state::plain_amount(due_minor, currency);
 
     // A finished sale is a different screen and needs no mutable payment.
-    if let Some(sale) = state
-        .payment
-        .as_ref()
-        .and_then(|payment| payment.done.clone())
+    if let Some(payment) = state.payment.as_mut()
+        && let Some(sale) = payment.done.clone()
     {
+        let just_finished = payment.focus;
+        payment.focus = false;
+
         let change = state.money(sale.change_minor);
         let tendered = state.money(sale.tendered_minor);
         let paid = state.money(sale.paid_minor());
@@ -80,9 +81,18 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             if components::primary_button(ui, "New sale").clicked() {
                 close = true;
             }
+            ui.add_space(SPACING.xs);
+            components::caption(ui, "Enter or Space starts the next sale.");
         });
 
-        if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if close
+            || (!just_finished
+                && ctx.input(|input| {
+                    input.key_pressed(egui::Key::Escape)
+                        || input.key_pressed(egui::Key::Enter)
+                        || input.key_pressed(egui::Key::Space)
+                }))
+        {
             state.close_payment();
         }
         return;
@@ -99,6 +109,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     let opening = payment.focus;
     let mut complete = false;
     let mut close = false;
+    let mut field_submitted = false;
 
     egui::Modal::new(egui::Id::new("pos_payment")).show(ctx, |ui| {
         ui.set_width(420.0);
@@ -127,13 +138,16 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
 
             let field =
-                crate::modules::text_field(ui, &mut payment.tendered, "Exact amount", 240.0);
+                crate::modules::text_field(ui, &mut payment.tendered, "Exact amount", 210.0);
             if payment.focus {
                 field.request_focus();
                 payment.focus = false;
             }
             if field.changed() {
                 edited = true;
+            }
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                field_submitted = true;
             }
 
             if ui
@@ -144,7 +158,42 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 payment.tendered = exact.clone();
                 edited = true;
             }
+
+            if ui
+                .button("Clear")
+                .on_hover_text("Clear cash received")
+                .clicked()
+            {
+                payment.tendered.clear();
+                edited = true;
+            }
         });
+
+        let denoms = crate::currencies::denominations(currency);
+        if !denoms.is_empty() {
+            ui.add_space(SPACING.xs);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+                for &denom in denoms {
+                    let label = Money::new(denom, currency).format();
+                    let btn = egui::Button::new(
+                        egui::RichText::new(&label)
+                            .size(TYPE.small)
+                            .family(theme::semibold()),
+                    )
+                    .min_size(egui::vec2(0.0, 30.0));
+
+                    if ui
+                        .add(btn)
+                        .on_hover_text(format!("Tender {label}"))
+                        .clicked()
+                    {
+                        apply_denomination(payment, denom, due_minor, currency);
+                        edited = true;
+                    }
+                }
+            });
+        }
 
         // An error about the previous attempt is not about the new one.
         if edited {
@@ -208,7 +257,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         );
     });
 
-    if !opening && ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+    if (!opening && ctx.input(|input| input.key_pressed(egui::Key::Enter))) || field_submitted {
         complete = true;
     }
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -221,6 +270,32 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     if close {
         state.close_payment();
     }
+}
+
+/// Tap a denomination button: fill the note if empty or already sufficient,
+/// or accumulate notes if the cashier is counting in multiple bills.
+fn apply_denomination(
+    payment: &mut state::Payment,
+    denom: i64,
+    due_minor: i64,
+    currency: money::Currency,
+) {
+    let current_minor = if payment.tendered.trim().is_empty() {
+        0
+    } else {
+        Money::parse(payment.tendered.trim(), currency)
+            .map(|amount| amount.minor())
+            .unwrap_or(0)
+    };
+
+    let next_minor = if current_minor == 0 || current_minor >= due_minor {
+        denom
+    } else {
+        current_minor.saturating_add(denom)
+    };
+
+    payment.tendered = state::plain_amount(next_minor, currency);
+    payment.error = None;
 }
 
 /// The number the cashier hands back, at the size of the total.
@@ -236,4 +311,42 @@ fn change_row(ui: &mut egui::Ui, amount: &str, color: egui::Color32) {
             ui.label(components::semibold("Change").size(TYPE.body));
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use money::Currency;
+
+    #[test]
+    fn denomination_clicks_accumulate_when_short_and_replace_when_sufficient() {
+        let mut payment = state::Payment {
+            tendered: String::new(),
+            error: Some("Previous error".into()),
+            done: None,
+            focus: false,
+        };
+
+        // 1. First note on empty field sets the amount
+        apply_denomination(&mut payment, 2_000, 3_400, Currency::UGX);
+        assert_eq!(payment.tendered, "2000");
+        assert_eq!(payment.error, None);
+
+        // 2. 2,000 < 3,400: tapping another 2,000 accumulates to 4,000
+        apply_denomination(&mut payment, 2_000, 3_400, Currency::UGX);
+        assert_eq!(payment.tendered, "4000");
+
+        // 3. 4,000 >= 3,400: tapping 10,000 replaces it with 10,000 note
+        apply_denomination(&mut payment, 10_000, 3_400, Currency::UGX);
+        assert_eq!(payment.tendered, "10000");
+
+        // 4. Works for decimal currencies (USD: due is $15.00 = 1500 minor)
+        payment.tendered.clear();
+        apply_denomination(&mut payment, 1_000, 1_500, Currency::USD); // $10
+        assert_eq!(payment.tendered, "10.00");
+        apply_denomination(&mut payment, 1_000, 1_500, Currency::USD); // + $10 = $20.00
+        assert_eq!(payment.tendered, "20.00");
+        apply_denomination(&mut payment, 5_000, 1_500, Currency::USD); // replace with $50.00
+        assert_eq!(payment.tendered, "50.00");
+    }
 }

@@ -145,6 +145,42 @@ pub fn cash_step(currency: Currency) -> i64 {
     }
 }
 
+/// The common tender denominations for a currency, in minor units.
+///
+/// Displayed as quick-tap buttons on the payment modal so a cashier whose
+/// customer handed them cash other than the exact amount does not have to
+/// type into the number field.
+pub fn denominations(currency: Currency) -> &'static [i64] {
+    match currency.code() {
+        // Uganda (UGX): 500 coin, 1k, 2k, 5k, 10k, 20k, 50k notes
+        "UGX" => &[500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000],
+        // Kenya (KES, scale 2): 50, 100, 200, 500, 1,000 shillings
+        "KES" => &[5_000, 10_000, 20_000, 50_000, 100_000],
+        // Tanzania (TZS, scale 2): 500, 1,000, 2,000, 5,000, 10,000 shillings
+        "TZS" => &[50_000, 100_000, 200_000, 500_000, 1_000_000],
+        // Rwanda (RWF, scale 0): 500, 1,000, 2,000, 5,000 francs
+        "RWF" => &[500, 1_000, 2_000, 5_000],
+        // Burundi (BIF, scale 0): 500, 1,000, 2,000, 5,000, 10,000 francs
+        "BIF" => &[500, 1_000, 2_000, 5_000, 10_000],
+        // South Sudan (SSP, scale 2): 10, 20, 50, 100, 500, 1,000 pounds
+        "SSP" => &[1_000, 2_000, 5_000, 10_000, 50_000, 100_000],
+        // DR Congo (CDF, scale 2): 100, 200, 500, 1,000, 5,000, 10,000, 20,000 francs
+        "CDF" => &[
+            10_000, 20_000, 50_000, 100_000, 500_000, 1_000_000, 2_000_000,
+        ],
+        // US Dollar (USD, scale 2): $1, $5, $10, $20, $50, $100
+        "USD" => &[100, 500, 1_000, 2_000, 5_000, 10_000],
+        // Euro (EUR, scale 2): €5, €10, €20, €50, €100
+        "EUR" => &[500, 1_000, 2_000, 5_000, 10_000],
+        // British Pound (GBP, scale 2): £5, £10, £20, £50
+        "GBP" => &[500, 1_000, 2_000, 5_000],
+        _ => match currency.exponent().unwrap_or(0) {
+            0 => &[500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000],
+            _ => &[100, 500, 1_000, 2_000, 5_000, 10_000],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +222,25 @@ mod tests {
                     "{} cannot round to nothing",
                     currency.code()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn denominations_are_positive_and_sorted() {
+        for currency in [
+            Currency::UGX,
+            Currency::KES,
+            Currency::TZS,
+            Currency::USD,
+            Currency::EUR,
+            Currency::GBP,
+        ] {
+            let denoms = denominations(currency);
+            assert!(!denoms.is_empty());
+            for window in denoms.windows(2) {
+                assert!(window[0] < window[1]);
+                assert!(window[0] > 0);
             }
         }
     }
