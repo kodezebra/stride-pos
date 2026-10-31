@@ -240,21 +240,46 @@ pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Tax", "Sync"];
 
 /// The quick keys shown in Sell until there is a catalog to read from.
 ///
-/// Prices are in the till's minor units, so the same `280` is `USh 280` on a
-/// Ugandan till and `Ksh 2.80` on a Kenyan one — placeholder data, but real
-/// arithmetic.
+/// Prices are in the till's minor units and every one is a whole hundred of
+/// them. That is not cosmetic: USh 100 is the smallest coin in Uganda, so a
+/// till there cannot take USh 340 or give change for it. A price is payable
+/// when it is a multiple of the smallest circulating denomination, and this
+/// placeholder menu has to be payable or the first thing a cashier does fails.
+///
+/// In a two-decimal currency the same numbers read as whole shillings
+/// (`Ksh 28.00`), which is tenderable too. Real catalogs will hold whatever the
+/// shop sets; the till rounds the cash total at the payment step, not here.
 ///
 /// This is the one place in the app with invented data, and it is marked as
 /// such: the grid, the cart, and the money are real code paths, the product list
 /// is a placeholder. When `products` lands, this constant is deleted and the grid
 /// iterates the store instead — the widget code does not change.
 pub const QUICK_KEYS: &[(&str, i64)] = &[
-    ("Espresso", 280),
-    ("Flat white", 340),
-    ("Filter", 260),
-    ("Croissant", 320),
-    ("Cinnamon roll", 380),
-    ("Sourdough", 650),
-    ("Iced latte", 380),
-    ("Lemonade", 300),
+    ("Espresso", 2_800),
+    ("Flat white", 3_400),
+    ("Filter", 2_600),
+    ("Croissant", 3_200),
+    ("Cinnamon roll", 3_800),
+    ("Sourdough", 6_500),
+    ("Iced latte", 3_800),
+    ("Lemonade", 3_000),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// USh 100 is the smallest coin in Uganda, so a till there cannot take a
+    /// price that is not a multiple of it. The placeholder menu used to be
+    /// priced in cents (280, 340) and was unpayable on the first till it ran on.
+    #[test]
+    fn placeholder_prices_are_payable_in_cash() {
+        for (name, price) in QUICK_KEYS {
+            assert_eq!(
+                price % 100,
+                0,
+                "{name} at {price} minor units is not a multiple of the USh 100 coin"
+            );
+        }
+    }
+}
