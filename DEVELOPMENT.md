@@ -106,10 +106,13 @@ offering a PIN that would not work. An approval lasts one minute (`ELEVATION`)
 and does not change `state.session` — the sale stays in the cashier's name.
 
 Credentials are Argon2id PHC strings (m=19 MiB, t=2, p=1) in `users.credential`,
-never in the clear. A PIN is exactly six ASCII digits; the owner's password is at
-least twelve characters with no composition rules, because length is the only
-thing that makes a guess expensive. `CredentialKind` follows the role, so
-`add_staff` never asks which one to make.
+never in the clear. A PIN is exactly six ASCII digits and is **generated** by the
+till (`auth::generate_pin`), not typed by the owner: an invented PIN is a
+birthday or 123456, and it is the one secret in a shop nobody ever changes. The
+digits are shown once, on a card above the staff list, and only the hash is kept.
+The owner's password is at least eight characters with no composition rules,
+because length is the only thing that makes a guess expensive.
+`CredentialKind` follows the role, so `add_staff` never asks which one to make.
 
 Five wrong tries lock the account (`FREE_ATTEMPTS`): 30 seconds, doubling per
 further failure, capped at 15 minutes. The state lives in `login_attempts` and is

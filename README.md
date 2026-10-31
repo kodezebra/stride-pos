@@ -52,9 +52,12 @@ asks a manager (or the owner) to approve that one action for a minute, and the
 sale stays in the cashier's name. Nobody has to log out and back in.
 
 Cashiers and managers sign in with a six-digit PIN; the owner uses a password of
-at least twelve characters. Five wrong tries lock the account for thirty
-seconds, doubling with each further try up to fifteen minutes. The till locks
-itself after five idle minutes (fifteen for the owner), and `Ctrl+L` locks it now.
+at least eight characters. The till makes the PIN itself and shows it once when
+the account is added, so write it down before leaving the Staff page — after
+that only a hash is kept, and a forgotten PIN is replaced rather than recovered.
+Five wrong tries lock the account for thirty seconds, doubling with each further
+try up to fifteen minutes. The till locks itself after five idle minutes
+(fifteen for the owner), and `Ctrl+L` locks it now.
 
 ## Keyboard
 

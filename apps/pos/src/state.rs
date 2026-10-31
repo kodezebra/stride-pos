@@ -149,7 +149,6 @@ pub struct Override {
 /// The "add a person" form in Settings.
 pub struct StaffDraft {
     pub name: String,
-    pub pin: String,
     pub role: crate::auth::Role,
     pub error: Option<String>,
 }
@@ -158,18 +157,26 @@ impl Default for StaffDraft {
     fn default() -> Self {
         Self {
             name: String::new(),
-            pin: String::new(),
             role: crate::auth::Role::Cashier,
             error: None,
         }
     }
 }
 
+/// A freshly generated PIN, waiting to be read off the screen and handed over.
+///
+/// Only the hash is stored, so this is the one moment the digits exist in the
+/// clear: it stays on the Staff page until the owner says they have written it
+/// down, and it is never recoverable afterwards.
+pub struct NewPin {
+    pub name: String,
+    pub pin: String,
+}
+
 /// A PIN being replaced for one account. Inline under the staff list: one at a
 /// time, like the delete confirmation on a product row.
 pub struct ResetPin {
     pub user_id: String,
-    pub pin: String,
     pub error: Option<String>,
 }
 
@@ -282,6 +289,8 @@ pub struct State {
     last_activity: Instant,
     /// The "add a person" form in Settings.
     pub staff: StaffDraft,
+    /// A generated PIN the owner has not written down yet.
+    pub new_pin: Option<NewPin>,
     /// The PIN being reset for one account.
     pub staff_reset: Option<ResetPin>,
     /// The owner changing their own password.
@@ -337,6 +346,7 @@ impl State {
             last_activity: Instant::now(),
             staff: StaffDraft::default(),
             staff_reset: None,
+            new_pin: None,
             owner_password: PasswordDraft::default(),
         }
     }
@@ -718,9 +728,12 @@ impl State {
     }
 
     /// Add a cashier or manager.
+    ///
+    /// The PIN is generated, not typed. A PIN the owner invents is a birthday, a
+    /// phone number, or 123456, and it is the one secret in a shop that nobody
+    /// would ever change. The digits are shown once, above the staff list.
     pub fn add_staff(&mut self) {
         let name = self.staff.name.trim().to_owned();
-        let pin = self.staff.pin.clone();
         let role = self.staff.role;
 
         if name.is_empty() {
@@ -728,10 +741,6 @@ impl State {
         }
         if role == crate::auth::Role::Owner {
             return self.staff_error("There is one owner account, created at setup.");
-        }
-        let kind = role.credential_kind();
-        if let Err(message) = kind.validate(&pin) {
-            return self.staff_error(message);
         }
         if self
             .users
@@ -741,6 +750,7 @@ impl State {
             return self.staff_error("Someone with that name already works here.");
         }
 
+        let pin = crate::auth::generate_pin();
         let credential = match crate::auth::hash(&pin) {
             Ok(credential) => credential,
             Err(error) => {
@@ -749,11 +759,17 @@ impl State {
             }
         };
 
-        match crate::db::insert_user(&self.store, &name, role, kind, &credential) {
+        match crate::db::insert_user(
+            &self.store,
+            &name,
+            role,
+            role.credential_kind(),
+            &credential,
+        ) {
             Ok(_) => {
                 self.users = crate::db::users(&self.store);
                 self.staff = StaffDraft::default();
-                self.notice = Some(format!("Added {name}."));
+                self.new_pin = Some(NewPin { name, pin });
             }
             Err(error) => {
                 tracing::error!(error = %error, "adding a person failed");
@@ -786,27 +802,28 @@ impl State {
         }
     }
 
-    /// Open the PIN field under one account.
+    /// Open the PIN confirmation under one account.
     pub fn start_reset_pin(&mut self, id: &str) {
         self.staff_reset = Some(ResetPin {
             user_id: id.to_owned(),
-            pin: String::new(),
             error: None,
         });
     }
 
-    /// Replace one account's PIN.
-    pub fn save_reset_pin(&mut self) {
+    /// Replace one account's PIN with a fresh one, shown once.
+    pub fn reset_pin(&mut self) {
         let Some(draft) = self.staff_reset.as_ref() else {
             return;
         };
         let id = draft.user_id.clone();
-        let pin = draft.pin.clone();
+        let name = self
+            .users
+            .iter()
+            .find(|user| user.id == id)
+            .map(|user| user.name.clone())
+            .unwrap_or_else(|| "the person".to_owned());
 
-        if let Err(message) = crate::auth::CredentialKind::Pin.validate(&pin) {
-            return self.reset_error(message);
-        }
-
+        let pin = crate::auth::generate_pin();
         let credential = match crate::auth::hash(&pin) {
             Ok(credential) => credential,
             Err(error) => {
@@ -822,7 +839,7 @@ impl State {
                 crate::db::clear_attempts(&self.store, &id);
                 self.staff_reset = None;
                 self.users = crate::db::users(&self.store);
-                self.notice = Some("PIN changed.".to_owned());
+                self.new_pin = Some(NewPin { name, pin });
             }
             Err(error) => {
                 tracing::error!(error = %error, "replacing a PIN failed");

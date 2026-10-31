@@ -170,6 +170,16 @@ pub enum CredentialKind {
     Password,
 }
 
+/// A PIN is exactly this many digits.
+pub const PIN_DIGITS: usize = 6;
+
+/// How short the owner's password may be.
+///
+/// Eight is a floor, not a recommendation. The owner types it rarely and can
+/// write it down, and the lockout — five tries, then a wait that doubles — is
+/// what stops a guess; length only has to make the guess expensive.
+pub const PASSWORD_MIN: usize = 8;
+
 impl CredentialKind {
     pub fn key(self) -> &'static str {
         match self {
@@ -207,14 +217,14 @@ impl CredentialKind {
     pub fn validate(self, secret: &str) -> Result<(), &'static str> {
         match self {
             CredentialKind::Pin => {
-                if secret.len() != 6 || !secret.bytes().all(|byte| byte.is_ascii_digit()) {
+                if secret.len() != PIN_DIGITS || !secret.bytes().all(|byte| byte.is_ascii_digit()) {
                     return Err("A PIN is exactly six digits.");
                 }
                 Ok(())
             }
             CredentialKind::Password => {
-                if secret.chars().count() < 12 {
-                    return Err("Use at least 12 characters. Length beats symbols.");
+                if secret.chars().count() < PASSWORD_MIN {
+                    return Err("Use at least 8 characters. Length beats symbols.");
                 }
                 Ok(())
             }
@@ -242,6 +252,23 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     // less than none, and `getrandom` is already in the tree for `uuid`.
     getrandom::fill(&mut bytes).expect("the OS random source is available");
     bytes
+}
+
+/// A fresh six-digit PIN, uniform over the whole space.
+///
+/// The owner never invents a PIN, because an invented one is the shop's name, a
+/// date, or 123456. A raw `% 1_000_000` would favour the low end of the range by
+/// the size of the remainder, so the tail of the u32 space is thrown away
+/// instead.
+pub fn generate_pin() -> String {
+    const SPACE: u32 = 1_000_000;
+    let limit = u32::MAX - (u32::MAX % SPACE);
+    loop {
+        let value = u32::from_le_bytes(random_bytes::<4>());
+        if value < limit {
+            return format!("{:0width$}", value % SPACE, width = PIN_DIGITS);
+        }
+    }
 }
 
 /// Hash a secret into a PHC string, which is what the database stores.
@@ -588,7 +615,7 @@ fn setup_card(ui: &mut egui::Ui, state: &mut State) {
         crate::modules::secret_field(
             ui,
             &mut state.setup.password,
-            "At least 12 characters",
+            "At least 8 characters",
             280.0,
         );
 
@@ -686,7 +713,7 @@ fn recovery_card(ui: &mut egui::Ui, state: &mut State) {
 
         ui.add_space(SPACING.sm);
         components::field_label(ui, "New password");
-        crate::modules::secret_field(ui, &mut password, "At least 12 characters", 280.0);
+        crate::modules::secret_field(ui, &mut password, "At least 8 characters", 280.0);
 
         ui.add_space(SPACING.sm);
         components::field_label(ui, "Again");
@@ -863,9 +890,52 @@ pub fn override_modal(ctx: &egui::Context, state: &mut State) {
 // Settings → Staff
 // ---------------------------------------------------------------------------
 
+/// The one moment a generated PIN exists in the clear.
+///
+/// A card, not a toast: a toast is gone before the owner has found a pen, and
+/// the till cannot show the digits again — it stores only the hash. The card
+/// stays on the Staff page until it is dismissed.
+fn new_pin_card(ui: &mut egui::Ui, state: &mut State) {
+    let Some((name, pin)) = state
+        .new_pin
+        .as_ref()
+        .map(|new| (new.name.clone(), new.pin.clone()))
+    else {
+        return;
+    };
+
+    let mut done = false;
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::section_title(ui, &format!("PIN for {name}"));
+        components::caption(
+            ui,
+            "Write it down and hand it over. The till keeps only a hash, so this \
+             is the last time the digits exist.",
+        );
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.label(components::numeric(&pin).size(TYPE.kpi));
+            ui.add_space(SPACING.lg);
+            if components::primary_button(ui, "Written down").clicked() {
+                done = true;
+            }
+        });
+    });
+    ui.add_space(SPACING.lg);
+
+    if done {
+        state.new_pin = None;
+    }
+}
+
 /// The staff list, and the two things an owner does here: add a person and
-/// switch one off. Credentials are never shown, not even to the owner.
+/// switch one off. Credentials are never shown, not even to the owner — the
+/// only time a PIN is visible is the moment it is made, above this list.
 pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
+    new_pin_card(ui, state);
+
     components::card(ui, |ui| {
         ui.set_min_width(ui.available_width());
         components::caption(
@@ -915,8 +985,9 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
             state.start_reset_pin(&id);
         }
 
-        // The reset field lives under the list: one at a time, like the delete
-        // confirmation on a product row.
+        // The reset confirmation lives under the list: one at a time, like the
+        // delete confirmation on a product row. The PIN itself is generated, so
+        // there is nothing to type — only to agree.
         if let Some(draft) = state.staff_reset.as_ref() {
             let name = state
                 .users
@@ -924,15 +995,13 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
                 .find(|user| user.id == draft.user_id)
                 .map(|user| user.name.as_str())
                 .unwrap_or("this account");
-            let mut pin = draft.pin.clone();
             let mut apply = false;
             let mut cancel = false;
 
             ui.add_space(SPACING.sm);
             ui.horizontal(|ui| {
-                components::field_label(ui, &format!("New PIN for {name}"));
-                crate::modules::secret_field(ui, &mut pin, "Six digits", 160.0);
-                if ui.button("Save").clicked() {
+                components::caption(ui, &format!("Give {name} a new PIN?"));
+                if ui.button("New PIN").clicked() {
                     apply = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -947,11 +1016,8 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
                 );
             }
 
-            if let Some(draft) = state.staff_reset.as_mut() {
-                draft.pin = pin;
-            }
             if apply {
-                state.save_reset_pin();
+                state.reset_pin();
             }
             if cancel {
                 state.staff_reset = None;
@@ -968,17 +1034,14 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
         components::caption(
             ui,
             "Cashiers sell and take payment. Managers also void, refund, discount, \
-             edit the catalog and change settings. Everyone gets a six-digit PIN.",
+             edit the catalog and change settings. The till makes a six-digit PIN \
+             and shows it once.",
         );
 
         ui.add_space(SPACING.md);
         ui.horizontal(|ui| {
             components::field_label(ui, "Name");
-            crate::modules::text_field(ui, &mut state.staff.name, "e.g. Brian", 180.0);
-
-            ui.add_space(SPACING.sm);
-            components::field_label(ui, "PIN");
-            crate::modules::secret_field(ui, &mut state.staff.pin, "Six digits", 120.0);
+            crate::modules::text_field(ui, &mut state.staff.name, "e.g. Brian", 220.0);
         });
 
         ui.add_space(SPACING.sm);
@@ -1030,7 +1093,7 @@ fn password_card(ui: &mut egui::Ui, state: &mut State) {
         ui.set_min_width(ui.available_width());
         components::caption(
             ui,
-            "At least 12 characters. The recovery code is not changed.",
+            &format!("At least {PASSWORD_MIN} characters. The recovery code is not changed."),
         );
 
         ui.add_space(SPACING.md);
@@ -1039,7 +1102,7 @@ fn password_card(ui: &mut egui::Ui, state: &mut State) {
             crate::modules::secret_field(
                 ui,
                 &mut state.owner_password.password,
-                "At least 12 characters",
+                "At least 8 characters",
                 240.0,
             );
             ui.add_space(SPACING.sm);
@@ -1148,7 +1211,34 @@ mod tests {
                 .validate("correct horse battery")
                 .is_ok()
         );
-        assert!(CredentialKind::Password.validate("short").is_err());
+        // The floor is eight characters, exactly.
+        assert!(
+            CredentialKind::Password
+                .validate(&"x".repeat(PASSWORD_MIN))
+                .is_ok()
+        );
+        assert!(
+            CredentialKind::Password
+                .validate(&"x".repeat(PASSWORD_MIN - 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_generated_pin_is_a_pin() {
+        let pins: Vec<String> = (0..16).map(|_| generate_pin()).collect();
+        for pin in &pins {
+            assert_eq!(pin.len(), PIN_DIGITS, "{pin}");
+            assert!(pin.bytes().all(|byte| byte.is_ascii_digit()), "{pin}");
+            // The generator's output has to pass the rule the screen applies.
+            assert!(CredentialKind::Pin.validate(pin).is_ok(), "{pin}");
+        }
+        // Not a proof of randomness, only that the source is not constant.
+        assert!(
+            pins.iter().any(|pin| pin != &pins[0]),
+            "every draw was {}",
+            pins[0]
+        );
     }
 
     #[test]
