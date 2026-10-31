@@ -10,8 +10,9 @@
 //!
 //! Two rules make the rest of this file small:
 //!
-//! - **The owner does not sell.** A shop owner who works the till gets a second,
-//!   cashier record; that is what keeps "who took this money" a fact.
+//! - **The owner is the back office.** The owner account can do everything, but
+//!   an owner who works the till should add a second, cashier record: that is
+//!   what keeps "who took this money" a fact, and the password off the counter.
 //! - **Approval is not a second login.** A cashier who needs a manager's
 //!   permission gets a prompt inside the action, and the elevation lasts a
 //!   minute. Signing in as the manager would attribute the sale to them.
@@ -569,8 +570,9 @@ fn setup_card(ui: &mut egui::Ui, state: &mut State) {
         components::caption(
             ui,
             "The owner account is the way back in: it adds staff, changes the \
-             currency, and can recover a forgotten password. The owner does not \
-             sell — a working owner gets a second, cashier account.",
+             currency, and can recover a forgotten password. An owner who also \
+             works the counter should add a cashier account, so the password \
+             stays in the back office.",
         );
 
         ui.add_space(SPACING.md);
