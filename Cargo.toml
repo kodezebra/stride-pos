@@ -39,6 +39,17 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 directories = "6.0.0"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+# Password hashing for staff credentials. Argon2id at the OWASP parameters;
+# the PHC string it returns is what the database stores, so the parameters can
+# move later without a migration.
+argon2 = "0.5.3"
+# Staff and (later) synced row ids. v7 is time-ordered, which keeps the index
+# dense when the same table also receives rows from other tills.
+uuid = { version = "1.29.0", features = ["v7"] }
+# OS randomness for credential salts and the recovery code. Already in the tree
+# through `uuid`; named here because `auth` uses it directly, and a salt from
+# anywhere but the OS is not a salt.
+getrandom = "0.3.4"
 # `default-features = false` on purpose: eframe's defaults switched from glow to
 # wgpu in 0.36, so relying on them would silently swap the rendering backend.
 # `accesskit` is also left off: egui-winit 0.36 needs accesskit 0.24, which is

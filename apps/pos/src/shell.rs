@@ -75,6 +75,29 @@ impl PosShell {
             self.state.theme_dirty = false;
         }
 
+        // Time passes even when nobody touches anything: the idle clock is what
+        // puts the till on the lock screen.
+        self.state.tick(ui.ctx());
+
+        // Locked is a whole screen, not a modal over the workspace: the takings
+        // behind it are the reason for the lock, and a modal leaves them legible
+        // around its edges.
+        if self.state.locked() {
+            // The panels below paint their own fills, so the normal frame needs
+            // no background of its own. Locked, there are no panels: the root
+            // `Ui` is bare, and without this the lock screen would float on
+            // whatever the compositor happens to have behind the window.
+            let palette = ui_kit::theme::current(ui.ctx());
+            ui.painter().rect_filled(
+                ui.max_rect(),
+                egui::CornerRadius::ZERO,
+                egui::Color32::from(palette.bg),
+            );
+            crate::auth::lock_screen(ui, &mut self.state);
+            self.persist();
+            return;
+        }
+
         // First run is a single question: nothing behind the modal is reachable,
         // so module hotkeys and the palette stay off until it is answered.
         let setup = self.state.needs_currency;
@@ -96,6 +119,8 @@ impl PosShell {
         // Same reason: paying is the one flow that writes a sale, and it must own
         // the screen while the cashier counts notes.
         crate::checkout::payment_modal(ui.ctx(), &mut self.state);
+        // And the one flow that lends a manager's authority to a cashier.
+        crate::auth::override_modal(ui.ctx(), &mut self.state);
         self.persist();
     }
 
@@ -106,6 +131,12 @@ impl PosShell {
     /// first run it is not dismissible: there is no "later" for a setting every
     /// amount on the screen depends on.
     fn currency_picker(&mut self, ctx: &egui::Context) {
+        // The owner picks the currency: setup comes first, so the till has
+        // somebody responsible for its amounts before it stores any.
+        if self.state.session.is_none() {
+            return;
+        }
+
         let required = self.state.needs_currency;
         if !required && !self.state.currency_picker {
             return;
@@ -172,17 +203,21 @@ impl PosShell {
                 }
             }
         });
+        // Through the same gate as the rail and the palette: an F-key is a route
+        // into a module like any other.
         if let Some(index) = jump {
-            self.state.select(index);
+            modules::open(&mut self.state, index);
         }
 
-        let (toggle_sidebar, open_palette, toggle_theme, take_payment) = ctx.input(|input| {
+        let (toggle_sidebar, open_palette, toggle_theme, lock, take_payment) = ctx.input(|input| {
             let command = input.modifiers.command;
             (
                 command && input.key_pressed(egui::Key::B),
                 command && input.key_pressed(egui::Key::P),
                 command && input.key_pressed(egui::Key::T),
-                command && input.key_pressed(egui::Key::Enter),
+                command && input.key_pressed(egui::Key::L),
+                (command && input.key_pressed(egui::Key::Enter))
+                    || input.key_pressed(egui::Key::F12),
             )
         });
 
@@ -194,6 +229,12 @@ impl PosShell {
         }
         if toggle_theme {
             self.state.toggle_theme();
+        }
+        // Locking wins over anything else pressed in the same frame: whatever was
+        // about to happen, it should happen to someone who is signed in.
+        if lock {
+            self.state.lock();
+            return;
         }
         // Not while another modal owns the keyboard: the product form's Enter
         // saves, and a payment opening behind it would be a second, invisible
@@ -218,7 +259,7 @@ impl PosShell {
         regions::status(ui, |ui| status_bar(ui, state));
 
         if let Some(next) = regions::rail(ui, rail, active) {
-            state.select(next);
+            modules::open(state, next);
         }
 
         let module = &mut modules[active];
@@ -284,8 +325,30 @@ fn status_bar(ui: &mut egui::Ui, state: &mut State) {
 
     // Shortcut hints live where the eye already is: the bar is always visible,
     // so the keys are learned once instead of being buried in a help screen.
+    //
+    // They also give way first. The right cluster is drawn last and right
+    // aligned, so on a narrow bar it does not push the hints aside — it paints
+    // over them. Measuring it first means the hints drop out instead: the
+    // takings are why the bar exists, and every shortcut is in the palette.
+    let cashier = state
+        .session
+        .as_ref()
+        .map(|session| format!("{} · {}", session.name, session.role.label()))
+        .unwrap_or_else(|| "no cashier".to_owned());
+    let reserved = segment_width(ui, &cart)
+        + segment_width(ui, &cashier)
+        + text_width(ui, concat!("v", env!("CARGO_PKG_VERSION")), false)
+        + size::STATUS_ICON
+        + 4.0
+        + SPACING.lg * 3.0;
+
     hint(ui, "Ctrl+P", "commands", muted);
-    hint(ui, "Ctrl+B", "sidebar", muted);
+    if hint_fits(ui, "Ctrl+B", "sidebar", reserved) {
+        hint(ui, "Ctrl+B", "sidebar", muted);
+    }
+    if hint_fits(ui, "Ctrl+L", "lock", reserved) {
+        hint(ui, "Ctrl+L", "lock", muted);
+    }
 
     regions::status_end(ui, |ui| {
         // Right-to-left layout: register in reverse of the visual order.
@@ -295,9 +358,38 @@ fn status_bar(ui: &mut egui::Ui, state: &mut State) {
                 .weak(),
         );
         theme_toggle(ui, state);
-        regions::status_item(ui, Icon::USER, "no cashier", muted);
+        regions::status_item(ui, Icon::USER, &cashier, muted);
         regions::status_item(ui, Icon::CART, &cart, muted);
     });
+}
+
+/// Width of a label at status size. The bar measures before it draws so a hint
+/// can step aside instead of being painted over.
+fn text_width(ui: &egui::Ui, text: &str, mono: bool) -> f32 {
+    let family = if mono {
+        egui::FontFamily::Monospace
+    } else {
+        egui::FontFamily::Proportional
+    };
+    ui.painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::new(TYPE.status, family),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+}
+
+/// One status segment: icon, gap, label.
+fn segment_width(ui: &egui::Ui, text: &str) -> f32 {
+    size::STATUS_ICON + SPACING.sm + text_width(ui, text, false)
+}
+
+/// Whether one more hint still leaves room for the right cluster.
+fn hint_fits(ui: &egui::Ui, key: &str, action: &str, reserved: f32) -> bool {
+    let width = text_width(ui, key, true) + text_width(ui, action, false) + SPACING.lg * 2.0;
+    ui.available_width() - width > reserved
 }
 
 /// A key and what it does, in one muted segment.

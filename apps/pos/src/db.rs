@@ -12,6 +12,12 @@ pub struct Sale {
     /// What the customer actually paid: the exact total plus cash rounding.
     pub paid_minor: i64,
     pub created_at: String,
+    /// The account that took the money, by name.
+    ///
+    /// Read through the join, not copied onto the sale: renaming a person should
+    /// rename their history. Sales written before the till had staff, and sales
+    /// whose account was later removed, are `None`.
+    pub cashier: Option<String>,
 }
 
 /// One line of a sale, on its way into the database.
@@ -172,7 +178,232 @@ pub const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS payments_sale ON payments (sale_id);
         "#,
     },
+    // Who works here, and who took each sale.
+    //
+    // The id is a UUIDv7 rather than a rowid because this table is the first one
+    // that will be shared between tills: a person is the same person at the
+    // counter and in the back office, and merging two installs must not need a
+    // renumbering. `sales.user_id` is nullable on purpose — sales written before
+    // this migration, and any sale whose cashier row is removed, keep their
+    // amounts and lose only the name.
+    //
+    // `credential` holds a PHC string, never a secret, and `kind` is which
+    // keyboard the lock screen shows. Neither is exposed to the UI.
+    //
+    // `login_attempts` is local wall-clock policy: it must never sync, because a
+    // lockout is about a person standing at *this* counter, and a peer's clock
+    // has no business deciding when this till opens.
+    Migration {
+        version: 5,
+        name: "staff_and_sale_owner",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS users (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL CHECK (length(trim(name)) > 0),
+                role       TEXT NOT NULL CHECK (role IN ('cashier', 'manager', 'owner')),
+                credential TEXT NOT NULL,
+                kind       TEXT NOT NULL CHECK (kind IN ('pin', 'password')),
+                active     INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS users_name ON users (name COLLATE NOCASE);
+
+            -- One owner per install: the recovery code and the currency belong
+            -- to exactly one person.
+            CREATE UNIQUE INDEX IF NOT EXISTS users_one_owner
+                ON users (role) WHERE role = 'owner';
+
+            ALTER TABLE sales ADD COLUMN user_id TEXT REFERENCES users(id);
+
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                user_id      TEXT PRIMARY KEY REFERENCES users(id),
+                failures     INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+                locked_until INTEGER
+            );
+        "#,
+    },
 ];
+
+/// Someone who works the till.
+///
+/// The credential is carried around because the lock screen needs to check it;
+/// nothing renders it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct User {
+    pub id: String,
+    pub name: String,
+    pub role: crate::auth::Role,
+    pub credential: String,
+    pub kind: crate::auth::CredentialKind,
+    pub active: bool,
+}
+
+/// Every account, owner first, then managers, then cashiers.
+///
+/// Switched-off accounts are included: Settings has to list them to switch them
+/// back on, and the lock screen filters them out itself.
+pub fn users(store: &storage::Store) -> Vec<User> {
+    let mut statement = match store.conn().prepare(
+        "SELECT id, name, role, credential, kind, active
+         FROM users
+         ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
+                  name COLLATE NOCASE",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "users prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        let role: String = row.get(2)?;
+        let kind: String = row.get(4)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            role,
+            row.get::<_, String>(3)?,
+            kind,
+            row.get::<_, bool>(5)?,
+        ))
+    });
+
+    let Ok(rows) = rows else {
+        tracing::warn!("users query failed");
+        return Vec::new();
+    };
+
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, name, role, credential, kind, active)| {
+            Some(User {
+                id,
+                name,
+                role: crate::auth::Role::from_key(&role)?,
+                credential,
+                kind: crate::auth::CredentialKind::from_key(&kind)?,
+                active,
+            })
+        })
+        .collect()
+}
+
+/// The owner account, which exists once the till has been set up.
+pub fn owner(store: &storage::Store) -> Option<User> {
+    users(store)
+        .into_iter()
+        .find(|user| user.role == crate::auth::Role::Owner)
+}
+
+/// Add an account and return it, id included.
+pub fn insert_user(
+    store: &storage::Store,
+    name: &str,
+    role: crate::auth::Role,
+    kind: crate::auth::CredentialKind,
+    credential: &str,
+) -> anyhow::Result<User> {
+    let id = uuid::Uuid::now_v7().to_string();
+    store.conn().execute(
+        "INSERT INTO users (id, name, role, credential, kind) VALUES (?1, ?2, ?3, ?4, ?5)",
+        (id.as_str(), name, role.key(), credential, kind.key()),
+    )?;
+
+    Ok(User {
+        id,
+        name: name.to_owned(),
+        role,
+        credential: credential.to_owned(),
+        kind,
+        active: true,
+    })
+}
+
+/// Switch an account on or off. Accounts are never deleted: the sales they took
+/// still name them.
+pub fn set_user_active(store: &storage::Store, id: &str, active: bool) -> anyhow::Result<()> {
+    let changed = store
+        .conn()
+        .execute("UPDATE users SET active = ?2 WHERE id = ?1", (id, active))?;
+    anyhow::ensure!(changed == 1, "that account no longer exists");
+    Ok(())
+}
+
+/// Replace an account's secret. The kind does not change with it.
+pub fn set_user_credential(
+    store: &storage::Store,
+    id: &str,
+    credential: &str,
+) -> anyhow::Result<()> {
+    let changed = store.conn().execute(
+        "UPDATE users SET credential = ?2 WHERE id = ?1",
+        (id, credential),
+    )?;
+    anyhow::ensure!(changed == 1, "that account no longer exists");
+    Ok(())
+}
+
+/// Failures on record for an account, and the second it is locked until.
+pub fn attempts(store: &storage::Store, user_id: &str) -> (u32, Option<i64>) {
+    store
+        .conn()
+        .query_row(
+            "SELECT failures, locked_until FROM login_attempts WHERE user_id = ?1",
+            [user_id],
+            |row| Ok((row.get::<_, i64>(0)? as u32, row.get(1)?)),
+        )
+        .unwrap_or((0, None))
+}
+
+/// Remember a failed attempt and the lock it earned.
+pub fn record_attempt(
+    store: &storage::Store,
+    user_id: &str,
+    failures: u32,
+    locked_until: Option<i64>,
+) {
+    if let Err(err) = store.conn().execute(
+        "INSERT INTO login_attempts (user_id, failures, locked_until) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET failures = excluded.failures,
+                                            locked_until = excluded.locked_until",
+        (user_id, failures as i64, locked_until),
+    ) {
+        // A till that cannot remember failures still lets the right PIN in; it
+        // only loses the throttle, which is better than refusing everyone.
+        tracing::error!(error = %err, user = %user_id, "could not record a failed sign-in");
+    }
+}
+
+/// A correct secret clears the record, so yesterday's mistakes do not count.
+pub fn clear_attempts(store: &storage::Store, user_id: &str) {
+    if let Err(err) = store
+        .conn()
+        .execute("DELETE FROM login_attempts WHERE user_id = ?1", [user_id])
+    {
+        tracing::error!(error = %err, user = %user_id, "could not clear failed sign-ins");
+    }
+}
+
+/// One value from `meta`, or `None` when it has never been set.
+pub fn meta(store: &storage::Store, key: &str) -> Option<String> {
+    store
+        .conn()
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .ok()
+}
+
+/// Write one `meta` value, replacing it if it exists.
+pub fn set_meta(store: &storage::Store, key: &str, value: &str) -> anyhow::Result<()> {
+    store.conn().execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )?;
+    Ok(())
+}
 
 /// The currency this install prices in, or `None` before first-run setup.
 ///
@@ -180,12 +411,7 @@ pub const MIGRATIONS: &[Migration] = &[
 /// opens, and the operator cannot end up selling in a currency the data no
 /// longer recognises.
 pub fn currency(store: &storage::Store) -> Option<money::Currency> {
-    let code: String = store
-        .conn()
-        .query_row("SELECT value FROM meta WHERE key = 'currency'", [], |row| {
-            row.get(0)
-        })
-        .ok()?;
+    let code = meta(store, "currency")?;
 
     let currency = money::tender_from_code(&code);
     if currency.is_none() {
@@ -196,12 +422,7 @@ pub fn currency(store: &storage::Store) -> Option<money::Currency> {
 
 /// Store the install's currency, replacing a previous choice.
 pub fn set_currency(store: &storage::Store, currency: money::Currency) -> anyhow::Result<()> {
-    store.conn().execute(
-        "INSERT INTO meta (key, value) VALUES ('currency', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [currency.code()],
-    )?;
-    Ok(())
+    set_meta(store, "currency", currency.code())
 }
 
 /// Whether this till has recorded a sale.
@@ -354,11 +575,16 @@ pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>)
 /// `rounding_minor` is signed. It exists because the exact total is often not
 /// tenderable — 340 shillings against a 100 shilling coin — and the shop
 /// absorbs the difference rather than refusing the sale.
+///
+/// `user_id` is the cashier the money is attributed to. It is `None` only for a
+/// sale recorded while the till has no staff accounts, which cannot happen once
+/// the owner exists.
 pub fn record_sale(
     store: &storage::Store,
     lines: &[SaleLine],
     rounding_minor: i64,
     tendered_minor: i64,
+    user_id: Option<&str>,
 ) -> anyhow::Result<RecordedSale> {
     anyhow::ensure!(!lines.is_empty(), "a sale needs at least one line");
 
@@ -392,8 +618,8 @@ pub fn record_sale(
     let transaction = store.conn().unchecked_transaction()?;
 
     transaction.execute(
-        "INSERT INTO sales (total_minor, rounding_minor) VALUES (?1, ?2)",
-        (total_minor, rounding_minor),
+        "INSERT INTO sales (total_minor, rounding_minor, user_id) VALUES (?1, ?2, ?3)",
+        (total_minor, rounding_minor, user_id),
     )?;
     let id = transaction.last_insert_rowid();
 
@@ -433,15 +659,18 @@ pub fn record_sale(
 ///
 /// One definition for both screens: the dashboard totals and the transaction
 /// list are the same question asked twice, and they must never disagree about
-/// where "7 days" starts.
-fn range_clause(range: usize) -> Option<&'static str> {
+/// where "7 days" starts. The column is passed in because `sales` joins `users`,
+/// and both tables have a `created_at`.
+fn range_clause(range: usize, column: &str) -> Option<String> {
     match range {
         // `localdate` on purpose: the cashier's "today" is the terminal's day,
         // not UTC. Any other choice moves the day boundary at the wrong hour for
         // half the world, and the till's report disagrees with the drawer.
-        0 => Some("date(created_at, 'localtime') = date('now', 'localtime')"),
-        1 => Some("created_at >= datetime('now', '-7 days')"),
-        2 => Some("created_at >= datetime('now', '-30 days')"),
+        0 => Some(format!(
+            "date({column}, 'localtime') = date('now', 'localtime')"
+        )),
+        1 => Some(format!("{column} >= datetime('now', '-7 days')")),
+        2 => Some(format!("{column} >= datetime('now', '-30 days')")),
         _ => None,
     }
 }
@@ -451,7 +680,7 @@ fn range_clause(range: usize) -> Option<&'static str> {
 /// A failed query yields zeros and a logged warning rather than an error the
 /// shell has to render — the dashboard is a summary, not the source of truth.
 pub fn totals(store: &storage::Store, range: usize) -> (i64, i64) {
-    let sql = match range_clause(range) {
+    let sql = match range_clause(range, "created_at") {
         Some(clause) => format!(
             "SELECT COUNT(*), COALESCE(SUM(total_minor + rounding_minor), 0)
              FROM sales WHERE {clause}"
@@ -476,13 +705,15 @@ pub fn totals(store: &storage::Store, range: usize) -> (i64, i64) {
 
 /// Most recent sales in a range, newest first.
 pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
-    let sql = match range_clause(range) {
+    let sql = match range_clause(range, "s.created_at") {
         Some(clause) => format!(
-            "SELECT id, total_minor + rounding_minor, created_at
-             FROM sales WHERE {clause} ORDER BY id DESC LIMIT ?1"
+            "SELECT s.id, s.total_minor + s.rounding_minor, s.created_at, u.name
+             FROM sales s LEFT JOIN users u ON u.id = s.user_id
+             WHERE {clause} ORDER BY s.id DESC LIMIT ?1"
         ),
-        None => "SELECT id, total_minor + rounding_minor, created_at
-             FROM sales ORDER BY id DESC LIMIT ?1"
+        None => "SELECT s.id, s.total_minor + s.rounding_minor, s.created_at, u.name
+             FROM sales s LEFT JOIN users u ON u.id = s.user_id
+             ORDER BY s.id DESC LIMIT ?1"
             .to_owned(),
     };
 
@@ -499,6 +730,7 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
             id: row.get(0)?,
             paid_minor: row.get(1)?,
             created_at: row.get(2)?,
+            cashier: row.get(3)?,
         })
     });
 
@@ -514,6 +746,7 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{CredentialKind, Role};
     use std::path::PathBuf;
 
     /// A real file, not `:memory:`: the till runs with pragmas that only exist
@@ -718,7 +951,7 @@ mod tests {
         ];
 
         // 2800 + 1000 = 3800 exact; rounded down 20 to the 100 shilling coin.
-        let sale = record_sale(&store, &lines, -20, 4_000).expect("record");
+        let sale = record_sale(&store, &lines, -20, 4_000, None).expect("record");
 
         assert_eq!(sale.total_minor, 3_800, "the exact total is kept exact");
         assert_eq!(sale.paid_minor(), 3_780);
@@ -769,7 +1002,7 @@ mod tests {
         }];
 
         assert!(
-            record_sale(&store, &lines, 0, 2_000).is_err(),
+            record_sale(&store, &lines, 0, 2_000, None).is_err(),
             "2000 does not cover 2800"
         );
 
@@ -789,7 +1022,7 @@ mod tests {
     fn an_empty_cart_is_not_a_sale() {
         let (store, path) = store("empty-cart");
 
-        assert!(record_sale(&store, &[], 0, 0).is_err());
+        assert!(record_sale(&store, &[], 0, 0, None).is_err());
         assert_eq!(totals(&store, 3), (0, 0));
 
         let _ = std::fs::remove_file(path);
@@ -811,6 +1044,7 @@ mod tests {
             }],
             0,
             3_400,
+            None,
         )
         .expect("record");
 
@@ -827,6 +1061,114 @@ mod tests {
         assert_eq!(product_id, None, "the link is cleared, not the history");
         assert_eq!(name, "Flat white");
         assert_eq!(total_minor, 3_400);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_names_the_person_who_took_it() {
+        let (store, path) = store("sale-cashier");
+
+        let owner = insert_user(
+            &store,
+            "Amina",
+            Role::Owner,
+            CredentialKind::Password,
+            "$argon2id$owner",
+        )
+        .expect("owner");
+        let brian = insert_user(
+            &store,
+            "Brian",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$brian",
+        )
+        .expect("cashier");
+
+        // One owner, and one person per name whatever the capitals: the lock
+        // screen is a list of names, and two Amimas would be a way to steal a
+        // shift.
+        assert!(
+            insert_user(
+                &store,
+                "Amina",
+                Role::Owner,
+                CredentialKind::Password,
+                "$argon2id$other"
+            )
+            .is_err()
+        );
+        assert!(
+            insert_user(
+                &store,
+                "brian",
+                Role::Cashier,
+                CredentialKind::Pin,
+                "$argon2id$x"
+            )
+            .is_err()
+        );
+
+        let sale = record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Tea".to_owned(),
+                qty: 1,
+                unit_minor: 500,
+            }],
+            0,
+            500,
+            Some(&brian.id),
+        )
+        .expect("record");
+
+        assert_eq!(sale.paid_minor(), 500);
+        let history = sales(&store, 3, 10);
+        assert_eq!(history[0].cashier.as_deref(), Some("Brian"));
+
+        // Switching somebody off keeps their name on their history: the money
+        // was still taken by that person.
+        set_user_active(&store, &brian.id, false).expect("switch off");
+        assert_eq!(
+            users(&store)
+                .iter()
+                .find(|user| user.id == brian.id)
+                .map(|user| user.active),
+            Some(false)
+        );
+        assert_eq!(sales(&store, 3, 10)[0].cashier.as_deref(), Some("Brian"));
+
+        // Owner first, then managers, then cashiers.
+        assert_eq!(users(&store).first().map(|user| &user.id), Some(&owner.id));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_lockout_survives_the_app_closing() {
+        let (store, path) = store("lockout");
+        let cashier = insert_user(
+            &store,
+            "Brian",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$brian",
+        )
+        .expect("cashier");
+
+        assert_eq!(attempts(&store, &cashier.id), (0, None));
+
+        record_attempt(&store, &cashier.id, 5, Some(1_000));
+        assert_eq!(attempts(&store, &cashier.id), (5, Some(1_000)));
+
+        // A further failure overwrites rather than stacking a second row.
+        record_attempt(&store, &cashier.id, 6, Some(2_000));
+        assert_eq!(attempts(&store, &cashier.id), (6, Some(2_000)));
+
+        clear_attempts(&store, &cashier.id);
+        assert_eq!(attempts(&store, &cashier.id), (0, None));
 
         let _ = std::fs::remove_file(path);
     }

@@ -7,9 +7,11 @@
 //! change, without reaching into widgets.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use money::{Currency, Money};
 use ui_kit::theme::Theme;
+use ui_shell::egui;
 
 use crate::db::{Product, RecordedSale, SaleLine};
 use crate::settings::Settings;
@@ -75,6 +77,121 @@ pub struct Payment {
     /// Put the cursor in the cash field on the first frame.
     pub focus: bool,
 }
+
+/// Who is signed in, and what they are allowed to do.
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub user_id: String,
+    pub name: String,
+    pub role: crate::auth::Role,
+}
+
+/// The lock screen: the person picked, and the secret being typed.
+#[derive(Default)]
+pub struct SignIn {
+    pub user_id: Option<String>,
+    pub secret: String,
+    pub error: Option<String>,
+    /// The second the selected account is locked until, mirrored from the
+    /// database so the screen can count down without querying every frame.
+    pub locked_until: Option<i64>,
+    /// Put the cursor in the secret field on the next frame.
+    pub focus: bool,
+}
+
+/// First-run setup: the one account that can create the others.
+pub struct Setup {
+    pub name: String,
+    pub password: String,
+    pub confirm: String,
+    pub error: Option<String>,
+    /// The recovery code, once the owner exists and until it is acknowledged.
+    /// While this is set the workspace stays hidden.
+    pub code: Option<String>,
+    pub focus: bool,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            password: String::new(),
+            confirm: String::new(),
+            error: None,
+            code: None,
+            focus: true,
+        }
+    }
+}
+
+/// The forgotten-password flow.
+#[derive(Default)]
+pub struct Recovery {
+    pub code: String,
+    pub password: String,
+    pub confirm: String,
+    pub error: Option<String>,
+    /// The replacement code, shown before the way back to the lock screen.
+    pub new_code: Option<String>,
+}
+
+/// An action waiting for someone with more authority to approve it.
+pub struct Override {
+    pub permission: crate::auth::Permission,
+    /// The module to open once approved, when the request came from navigation.
+    pub module: Option<usize>,
+    pub user_id: Option<String>,
+    pub secret: String,
+    pub error: Option<String>,
+    pub focus: bool,
+}
+
+/// The "add a person" form in Settings.
+pub struct StaffDraft {
+    pub name: String,
+    pub pin: String,
+    pub role: crate::auth::Role,
+    pub error: Option<String>,
+}
+
+impl Default for StaffDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            pin: String::new(),
+            role: crate::auth::Role::Cashier,
+            error: None,
+        }
+    }
+}
+
+/// A PIN being replaced for one account. Inline under the staff list: one at a
+/// time, like the delete confirmation on a product row.
+pub struct ResetPin {
+    pub user_id: String,
+    pub pin: String,
+    pub error: Option<String>,
+}
+
+/// The owner changing their own password.
+#[derive(Default)]
+pub struct PasswordDraft {
+    pub password: String,
+    pub confirm: String,
+    pub error: Option<String>,
+}
+
+impl PasswordDraft {
+    pub fn clear(&mut self) {
+        self.password.clear();
+        self.confirm.clear();
+        self.error = None;
+    }
+}
+
+/// How long an approval lasts. Long enough to finish the action that asked for
+/// it, short enough that it cannot be handed to the next person.
+const ELEVATION: Duration = Duration::from_secs(60);
 
 pub struct State {
     pub store: storage::Store,
@@ -143,6 +260,32 @@ pub struct State {
     pub currency_picker: bool,
     /// Why the last currency write failed, shown inside the picker.
     pub currency_error: Option<String>,
+
+    // ---- who is at the till -------------------------------------------------
+    /// Who is signed in. `None` means the lock screen is up.
+    pub session: Option<Session>,
+    /// Every account, re-read after each write. Kept in memory because the lock
+    /// screen needs the list before anyone is signed in, and because it is a
+    /// handful of rows.
+    pub users: Vec<crate::db::User>,
+    /// The lock screen's fields.
+    pub sign_in: SignIn,
+    /// First-run owner setup.
+    pub setup: Setup,
+    /// The forgotten-password flow, when it is open.
+    pub recovery: Option<Recovery>,
+    /// An action waiting for a manager's approval.
+    pub override_request: Option<Override>,
+    /// Until this instant, the person signed in may do what a manager approved.
+    elevated_until: Option<Instant>,
+    /// Last input seen, for the idle lock.
+    last_activity: Instant,
+    /// The "add a person" form in Settings.
+    pub staff: StaffDraft,
+    /// The PIN being reset for one account.
+    pub staff_reset: Option<ResetPin>,
+    /// The owner changing their own password.
+    pub owner_password: PasswordDraft,
 }
 
 impl State {
@@ -158,6 +301,7 @@ impl State {
         let theme = settings.theme();
         let products = crate::db::products(&store);
         let categories = crate::db::categories(&store);
+        let users = crate::db::users(&store);
         Self {
             store,
             cart: Vec::new(),
@@ -183,6 +327,17 @@ impl State {
             needs_currency,
             currency_picker: false,
             currency_error: None,
+            session: None,
+            users,
+            sign_in: SignIn::default(),
+            setup: Setup::default(),
+            recovery: None,
+            override_request: None,
+            elevated_until: None,
+            last_activity: Instant::now(),
+            staff: StaffDraft::default(),
+            staff_reset: None,
+            owner_password: PasswordDraft::default(),
         }
     }
 
@@ -235,6 +390,514 @@ impl State {
             self.prefs_dirty = true;
             self.notice = None;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Who is at the till
+    // -----------------------------------------------------------------------
+
+    /// Whether the workspace is hidden behind the lock screen.
+    ///
+    /// Also true while the one-time recovery code is on screen: the code is
+    /// shown once, and the takings behind it are none of the next person's
+    /// business.
+    pub fn locked(&self) -> bool {
+        self.session.is_none() || self.setup.code.is_some()
+    }
+
+    /// Called once a frame. Locks the till after a stretch with no input.
+    ///
+    /// Idleness is read from input events rather than from a timer started at
+    /// sign-in: a mouse that moves is a person, and a screen nobody has touched
+    /// is not. The clock only runs while someone is signed in.
+    pub fn tick(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| !input.events.is_empty()) {
+            self.last_activity = Instant::now();
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        if self.last_activity.elapsed() >= session.role.idle_timeout() {
+            self.lock();
+        }
+    }
+
+    /// Lock the till now.
+    ///
+    /// The cart survives: the customer is still at the counter, and rebuilding
+    /// the basket would be the real cost of locking. Everything that shows money
+    /// closes.
+    pub fn lock(&mut self) {
+        self.session = None;
+        self.elevated_until = None;
+        self.override_request = None;
+        self.payment = None;
+        self.product_editor = None;
+        self.product_delete = None;
+        self.notice = None;
+        self.sign_in = SignIn::default();
+        self.recovery = None;
+        self.staff_reset = None;
+        self.owner_password.clear();
+    }
+
+    /// Pick a person on the lock screen, and read their lockout.
+    pub fn choose_user(&mut self, user_id: &str) {
+        self.sign_in.user_id = Some(user_id.to_owned());
+        self.sign_in.secret.clear();
+        self.sign_in.error = None;
+        self.sign_in.locked_until = crate::auth::locked_for(&self.store, user_id)
+            .map(|seconds| crate::auth::unix_now() + seconds as i64);
+        self.sign_in.focus = true;
+    }
+
+    /// The selected account, when one is selected and still exists.
+    fn selected_user(&self) -> Option<&crate::db::User> {
+        let id = self.sign_in.user_id.as_deref()?;
+        self.users.iter().find(|user| user.id == id)
+    }
+
+    /// Which keyboard the selected account needs: a PIN pad or a password.
+    pub fn selected_kind(&self) -> Option<crate::auth::CredentialKind> {
+        self.selected_user().map(|user| user.kind)
+    }
+
+    /// Check the secret on the lock screen and open the workspace.
+    pub fn sign_in(&mut self) {
+        let Some(user) = self.selected_user().cloned() else {
+            return;
+        };
+        let secret = self.sign_in.secret.clone();
+
+        match crate::auth::attempt(&self.store, &user, &secret) {
+            Ok(()) => {
+                self.session = Some(Session {
+                    user_id: user.id,
+                    name: user.name,
+                    role: user.role,
+                });
+                self.sign_in = SignIn::default();
+                self.recovery = None;
+                self.last_activity = Instant::now();
+                // The catalog may have moved on since the last shift, and the
+                // shop's own staff are the ones who moved it.
+                self.reload_products();
+            }
+            Err(denied) => {
+                self.sign_in.secret.clear();
+                self.sign_in.focus = true;
+                self.sign_in.error = Some(denied.message(&user));
+                self.sign_in.locked_until = crate::auth::locked_for(&self.store, &user.id)
+                    .map(|seconds| crate::auth::unix_now() + seconds as i64);
+            }
+        }
+    }
+
+    /// Create the owner account on a fresh till.
+    ///
+    /// The recovery code is minted here and shown once. Its hash is stored
+    /// before the screen closes, so a till that loses power between the two
+    /// still has a password and an owner — only the code is lost, and the code
+    /// is the fallback, not the way in.
+    pub fn create_owner(&mut self) {
+        let name = self.setup.name.trim().to_owned();
+        let password = self.setup.password.clone();
+
+        if name.is_empty() {
+            return self.setup_error("The owner needs a name.");
+        }
+        if let Err(message) = crate::auth::CredentialKind::Password.validate(&password) {
+            return self.setup_error(message);
+        }
+        if password != self.setup.confirm {
+            return self.setup_error("The two passwords do not match.");
+        }
+
+        let credential = match crate::auth::hash(&password) {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::error!(error = %error, "hashing the owner password failed");
+                return self.setup_error("Could not store that password. Try again.");
+            }
+        };
+
+        let user = match crate::db::insert_user(
+            &self.store,
+            &name,
+            crate::auth::Role::Owner,
+            crate::auth::CredentialKind::Password,
+            &credential,
+        ) {
+            Ok(user) => user,
+            Err(error) => {
+                tracing::error!(error = %error, "creating the owner failed");
+                return self.setup_error("Could not create the owner account.");
+            }
+        };
+
+        let code = crate::auth::new_recovery_code();
+        if let Err(error) = self.store_recovery_code(&code) {
+            tracing::error!(error = %error, "storing the recovery code failed");
+            return self.setup_error("Could not store the recovery code. Try again.");
+        }
+
+        self.users = crate::db::users(&self.store);
+        self.session = Some(Session {
+            user_id: user.id,
+            name: user.name,
+            role: user.role,
+        });
+        self.setup.password.clear();
+        self.setup.confirm.clear();
+        self.setup.error = None;
+        self.setup.code = Some(code);
+        self.last_activity = Instant::now();
+    }
+
+    /// The operator has written the code down; the workspace can appear.
+    pub fn acknowledge_code(&mut self) {
+        self.setup = Setup::default();
+        self.notice = Some("Till ready. Choose the currency to finish setup.".to_owned());
+    }
+
+    /// Store a hash of a recovery code. The code itself is never written down.
+    fn store_recovery_code(&self, code: &str) -> anyhow::Result<()> {
+        let credential = crate::auth::hash(&crate::auth::normalise_code(code))?;
+        crate::db::set_meta(&self.store, crate::auth::RECOVERY_KEY, &credential)
+    }
+
+    /// Open the forgotten-password flow.
+    pub fn start_recovery(&mut self) {
+        self.sign_in.error = None;
+        self.recovery = Some(Recovery::default());
+    }
+
+    /// Trade the one-time code for a new owner password.
+    ///
+    /// The code is spent: a new one is minted and shown before the screen
+    /// closes, so the piece of paper in the drawer is never valid twice.
+    pub fn recover(&mut self) {
+        let Some(draft) = self.recovery.as_ref() else {
+            return;
+        };
+        let code = crate::auth::normalise_code(&draft.code);
+        let password = draft.password.clone();
+        let confirm = draft.confirm.clone();
+
+        let Some(stored) = crate::db::meta(&self.store, crate::auth::RECOVERY_KEY) else {
+            return self.recovery_error("This till has no recovery code. Use the password.");
+        };
+        if !crate::auth::verify(&code, &stored) {
+            return self.recovery_error("That recovery code is not right.");
+        }
+        if let Err(message) = crate::auth::CredentialKind::Password.validate(&password) {
+            return self.recovery_error(message);
+        }
+        if password != confirm {
+            return self.recovery_error("The two passwords do not match.");
+        }
+
+        let Some(owner) = crate::db::owner(&self.store) else {
+            return self.recovery_error("There is no owner account on this till.");
+        };
+
+        let credential = match crate::auth::hash(&password) {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::error!(error = %error, "hashing the new owner password failed");
+                return self.recovery_error("Could not store that password. Try again.");
+            }
+        };
+        if let Err(error) = crate::db::set_user_credential(&self.store, &owner.id, &credential) {
+            tracing::error!(error = %error, "replacing the owner password failed");
+            return self.recovery_error("Could not store that password. Try again.");
+        }
+        // A recovered account starts with a clean slate: the failures that led
+        // here were about the old password.
+        crate::db::clear_attempts(&self.store, &owner.id);
+
+        let new_code = crate::auth::new_recovery_code();
+        if let Err(error) = self.store_recovery_code(&new_code) {
+            tracing::error!(error = %error, "rotating the recovery code failed");
+            return self.recovery_error("The password changed, but the code did not.");
+        }
+
+        self.users = crate::db::users(&self.store);
+        if let Some(draft) = self.recovery.as_mut() {
+            draft.code.clear();
+            draft.password.clear();
+            draft.confirm.clear();
+            draft.error = None;
+            draft.new_code = Some(new_code);
+        }
+    }
+
+    /// The new code is written down; back to the lock screen.
+    pub fn finish_recovery(&mut self) {
+        self.recovery = None;
+        self.sign_in = SignIn::default();
+        self.sign_in.focus = true;
+    }
+
+    /// Whether the person signed in may do this, in their own right or because a
+    /// manager approved it within the last minute.
+    pub fn permits(&self, permission: crate::auth::Permission) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        if session.role.permits(permission) {
+            return true;
+        }
+        let elevated = self
+            .elevated_until
+            .is_some_and(|until| until > Instant::now());
+        elevated && permission.approvable() && crate::auth::Role::Manager.permits(permission)
+    }
+
+    /// Switch module, asking for approval first when the person cannot open it.
+    ///
+    /// Every route into a module comes through here — the rail, the F-keys and
+    /// the palette — so a permission cannot be enforced on one and forgotten on
+    /// another.
+    pub fn open(&mut self, module: usize, permission: crate::auth::Permission) {
+        if self.permits(permission) {
+            self.select(module);
+        } else {
+            self.ask_override(permission, Some(module));
+        }
+    }
+
+    /// Ask someone with the authority to approve one action.
+    pub fn ask_override(&mut self, permission: crate::auth::Permission, module: Option<usize>) {
+        self.notice = None;
+        self.override_request = Some(Override {
+            permission,
+            module,
+            user_id: None,
+            secret: String::new(),
+            error: None,
+            focus: true,
+        });
+    }
+
+    /// Check the approving person's secret and open the elevation window.
+    pub fn approve_override(&mut self) {
+        let Some(request) = self.override_request.as_ref() else {
+            return;
+        };
+        let permission = request.permission;
+        let module = request.module;
+        let user_id = request.user_id.clone();
+        let secret = request.secret.clone();
+
+        let Some(user) =
+            user_id.and_then(|id| self.users.iter().find(|user| user.id == id).cloned())
+        else {
+            return self.override_error("Choose who is approving.");
+        };
+        if !user.role.permits(permission) {
+            return self.override_error(format!("{} cannot {}.", user.name, permission.action()));
+        }
+
+        match crate::auth::attempt(&self.store, &user, &secret) {
+            Ok(()) => {
+                self.elevated_until = Some(Instant::now() + ELEVATION);
+                self.override_request = None;
+                self.last_activity = Instant::now();
+                self.notice = Some(format!(
+                    "{} approved: {} (one minute).",
+                    user.name,
+                    permission.action()
+                ));
+                if let Some(module) = module {
+                    self.select(module);
+                }
+            }
+            Err(denied) => self.override_error(denied.message(&user)),
+        }
+    }
+
+    /// Add a cashier or manager.
+    pub fn add_staff(&mut self) {
+        let name = self.staff.name.trim().to_owned();
+        let pin = self.staff.pin.clone();
+        let role = self.staff.role;
+
+        if name.is_empty() {
+            return self.staff_error("A person needs a name.");
+        }
+        if role == crate::auth::Role::Owner {
+            return self.staff_error("There is one owner account, created at setup.");
+        }
+        let kind = role.credential_kind();
+        if let Err(message) = kind.validate(&pin) {
+            return self.staff_error(message);
+        }
+        if self
+            .users
+            .iter()
+            .any(|user| user.name.eq_ignore_ascii_case(&name))
+        {
+            return self.staff_error("Someone with that name already works here.");
+        }
+
+        let credential = match crate::auth::hash(&pin) {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::error!(error = %error, "hashing a new PIN failed");
+                return self.staff_error("Could not store that PIN. Try again.");
+            }
+        };
+
+        match crate::db::insert_user(&self.store, &name, role, kind, &credential) {
+            Ok(_) => {
+                self.users = crate::db::users(&self.store);
+                self.staff = StaffDraft::default();
+                self.notice = Some(format!("Added {name}."));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "adding a person failed");
+                self.staff_error("Could not add that person.");
+            }
+        }
+    }
+
+    /// Switch an account on or off. Off means "no longer works here", not
+    /// "deleted": their sales keep their name.
+    pub fn set_staff_active(&mut self, id: &str, active: bool) {
+        match crate::db::set_user_active(&self.store, id, active) {
+            Ok(()) => {
+                self.users = crate::db::users(&self.store);
+                // Nobody switches themselves off, but if a path ever allows it
+                // the till must not stay open under a closed account.
+                if !active
+                    && self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.user_id == id)
+                {
+                    self.lock();
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "switching an account failed");
+                self.notice = Some(format!("Could not change that account: {error}"));
+            }
+        }
+    }
+
+    /// Open the PIN field under one account.
+    pub fn start_reset_pin(&mut self, id: &str) {
+        self.staff_reset = Some(ResetPin {
+            user_id: id.to_owned(),
+            pin: String::new(),
+            error: None,
+        });
+    }
+
+    /// Replace one account's PIN.
+    pub fn save_reset_pin(&mut self) {
+        let Some(draft) = self.staff_reset.as_ref() else {
+            return;
+        };
+        let id = draft.user_id.clone();
+        let pin = draft.pin.clone();
+
+        if let Err(message) = crate::auth::CredentialKind::Pin.validate(&pin) {
+            return self.reset_error(message);
+        }
+
+        let credential = match crate::auth::hash(&pin) {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::error!(error = %error, "hashing a reset PIN failed");
+                return self.reset_error("Could not store that PIN. Try again.");
+            }
+        };
+
+        match crate::db::set_user_credential(&self.store, &id, &credential) {
+            Ok(()) => {
+                // A reset also clears the lockout: the point of the reset is that
+                // the person can get back in.
+                crate::db::clear_attempts(&self.store, &id);
+                self.staff_reset = None;
+                self.users = crate::db::users(&self.store);
+                self.notice = Some("PIN changed.".to_owned());
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "replacing a PIN failed");
+                self.reset_error("Could not store that PIN. Try again.");
+            }
+        }
+    }
+
+    /// The owner changing their own password.
+    ///
+    /// No current-password field: they are already signed in, and asking again
+    /// only teaches people to pick something they can retype from memory.
+    pub fn change_owner_password(&mut self) {
+        let password = self.owner_password.password.clone();
+
+        if let Err(message) = crate::auth::CredentialKind::Password.validate(&password) {
+            return self.owner_password_error(message);
+        }
+        if password != self.owner_password.confirm {
+            return self.owner_password_error("The two passwords do not match.");
+        }
+
+        let Some(owner) = crate::db::owner(&self.store) else {
+            return self.owner_password_error("There is no owner account on this till.");
+        };
+
+        let credential = match crate::auth::hash(&password) {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::error!(error = %error, "hashing the owner password failed");
+                return self.owner_password_error("Could not store that password. Try again.");
+            }
+        };
+
+        match crate::db::set_user_credential(&self.store, &owner.id, &credential) {
+            Ok(()) => {
+                self.users = crate::db::users(&self.store);
+                self.owner_password.clear();
+                self.notice = Some("Owner password changed.".to_owned());
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "replacing the owner password failed");
+                self.owner_password_error("Could not store that password. Try again.");
+            }
+        }
+    }
+
+    fn setup_error(&mut self, message: &str) {
+        self.setup.error = Some(message.to_owned());
+    }
+
+    fn recovery_error(&mut self, message: &str) {
+        if let Some(draft) = self.recovery.as_mut() {
+            draft.error = Some(message.to_owned());
+        }
+    }
+
+    fn override_error(&mut self, message: impl Into<String>) {
+        if let Some(request) = self.override_request.as_mut() {
+            request.error = Some(message.into());
+        }
+    }
+
+    fn staff_error(&mut self, message: &str) {
+        self.staff.error = Some(message.to_owned());
+    }
+
+    fn reset_error(&mut self, message: &str) {
+        if let Some(draft) = self.staff_reset.as_mut() {
+            draft.error = Some(message.to_owned());
+        }
+    }
+
+    fn owner_password_error(&mut self, message: &str) {
+        self.owner_password.error = Some(message.to_owned());
     }
 
     pub fn sidebar_open(&self, module: usize) -> bool {
@@ -449,6 +1112,11 @@ impl State {
         if self.payment.is_some() || self.cart.is_empty() {
             return;
         }
+        // Taking money is its own permission, separate from filling a basket: a
+        // shop can have someone who only ever puts the order together.
+        if !self.permits(crate::auth::Permission::TakePayment) {
+            return self.ask_override(crate::auth::Permission::TakePayment, None);
+        }
         self.notice = None;
         self.payment = Some(Payment {
             tendered: String::new(),
@@ -505,12 +1173,16 @@ impl State {
             &lines,
             self.cart_rounding_minor(),
             tendered_minor,
+            self.session
+                .as_ref()
+                .map(|session| session.user_id.as_str()),
         ) {
             Ok(sale) => {
                 self.cart.clear();
                 if let Some(payment) = self.payment.as_mut() {
                     payment.error = None;
                     payment.done = Some(sale);
+                    payment.focus = true;
                 }
             }
             Err(error) => {
@@ -567,7 +1239,7 @@ pub fn range_caption(range: usize) -> &'static str {
 
 /// Settings sections. Each one is a page that does not exist yet; the list is
 /// real so the sidebar has the right shape from the start.
-pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Tax", "Sync"];
+pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Tax", "Staff", "Sync"];
 
 #[cfg(test)]
 mod tests {
@@ -582,7 +1254,7 @@ mod tests {
         // A cart only ever holds real products — `sale_lines.product_id` is a
         // foreign key — so the first row is the one `line()` points at.
         crate::db::insert_product(&store, "Test item", 100, "Test", None).expect("seed product");
-        let state = State::new(
+        let mut state = State::new(
             store,
             0,
             Vec::new(),
@@ -591,6 +1263,22 @@ mod tests {
             currency,
             false,
         );
+        // Paying needs somebody signed in, because the sale records who took the
+        // money. The secret is never checked on this path, so a placeholder hash
+        // is enough to have a real row for the foreign key.
+        let cashier = crate::db::insert_user(
+            &state.store,
+            "Test cashier",
+            crate::auth::Role::Cashier,
+            crate::auth::CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("seed cashier");
+        state.session = Some(Session {
+            user_id: cashier.id,
+            name: cashier.name,
+            role: cashier.role,
+        });
         (state, path)
     }
 
@@ -673,6 +1361,12 @@ mod tests {
 
         assert!(state.cart.is_empty(), "the till is ready for the next sale");
         assert_eq!(crate::db::totals(&state.store, 3), (1, 1_300));
+        // The sale carries the person, not the shop: a till with three cashiers
+        // has to be able to say which of them took this money.
+        assert_eq!(
+            crate::db::sales(&state.store, 3, 10)[0].cashier.as_deref(),
+            Some("Test cashier")
+        );
 
         let _ = std::fs::remove_file(path);
     }

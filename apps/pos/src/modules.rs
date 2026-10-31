@@ -383,18 +383,20 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.xs);
     }
 
-    let pay = ui.add_sized(
-        [ui.available_width(), 56.0],
-        egui::Button::new(
-            egui::RichText::new("Pay")
-                .size(TYPE.button)
-                .family(theme::semibold())
-                .color(palette.accent_text),
+    let pay = ui
+        .add_sized(
+            [ui.available_width(), 56.0],
+            egui::Button::new(
+                egui::RichText::new("Pay")
+                    .size(TYPE.button)
+                    .family(theme::semibold())
+                    .color(palette.accent_text),
+            )
+            .fill(palette.accent)
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(egui::CornerRadius::same(ui_kit::tokens::RADII.sm as u8)),
         )
-        .fill(palette.accent)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(egui::CornerRadius::same(ui_kit::tokens::RADII.sm as u8)),
-    );
+        .on_hover_text("F12 or Ctrl+Enter");
     if pay.clicked() {
         state.start_payment();
     }
@@ -493,12 +495,13 @@ impl Module for Dashboard {
 
         components::card(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            table_row(ui, "Sale", "When", "Total", true, false);
+            table_row(ui, "Sale", "When", "By", "Total", true, false);
             for (index, sale) in sales.iter().enumerate() {
                 table_row(
                     ui,
                     &format!("#{}", sale.id),
                     &sale.created_at,
+                    sale.cashier.as_deref().unwrap_or("-"),
                     &state.money(sale.paid_minor),
                     false,
                     index % 2 == 1,
@@ -548,7 +551,15 @@ fn kpi(ui: &mut egui::Ui, width: f32, label: &str, value: &str) {
 /// Drawn by rectangle rather than with `Grid` because the amount must sit on the
 /// card's right edge: a left-to-right grid sizes every column to its content, so
 /// a column of totals ends up ragged in the middle of the pane.
-fn table_row(ui: &mut egui::Ui, id: &str, when: &str, amount: &str, header: bool, stripe: bool) {
+fn table_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    when: &str,
+    by: &str,
+    amount: &str,
+    header: bool,
+    stripe: bool,
+) {
     let palette = theme::current(ui.ctx());
     let width = ui.available_width();
     let height = if header { 30.0 } else { ROW_HEIGHT };
@@ -586,12 +597,25 @@ fn table_row(ui: &mut egui::Ui, id: &str, when: &str, amount: &str, header: bool
 
     let middle = painter.layout_no_wrap(
         when.to_owned(),
-        egui::FontId::new(size, proportional),
+        egui::FontId::new(size, proportional.clone()),
         color,
     );
     painter.galley(
         egui::pos2(rect.left() + width * 0.30, y - middle.size().y * 0.5),
         middle,
+        color,
+    );
+
+    // Who took it. Empty on a till that has not been set up with staff yet, and
+    // on sales from before the column existed.
+    let who = painter.layout_no_wrap(
+        by.to_owned(),
+        egui::FontId::new(size, proportional.clone()),
+        color,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + width * 0.55, y - who.size().y * 0.5),
+        who,
         color,
     );
 
@@ -640,6 +664,10 @@ impl Module for Products {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ChangePrice) {
+            return locked_card(ui, crate::auth::Permission::ChangePrice);
+        }
+
         let mut new = false;
         ui.horizontal(|ui| {
             components::section_title(ui, "Catalog");
@@ -923,18 +951,68 @@ pub(crate) fn text_field(
     hint: &str,
     width: f32,
 ) -> egui::Response {
+    field(ui, text, hint, width, false)
+}
+
+/// The same field, with the characters replaced by dots.
+///
+/// A PIN typed at a counter has a queue in front of it. The field still reports
+/// what it holds to the caller; only the screen forgets.
+pub(crate) fn secret_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    field(ui, text, hint, width, true)
+}
+
+fn field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    secret: bool,
+) -> egui::Response {
     let palette = theme::current(ui.ctx());
     ui.scope(|ui| {
         ui.visuals_mut().widgets.inactive.bg_stroke =
             egui::Stroke::new(1.0_f32, egui::Color32::from(palette.border_strong));
+        let edit = egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .margin(egui::Margin::symmetric(12, 12));
         ui.add_sized(
             [width, 44.0],
-            egui::TextEdit::singleline(text)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(12, 12)),
+            if secret { edit.password(true) } else { edit },
         )
     })
     .inner
+}
+
+// ---------------------------------------------------------------------------
+// Who may open what
+// ---------------------------------------------------------------------------
+
+/// The permission a module asks for before it draws.
+///
+/// One table, read by [`open`], by the workspace guard and by the palette, so a
+/// module cannot be reachable from one route and closed from another.
+pub fn permission(index: usize) -> crate::auth::Permission {
+    use crate::auth::Permission;
+
+    match index {
+        // Selling and reading the books are the job. A cashier who cannot see
+        // yesterday's takings cannot answer the customer holding a receipt.
+        SELL | DASHBOARD | SALES => Permission::Sell,
+        PRODUCTS => Permission::ChangePrice,
+        _ => Permission::EditSettings,
+    }
+}
+
+/// Switch module, asking for approval when the person cannot open it.
+pub fn open(state: &mut State, index: usize) {
+    let permission = permission(index);
+    state.open(index, permission);
 }
 
 // ---------------------------------------------------------------------------
@@ -985,12 +1063,13 @@ impl Module for Sales {
             .show(ui, |ui| {
                 components::card(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    table_row(ui, "Sale", "When", "Total", true, false);
+                    table_row(ui, "Sale", "When", "By", "Total", true, false);
                     for (index, sale) in sales.iter().enumerate() {
                         table_row(
                             ui,
                             &format!("#{}", sale.id),
                             &sale.created_at,
+                            sale.cashier.as_deref().unwrap_or("-"),
                             &state.money(sale.paid_minor),
                             false,
                             index % 2 == 1,
@@ -1030,53 +1109,69 @@ impl Module for Settings {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::section_title(ui, "Appearance");
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            components::caption(
-                ui,
-                "Light is the default: a till sits under shop lighting and is read from \
-                 the customer's side of the counter. Dark suits a dim back office.",
-            );
-            ui.add_space(SPACING.md);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = SPACING.sm;
-                if components::choice_card(
-                    ui,
-                    Icon::SUN,
-                    theme::Theme::Light.label(),
-                    state.theme == theme::Theme::Light,
-                    132.0,
-                )
-                .clicked()
-                {
-                    state.set_theme(theme::Theme::Light);
-                }
-                if components::choice_card(
-                    ui,
-                    Icon::MOON,
-                    theme::Theme::Dark.label(),
-                    state.theme == theme::Theme::Dark,
-                    132.0,
-                )
-                .clicked()
-                {
-                    state.set_theme(theme::Theme::Dark);
-                }
-            });
-        });
+        if !state.permits(crate::auth::Permission::EditSettings) {
+            return locked_card(ui, crate::auth::Permission::EditSettings);
+        }
 
         let section = state::SETTINGS_SECTIONS
             .get(state.settings_section)
             .copied()
             .unwrap_or("Terminal");
 
-        ui.add_space(SPACING.lg);
+        // Appearance belongs to the terminal, not to the shop: it is a property
+        // of the screen in front of the person. On Staff or Sync it would be an
+        // unrelated card at the top of an unrelated page.
+        if section == "Terminal" {
+            components::section_title(ui, "Appearance");
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                components::caption(
+                    ui,
+                    "Light is the default: a till sits under shop lighting and is read from \
+                     the customer's side of the counter. Dark suits a dim back office.",
+                );
+                ui.add_space(SPACING.md);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACING.sm;
+                    if components::choice_card(
+                        ui,
+                        Icon::SUN,
+                        theme::Theme::Light.label(),
+                        state.theme == theme::Theme::Light,
+                        132.0,
+                    )
+                    .clicked()
+                    {
+                        state.set_theme(theme::Theme::Light);
+                    }
+                    if components::choice_card(
+                        ui,
+                        Icon::MOON,
+                        theme::Theme::Dark.label(),
+                        state.theme == theme::Theme::Dark,
+                        132.0,
+                    )
+                    .clicked()
+                    {
+                        state.set_theme(theme::Theme::Dark);
+                    }
+                });
+            });
+            ui.add_space(SPACING.lg);
+        }
+
         components::section_title(ui, section);
 
         match section {
             "Receipt" => receipt_preview(ui, state),
             "Terminal" => terminal_card(ui, state),
+            "Staff" => {
+                if state.permits(crate::auth::Permission::ManageUsers) {
+                    crate::auth::staff_card(ui, state);
+                } else {
+                    locked_card(ui, crate::auth::Permission::ManageUsers);
+                }
+            }
             "Tax" => components::empty_state_card(
                 ui,
                 "No tax rules",
@@ -1091,6 +1186,23 @@ impl Module for Settings {
             ),
         }
     }
+}
+
+/// What a module shows when the person cannot open it.
+///
+/// The module stays on the rail so the cashier can see it exists and ask for it,
+/// rather than finding out from a colleague that the screen is missing.
+fn locked_card(ui: &mut egui::Ui, permission: crate::auth::Permission) {
+    components::section_title(ui, "Not allowed");
+    components::empty_state_card(
+        ui,
+        "Ask a manager",
+        &format!(
+            "Your account cannot {}. A manager or the owner can approve it for one minute.",
+            permission.action()
+        ),
+        220.0,
+    );
 }
 
 /// The terminal's identity, in the same card language as the rest of the app.
@@ -1122,10 +1234,16 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
         } else {
             components::caption(ui, "No sales yet, so the currency can still change.");
             ui.add_space(SPACING.sm);
-            if ui.button("Change currency").clicked() {
-                // A failed attempt from last time is not about this one.
-                state.currency_error = None;
-                state.currency_picker = true;
+            // The currency is the owner's: it decides what every stored number
+            // means, and a manager borrowing that for a minute is not a thing.
+            if state.permits(crate::auth::Permission::ChangeCurrency) {
+                if ui.button("Change currency").clicked() {
+                    // A failed attempt from last time is not about this one.
+                    state.currency_error = None;
+                    state.currency_picker = true;
+                }
+            } else {
+                components::caption(ui, "Only the owner can change it.");
             }
         }
     });

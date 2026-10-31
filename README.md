@@ -6,6 +6,10 @@ machine.
 
 ## What it does
 
+**Sign in** — the till opens on a list of the people who work here: pick your
+name and type your PIN. Nobody reaches the takings without one, and every sale
+is signed by the person who took the money.
+
 **Sell** — search the product grid, tap items into the cart, change quantities,
 and watch the total. Pay takes the cash, shows the change, and writes the sale:
 the receipt lines, the payment, and the drawer's takings in one go.
@@ -23,8 +27,34 @@ category, give it a barcode. Everything here becomes a key on the Sell screen.
 
 **Sales** — every completed sale in the chosen range, newest first.
 
-**Settings** — light or dark appearance, a preview of the receipt layout, and
-places for tax rules and terminal sync that are not filled in yet.
+**Settings** — light or dark appearance, a preview of the receipt layout, the
+staff list, and places for tax rules and terminal sync that are not filled in
+yet.
+
+## Who can do what
+
+Three roles, and a till that asks for the person rather than a username.
+
+| | Cashier | Manager | Owner |
+|---|---|---|---|
+| Sell and take payment | yes | yes | yes |
+| Lock the till | yes | yes | yes |
+| Void, refund, discount, change a price, open the drawer without a sale, edit settings | — | yes | yes |
+| Add staff, switch an account off, reset a PIN, change the currency | — | — | yes |
+
+The owner account is the back office. An owner who also works the counter should
+have a second record as a cashier or manager: that is the account the shop sees
+on the receipts, and it is the one handed over at the end of a shift without
+giving out the owner's password.
+
+A cashier who needs something above their role asks for it on the spot: the till
+asks a manager (or the owner) to approve that one action for a minute, and the
+sale stays in the cashier's name. Nobody has to log out and back in.
+
+Cashiers and managers sign in with a six-digit PIN; the owner uses a password of
+at least twelve characters. Five wrong tries lock the account for thirty
+seconds, doubling with each further try up to fifteen minutes. The till locks
+itself after five idle minutes (fifteen for the owner), and `Ctrl+L` locks it now.
 
 ## Keyboard
 
@@ -32,6 +62,7 @@ places for tax rules and terminal sync that are not filled in yet.
 |---|---|
 | `F1` … `F5` | switch between the five sections |
 | `Ctrl+Enter` | take payment for the cart |
+| `Ctrl+L` | lock the till |
 | `Ctrl+P` | command palette — jump anywhere by name |
 | `Ctrl+B` | show or hide the sidebar |
 | `Ctrl+T` | light / dark |
@@ -45,17 +76,24 @@ Everything lives in one file on this computer:
 ```
 
 To back up the shop, close the app and copy that file. To start over with an
-empty till, delete it. Nothing is sent anywhere.
+empty till, delete it — that takes the staff list with it, and the next launch
+sets the till up from scratch. Nothing is sent anywhere.
+
+PINs and passwords are stored in that file as hashes, never in the clear. The
+first launch shows a one-time recovery code: write it down and keep it away from
+the till. It is the only way back in if the owner's password is lost, and it
+stops working the moment it has been used once.
 
 ## Status
 
-This is an early build. You can sell: build a cart, take the cash, and the sale
-is recorded and shows up on the Dashboard and in Sales.
+This is an early build. You can sign in, sell, and lock the till: build a cart,
+take the cash, and the sale is recorded with the name of whoever took it, on the
+Dashboard and in Sales.
 
 - payments are cash only — mobile money and cards come later
 - the catalogue is entered by hand; importing a supplier's list comes later
 - receipts can be previewed but not printed
-- there is no staff sign-in yet, so the drawer has no name on it
+- void, refund and discount have permissions but no screen yet
 - each till runs alone; there is no sync between terminals yet
 
 ## Running it

@@ -8,12 +8,14 @@
 //! | `db.rs`       | schema and the few reads the shell needs           |
 //! | `state.rs`    | everything the UI can change, in one struct        |
 //! | `modules.rs`  | the five modules and their sidebar/workspace       |
+//! | `auth.rs`     | staff, PINs, the lock screen, approvals            |
 //! | `checkout.rs` | the payment modal: cash in, change out             |
 //! | `commands.rs` | the command palette's contents                     |
 //! | `prefs.rs`    | window/UI habits, persisted across restarts        |
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
+mod auth;
 mod checkout;
 mod commands;
 mod currencies;
