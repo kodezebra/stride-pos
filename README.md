@@ -13,7 +13,8 @@ connected yet.
 **Dashboard** — takings, number of sales, and the latest transactions for today,
 the last 7 days, the last 30 days, or all time.
 
-**Products** — the catalogue of what you sell. Still being built.
+**Products** — the catalogue of what you sell: add a product, edit its price or
+category, give it a barcode. Everything here becomes a key on the Sell screen.
 
 **Sales** — every completed sale in the chosen range, newest first.
 
@@ -47,7 +48,7 @@ cannot be completed yet. The app says so on screen rather than pretending
 otherwise:
 
 - payments are not connected — Pay explains this
-- the product grid shows sample items until a catalogue can be imported
+- the catalogue is entered by hand; importing a supplier's list comes later
 - receipts can be previewed but not printed
 - each till runs alone; there is no sync between terminals yet
 

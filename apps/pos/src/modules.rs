@@ -20,6 +20,7 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
+use crate::db::Product;
 use crate::state::{self, State};
 
 // Indices into `all()`. Order is the activity-bar order and the persisted value,
@@ -89,7 +90,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
 // Sell
 // ---------------------------------------------------------------------------
 
-/// The till: quick keys on the left, the cart on the right.
+/// The till: the catalog on the left, the cart on the right.
 struct Sell;
 
 impl Module for Sell {
@@ -112,12 +113,7 @@ impl Module for Sell {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::section_title(ui, "Categories");
-        for (index, category) in state::CATEGORIES.iter().enumerate() {
-            if regions::nav_item(ui, state.category == index, category).clicked() {
-                state.category = index;
-            }
-        }
+        categories_sidebar(ui, state);
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -166,15 +162,49 @@ impl Sell {
     fn grid(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::field_label(ui, "Scan or search");
         ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.search, "Barcode");
+        components::search_field(ui, &mut state.search, "Name or barcode");
         ui.add_space(SPACING.md);
 
+        // A till with an empty catalog is not a bug in the grid: it is a shop
+        // that has not entered its products yet. Point at the screen that fixes
+        // it instead of showing an empty grid with no explanation.
+        if state.products.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No products yet",
+                "Add the shop's first product and it appears here as a key.",
+                200.0,
+            );
+            ui.add_space(SPACING.sm);
+            ui.vertical_centered(|ui| {
+                if components::primary_button(ui, "Add a product").clicked() {
+                    // Straight into the form: an empty catalog is a dead end
+                    // otherwise, and the operator has already said what they want.
+                    state.select(PRODUCTS);
+                    state.start_product();
+                }
+            });
+            return;
+        }
+
         let needle = state.search.trim().to_lowercase();
-        let keys: Vec<(&'static str, i64)> = state::QUICK_KEYS
+        let visible: Vec<usize> = state
+            .products
             .iter()
-            .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(&needle))
-            .copied()
+            .enumerate()
+            .filter(|(_, product)| matches(product, state.category.as_deref(), &needle))
+            .map(|(index, _)| index)
             .collect();
+
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or pick another category.",
+                160.0,
+            );
+            return;
+        }
 
         // Tile by rectangle, not by wrapping. The column count is arithmetic on
         // the panel width, so a product keeps its place as the window resizes and
@@ -189,12 +219,16 @@ impl Sell {
             TILE_HEIGHT,
         );
 
+        // The click is recorded and applied after the loop: `state.products` is
+        // borrowed for the whole grid, so the cart cannot be touched inside it.
+        let mut clicked = None;
         egui::ScrollArea::vertical()
-            .id_salt("sell_quick_keys")
+            .id_salt("sell_grid")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let area = ui.available_rect_before_wrap();
-                for (index, (name, unit_minor)) in keys.iter().enumerate() {
+                for (index, &product_index) in visible.iter().enumerate() {
+                    let product = &state.products[product_index];
                     let column = (index % columns) as f32;
                     let row = (index / columns) as f32;
                     let min = egui::pos2(
@@ -202,23 +236,28 @@ impl Sell {
                         area.top() + row * (cell.y + gap),
                     );
                     let rect = egui::Rect::from_min_size(min, cell);
-                    let price = state.money(*unit_minor);
+                    let price = state.money(product.price_minor);
                     let tile = components::Tile {
-                        name,
+                        name: &product.name,
                         price: &price,
                     };
                     if ui.put(rect, tile).clicked() {
-                        state.add_to_cart(name, *unit_minor);
+                        clicked = Some(product_index);
                     }
                 }
 
-                let rows = keys.len().div_ceil(columns);
+                let rows = visible.len().div_ceil(columns);
                 let height = rows as f32 * cell.y + rows.saturating_sub(1) as f32 * gap;
                 ui.advance_cursor_after_rect(egui::Rect::from_min_size(
                     area.min,
                     egui::vec2(area.width(), height),
                 ));
             });
+
+        if let Some(index) = clicked {
+            let product = state.products[index].clone();
+            state.add_to_cart(&product);
+        }
     }
 }
 
@@ -252,7 +291,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
         components::empty_state_fill(
             &mut child,
             "Cart is empty",
-            "Scan an item or use a quick key.",
+            "Scan an item or tap a product.",
         );
         ui.advance_cursor_after_rect(rect);
     } else {
@@ -574,12 +613,7 @@ impl Module for Products {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::section_title(ui, "Categories");
-        for (index, category) in state::CATEGORIES.iter().enumerate() {
-            if regions::nav_item(ui, state.category == index, category).clicked() {
-                state.category = index;
-            }
-        }
+        categories_sidebar(ui, state);
 
         ui.add_space(SPACING.lg);
         components::field_label(ui, "Search");
@@ -587,19 +621,296 @@ impl Module for Products {
         components::search_field(ui, &mut state.search, "Name or barcode");
     }
 
-    fn workspace(&mut self, ui: &mut egui::Ui, _state: &mut State) {
-        components::section_title(ui, "Catalog");
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let mut new = false;
+        ui.horizontal(|ui| {
+            components::section_title(ui, "Catalog");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::primary_button(ui, "New product").clicked() {
+                    new = true;
+                }
+            });
+        });
+        if new {
+            state.start_product();
+        }
 
-        // There is no `products` table yet: the Sell grid is still the
-        // placeholder list in `state::QUICK_KEYS`. Saying that plainly is
-        // better than an empty table that looks like a query returning nothing.
-        components::empty_state_card(
-            ui,
-            "No catalog yet",
-            "Products are not stored yet; the Sell grid is placeholder data.",
-            240.0,
-        );
+        if state.products.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No products yet",
+                "Add the first product. Products become keys on the Sell screen.",
+                200.0,
+            );
+            return;
+        }
+
+        let needle = state.search.trim().to_lowercase();
+        let visible: Vec<usize> = state
+            .products
+            .iter()
+            .enumerate()
+            .filter(|(_, product)| matches(product, state.category.as_deref(), &needle))
+            .map(|(index, _)| index)
+            .collect();
+
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or pick another category.",
+                160.0,
+            );
+            return;
+        }
+
+        let mut action = None;
+        egui::ScrollArea::vertical()
+            .id_salt("products_rows")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                components::card(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    product_header(ui);
+                    for &product_index in &visible {
+                        let product = &state.products[product_index];
+                        let deleting = state.product_delete == Some(product.id);
+                        if let Some(row_action) = product_row(ui, product, state, deleting) {
+                            action = Some(row_action);
+                        }
+                    }
+                });
+            });
+
+        match action {
+            Some(ProductAction::Edit(id)) => {
+                if let Some(product) = state.products.iter().find(|product| product.id == id) {
+                    let product = product.clone();
+                    state.edit_product(&product);
+                }
+            }
+            Some(ProductAction::AskDelete(id)) => state.product_delete = Some(id),
+            Some(ProductAction::Delete(id)) => state.delete_product(id),
+            Some(ProductAction::CancelDelete) => state.product_delete = None,
+            None => {}
+        }
     }
+}
+
+/// Which category both Sell and Products are filtered to.
+///
+/// One function, so the two sidebars cannot offer different filters over the
+/// same grid.
+fn categories_sidebar(ui: &mut egui::Ui, state: &mut State) {
+    components::section_title(ui, "Categories");
+    if regions::nav_item(ui, state.category.is_none(), "All").clicked() {
+        state.category = None;
+    }
+
+    // Cloned because the click mutates `state.category` while the list is being
+    // drawn from `state.categories`; both are fields of the same struct.
+    let categories = state.categories.clone();
+    for category in &categories {
+        let selected = state.category.as_deref() == Some(category.as_str());
+        if regions::nav_item(ui, selected, category).clicked() {
+            state.category = Some(category.clone());
+        }
+    }
+}
+
+/// Whether a product passes the category and search filters.
+fn matches(product: &Product, category: Option<&str>, needle: &str) -> bool {
+    let in_category = category.is_none_or(|selected| product.category == selected);
+    let in_search = needle.is_empty()
+        || product.name.to_lowercase().contains(needle)
+        || product
+            .barcode
+            .as_deref()
+            .is_some_and(|barcode| barcode.to_lowercase().contains(needle));
+    in_category && in_search
+}
+
+enum ProductAction {
+    Edit(i64),
+    AskDelete(i64),
+    Delete(i64),
+    CancelDelete,
+}
+
+fn product_header(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        components::table_header(ui, "Product");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            components::table_header(ui, "Price");
+        });
+    });
+    components::divider(ui);
+}
+
+/// One product: name and category on the left, price and actions on the right.
+///
+/// The row returns what was clicked instead of mutating the state, because the
+/// caller is iterating `state.products` and cannot borrow it mutably yet.
+fn product_row(
+    ui: &mut egui::Ui,
+    product: &Product,
+    state: &State,
+    deleting: bool,
+) -> Option<ProductAction> {
+    let mut action = None;
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(52.0);
+        ui.vertical(|ui| {
+            ui.label(components::semibold(&product.name).size(TYPE.body));
+            let mut detail = product.category.clone();
+            if let Some(barcode) = &product.barcode {
+                detail.push_str(" · ");
+                detail.push_str(barcode);
+            }
+            components::caption(ui, &detail);
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(components::numeric(state.money(product.price_minor)).size(TYPE.body));
+
+            if deleting {
+                if ui.small_button("Delete").clicked() {
+                    action = Some(ProductAction::Delete(product.id));
+                }
+                if ui.small_button("Cancel").clicked() {
+                    action = Some(ProductAction::CancelDelete);
+                }
+                components::caption(ui, "Remove this product?");
+            } else {
+                if ui.small_button("Delete").clicked() {
+                    action = Some(ProductAction::AskDelete(product.id));
+                }
+                if ui.small_button("Edit").clicked() {
+                    action = Some(ProductAction::Edit(product.id));
+                }
+            }
+        });
+    });
+    components::divider(ui);
+
+    action
+}
+
+/// The add/edit form, as a modal drawn by the shell.
+///
+/// A modal rather than a card above the list: the catalog is a list you click
+/// through, and a form pinned above it gets pushed off screen at the narrow end
+/// of the window — and, worse, is silently replaced when the operator clicks
+/// New product or another row's Edit, losing whatever was typed. A modal makes
+/// "one product at a time" explicit and Cancel always means the same thing.
+///
+/// Called from `shell` after the frame, like the currency picker, so the
+/// backdrop covers the screen and the list behind it cannot be clicked.
+pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
+    let currency = state.currency;
+    let Some(draft) = state.product_editor.as_mut() else {
+        return;
+    };
+
+    let mut save = false;
+    let mut cancel = false;
+
+    egui::Modal::new(egui::Id::new("pos_product_editor")).show(ctx, |ui| {
+        ui.set_width(460.0);
+
+        let heading = if draft.id.is_some() {
+            "Edit product"
+        } else {
+            "New product"
+        };
+        ui.label(components::semibold(heading).size(TYPE.heading));
+        components::caption(
+            ui,
+            "The price is stored exactly as entered. The till rounds cash at payment.",
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Name");
+        ui.add_space(SPACING.xs);
+        components::search_field(ui, &mut draft.name, "Espresso");
+
+        // Price and category share a row because the modal has the width for
+        // it; the barcode gets its own, since it is scanned rather than typed.
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+
+            ui.vertical(|ui| {
+                components::field_label(ui, &format!("Price ({})", currency.code()));
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.price, "0", 150.0);
+            });
+
+            ui.vertical(|ui| {
+                components::field_label(ui, "Category");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.category, "General", 200.0);
+            });
+        });
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Barcode (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.barcode, "Scanned or typed", 350.0);
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Save").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    // Keyboard, because this form is typed into: Enter saves from any field and
+    // Escape leaves without saving, which is what the buttons do.
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        save = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+
+    // Applied outside the borrow of `state.product_editor`: saving reads the
+    // catalog and writes the store, which needs the whole state.
+    if save {
+        state.save_product();
+    }
+    if cancel {
+        state.product_editor = None;
+    }
+}
+
+/// A single-line field at a fixed width, matching the height of `search_field`.
+fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) {
+    let palette = theme::current(ui.ctx());
+    ui.scope(|ui| {
+        ui.visuals_mut().widgets.inactive.bg_stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from(palette.border_strong));
+        ui.add_sized(
+            [width, 44.0],
+            egui::TextEdit::singleline(text)
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(12, 12)),
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------

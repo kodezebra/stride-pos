@@ -27,13 +27,13 @@ Needs a display (X11 or Wayland).
 ```
 apps/pos/src/
   main.rs       wiring only: open db → migrate → settings → state → shell
-  db.rs         schema, migrations, the reads the shell needs
+  db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
   modules.rs    Sell / Dashboard / Products / Sales / Settings
   commands.rs   the Ctrl+P palette
   prefs.rs      active module + sidebar visibility
   settings.rs   terminal settings (appearance; tax and printer later)
-  shell.rs      rail, sidebar, workspace, status bar
+  shell.rs      rail, sidebar, workspace, status bar, the modals
 crates/         reserved for product-internal crates
 ```
 
@@ -57,6 +57,7 @@ The five shared crates come from `stride-libs` at a pinned `rev` in
 
 ## State
 
-Sell's product grid is a placeholder (`QUICK_KEYS` in `state.rs`), and Pay says
-so rather than faking a sale. Dashboard and Sales read the `sales` table, which
-stays empty until the sale flow writes to it. Settings sections are stubs.
+Sell's grid reads the `products` table, which Products writes; there is no
+sample data. Pay says a sale cannot be completed rather than faking one.
+Dashboard and Sales read the `sales` table, which stays empty until the sale
+flow writes to it. Settings sections are stubs.

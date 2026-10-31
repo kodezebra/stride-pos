@@ -12,6 +12,21 @@ pub struct Sale {
     pub created_at: String,
 }
 
+/// One thing the shop sells, as the catalog stores it.
+///
+/// `price_minor` is in the till's currency, like every other amount: there is no
+/// second unit and nothing to convert at checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Product {
+    pub id: i64,
+    pub name: String,
+    pub price_minor: i64,
+    pub category: String,
+    /// Optional, and unique when present: two products claiming one barcode is
+    /// a scanning bug rather than a preference.
+    pub barcode: Option<String>,
+}
+
 /// Owner stamp in the SQLite header. Arbitrary, permanent, and never derived
 /// from the app's name — a rename must not orphan a till's database.
 pub const APPLICATION_ID: i64 = 1_836_624_513;
@@ -45,6 +60,33 @@ pub const MIGRATIONS: &[Migration] = &[
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+        "#,
+    },
+    // The catalog. `category` is free text rather than a second table: a shop
+    // with forty products needs a grouping, not a taxonomy, and a category row
+    // nothing references is one more thing to keep consistent.
+    //
+    // The price is an integer count of minor units in the till's currency — the
+    // same rule as `sales.total_minor`. A price is not rounded to the cash step
+    // when it is stored: the exact price is what the receipt and the ledger
+    // record, and only the cash tender rounds.
+    Migration {
+        version: 3,
+        name: "create_products",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS products (
+                id          INTEGER PRIMARY KEY,
+                name        TEXT    NOT NULL CHECK (length(name) > 0),
+                price_minor INTEGER NOT NULL CHECK (price_minor >= 0),
+                category    TEXT    NOT NULL CHECK (length(category) > 0),
+                barcode     TEXT,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS products_barcode
+                ON products (barcode) WHERE barcode IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS products_name ON products (name);
         "#,
     },
 ];
@@ -90,6 +132,132 @@ pub fn has_sales(store: &storage::Store) -> bool {
             row.get::<_, bool>(0)
         })
         // A query that cannot answer must not unlock the setting.
+        .unwrap_or(true)
+}
+
+/// Every product, by name.
+///
+/// The list is small enough to keep in memory and filter there, which is why
+/// the search box does not run a query per keystroke. A catalog big enough to
+/// change that is a catalog that needs the query, and that is the moment to
+/// move the filter into SQL.
+pub fn products(store: &storage::Store) -> Vec<Product> {
+    let mut statement = match store.conn().prepare(
+        "SELECT id, name, price_minor, category, barcode
+         FROM products ORDER BY name COLLATE NOCASE",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "products prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(Product {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            price_minor: row.get(2)?,
+            category: row.get(3)?,
+            barcode: row.get(4)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "products query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// The categories in use, so the sidebar lists the shop's groups rather than a
+/// list the app invented.
+pub fn categories(store: &storage::Store) -> Vec<String> {
+    let mut statement = match store
+        .conn()
+        .prepare("SELECT DISTINCT category FROM products ORDER BY category COLLATE NOCASE")
+    {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "categories prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| row.get::<_, String>(0));
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "categories query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Add a product and return its id.
+pub fn insert_product(
+    store: &storage::Store,
+    name: &str,
+    price_minor: i64,
+    category: &str,
+    barcode: Option<&str>,
+) -> anyhow::Result<i64> {
+    store.conn().execute(
+        "INSERT INTO products (name, price_minor, category, barcode)
+         VALUES (?1, ?2, ?3, ?4)",
+        (name, price_minor, category, barcode),
+    )?;
+    Ok(store.conn().last_insert_rowid())
+}
+
+/// Replace a product's editable fields.
+///
+/// Returns an error when the row is gone: the list on screen is a cache, and
+/// "Saved" over a product that no longer exists is a lie the operator would
+/// only discover on the next restart.
+pub fn update_product(
+    store: &storage::Store,
+    id: i64,
+    name: &str,
+    price_minor: i64,
+    category: &str,
+    barcode: Option<&str>,
+) -> anyhow::Result<()> {
+    let changed = store.conn().execute(
+        "UPDATE products
+         SET name = ?2, price_minor = ?3, category = ?4, barcode = ?5
+         WHERE id = ?1",
+        (id, name, price_minor, category, barcode),
+    )?;
+    anyhow::ensure!(changed == 1, "product {id} is no longer in the catalog");
+    Ok(())
+}
+
+/// Remove a product.
+///
+/// Sales do not reference this row: a completed sale keeps the name and price
+/// it was sold at, so deleting a product never rewrites a receipt.
+pub fn delete_product(store: &storage::Store, id: i64) -> anyhow::Result<()> {
+    store
+        .conn()
+        .execute("DELETE FROM products WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Whether a barcode already belongs to a product other than `except`.
+///
+/// Checked before the write so the operator gets "that barcode is taken"
+/// instead of a constraint error. The unique index still enforces it.
+pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>) -> bool {
+    store
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM products WHERE barcode = ?1 AND id IS NOT ?2)",
+            (barcode, except),
+            |row| row.get::<_, bool>(0),
+        )
         .unwrap_or(true)
 }
 
@@ -270,6 +438,88 @@ mod tests {
 
         assert_eq!(totals(&store, 0), (0, 0));
         assert!(sales(&store, 3, 5).is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn products_round_trip_and_stay_sorted_by_name() {
+        let (store, path) = store("products");
+
+        assert!(products(&store).is_empty(), "a fresh till has no catalog");
+        assert!(categories(&store).is_empty());
+
+        let flat_white =
+            insert_product(&store, "Flat white", 3_400, "Coffee", None).expect("insert");
+        insert_product(&store, "Croissant", 3_200, "Bakery", Some("4001")).expect("insert");
+        insert_product(&store, "Espresso", 2_800, "Coffee", None).expect("insert");
+
+        let names: Vec<String> = products(&store)
+            .into_iter()
+            .map(|product| product.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["Croissant", "Espresso", "Flat white"],
+            "the list is by name, not by insertion order"
+        );
+        assert_eq!(categories(&store), ["Bakery", "Coffee"]);
+
+        update_product(
+            &store,
+            flat_white,
+            "Flat white",
+            3_600,
+            "Coffee",
+            Some("4002"),
+        )
+        .expect("update");
+        let updated = products(&store)
+            .into_iter()
+            .find(|product| product.id == flat_white)
+            .expect("the product survived the update");
+        assert_eq!(updated.price_minor, 3_600);
+        assert_eq!(updated.barcode.as_deref(), Some("4002"));
+
+        delete_product(&store, flat_white).expect("delete");
+        assert_eq!(products(&store).len(), 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_barcode_belongs_to_one_product() {
+        let (store, path) = store("barcodes");
+        let espresso =
+            insert_product(&store, "Espresso", 2_800, "Coffee", Some("4001")).expect("insert");
+
+        assert!(barcode_taken(&store, "4001", None));
+        assert!(
+            !barcode_taken(&store, "4001", Some(espresso)),
+            "a product keeps its own barcode when it is edited"
+        );
+        assert!(!barcode_taken(&store, "4002", None));
+
+        assert!(
+            insert_product(&store, "Croissant", 3_200, "Bakery", Some("4001")).is_err(),
+            "the unique index is the real guard, not the pre-check"
+        );
+
+        // Products without a barcode are not competing for one.
+        insert_product(&store, "Filter", 2_600, "Coffee", None).expect("insert");
+        insert_product(&store, "Lemonade", 3_000, "Cold", None).expect("insert");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_database_refuses_a_negative_price() {
+        let (store, path) = store("negative-price");
+
+        assert!(
+            insert_product(&store, "Refund", -100, "Coffee", None).is_err(),
+            "a price is a non-negative amount; the CHECK is the guard"
+        );
 
         let _ = std::fs::remove_file(path);
     }

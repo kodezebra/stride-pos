@@ -87,6 +87,10 @@ impl PosShell {
             self.palette.show(ui.ctx(), &self.commands, &mut self.state);
         }
         self.currency_picker(ui.ctx());
+        // The product form is owned by the Products module but drawn here, with
+        // the rest of the foreground: a modal inside a module's workspace would
+        // be clipped to that panel and could not dim the list behind it.
+        crate::modules::product_editor_modal(ui.ctx(), &mut self.state);
         self.persist();
     }
 
