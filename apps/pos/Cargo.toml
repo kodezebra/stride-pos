@@ -1,0 +1,19 @@
+[package]
+name = "pos"
+version.workspace = true
+edition.workspace = true
+description = "Stride POS - point of sale desktop app"
+
+[dependencies]
+anyhow.workspace = true
+app-boot.workspace = true
+config.workspace = true
+money.workspace = true
+storage.workspace = true
+ui-kit = { workspace = true, features = ["widgets", "icons"] }
+ui-shell.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

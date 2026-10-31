@@ -1,0 +1,6 @@
+# Tracks the installed stable channel rather than a frozen version, so this
+# file documents intent without forcing a toolchain download on a machine that
+# already has stable. Replace "stable" with "1.99.0" once CI needs bit-exact
+# reproducibility.
+[toolchain]
+channel = "stable"

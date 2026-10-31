@@ -1,0 +1,69 @@
+# Stride POS workspace root.
+#
+# A virtual manifest: the app lives in apps/pos. crates/ is reserved for
+# product-internal crates later. Shared plumbing comes from stride-libs at a
+# pinned revision — never a tag, never a branch.
+
+[workspace]
+resolver = "3"
+# `crates/*` joins this list when the first product-internal crate lands; Cargo
+# errors on a glob that matches nothing, so the directory stays empty for now.
+members = ["apps/pos"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# ---- shared crates -------------------------------------------------------
+# Pinned to one exact stride-libs commit. Move every line together; see
+# stride-libs/AGENTS.md, "How a shared change reaches the products".
+ui-kit = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+ui-shell = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+storage = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+config = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+app-boot = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+money = { git = "https://github.com/kodezebra/stride-libs", rev = "0c6a5f22d8413cad7587aee2f1b3a1e941e0e28f" }
+
+# ---- third-party ---------------------------------------------------------
+# Versions are pinned to what is already cached in ~/.cargo/registry, so a
+# clean build here needs no network. See docs/architecture.md ("Dependencies
+# and offline builds") before bumping any of these.
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+clap = { version = "4.6.7", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+directories = "6.0.0"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+# `default-features = false` on purpose: eframe's defaults switched from glow to
+# wgpu in 0.36, so relying on them would silently swap the rendering backend.
+# `accesskit` is also left off: egui-winit 0.36 needs accesskit 0.24, which is
+# not in the offline registry. Re-enable both together, with a deliberate fetch.
+eframe = { version = "0.36.2", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "links",
+    "wayland",
+    "x11",
+] }
+egui = "0.36.2"
+# SVG rendering for icon sets; `egui-lucide` bakes icon paths as SVG.
+egui_extras = { version = "0.36.2", features = ["svg"] }
+egui-lucide = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Release builds are for shipping a single binary per app, so favour size and
+# runtime speed over compile time.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
