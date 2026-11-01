@@ -11,6 +11,10 @@ pub struct Sale {
     pub id: i64,
     /// What the customer actually paid: the exact total plus cash rounding.
     pub paid_minor: i64,
+    /// Rendered in the till's local time, minute precision (`01/11 09:15`):
+    /// the stored value stays UTC and the query translates and trims. A
+    /// cashier reading the list wants "when the sale happened" at a glance,
+    /// not the database's epoch count.
     pub created_at: String,
     /// The account that took the money, by name.
     ///
@@ -707,11 +711,11 @@ pub fn totals(store: &storage::Store, range: usize) -> (i64, i64) {
 pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
     let sql = match range_clause(range, "s.created_at") {
         Some(clause) => format!(
-            "SELECT s.id, s.total_minor + s.rounding_minor, s.created_at, u.name
+            "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
              FROM sales s LEFT JOIN users u ON u.id = s.user_id
              WHERE {clause} ORDER BY s.id DESC LIMIT ?1"
         ),
-        None => "SELECT s.id, s.total_minor + s.rounding_minor, s.created_at, u.name
+        None => "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
              FROM sales s LEFT JOIN users u ON u.id = s.user_id
              ORDER BY s.id DESC LIMIT ?1"
             .to_owned(),
@@ -738,6 +742,202 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
         Ok(rows) => rows.filter_map(Result::ok).collect(),
         Err(err) => {
             tracing::warn!(error = %err, "sales query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// One line of a sale, as recorded at the time.
+pub struct DetailLine {
+    /// The name on the receipt. The catalog may have moved on since.
+    pub name: String,
+    /// Units sold. Always at least one; respected rather than implied.
+    pub qty: i64,
+    /// Per-unit price in minor units, as charged.
+    pub unit_minor: i64,
+    /// `qty * unit` as recorded, not recomputed: the sale is the record of
+    /// what was charged, and recomputing would only invite disagreement.
+    pub total_minor: i64,
+}
+
+/// The whole record of one sale: its lines, its money, and who took it.
+///
+/// The list answers "how much came in"; this answers "what exactly was for
+/// that" — the receipt a customer might come back about, or the discrepancy an
+/// owner is looking for at the end of a shift.
+///
+/// Problems `IO`: today the till pays cash only, so `method` is always cash.
+/// Payments are already summed in Rust (not `SUM` in SQL) because a split
+/// payment — part cash, part something else one day — must read honestly, and
+/// each row's method tells the story; a combined string handles both.
+pub struct SaleDetail {
+    pub id: i64,
+    pub cashier: Option<String>,
+    /// Local time, like the list shows: the stored value stays UTC.
+    pub created_at: String,
+    /// The pre-rounding amount.
+    pub total_minor: i64,
+    /// Cash rounding on top of `total` — `0` most of the time, and what the
+    /// customer paid above the exact total otherwise.
+    pub rounding_minor: i64,
+    /// `total + rounding`: what actually entered the drawer for this sale.
+    pub paid_minor: i64,
+    /// " + "-joined payment methods. One sale; one day, "cash + mobile".
+    pub method: String,
+    /// What was handed over, summed across payments. Cash only today.
+    pub tendered_minor: i64,
+    /// What went back, summed across payments.
+    pub change_minor: i64,
+    pub lines: Vec<DetailLine>,
+}
+
+/// The full record of one sale, or `None` when the id points nowhere. Rows are
+/// never edited — a wrong checkout is a new sale — so the head and its lines
+/// always describe one recorded transaction, not a moving target.
+pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
+    let conn = store.conn();
+
+    let head = match conn.query_row(
+        "SELECT s.total_minor, s.rounding_minor, strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name
+         FROM sales s LEFT JOIN users u ON u.id = s.user_id
+         WHERE s.id = ?1",
+        [id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    ) {
+        Ok(head) => head,
+        Err(err) => {
+            tracing::warn!(error = %err, sale = id, "sale detail not found");
+            return None;
+        }
+    };
+
+    let lines = {
+        let mut statement = match conn
+            .prepare("SELECT name, qty, unit_minor, total_minor FROM sale_lines WHERE sale_id = ?1")
+        {
+            Ok(statement) => statement,
+            Err(err) => {
+                tracing::warn!(error = %err, "sale lines prepare failed");
+                return None;
+            }
+        };
+        let rows = statement.query_map([id], |row| {
+            Ok(DetailLine {
+                name: row.get(0)?,
+                qty: row.get(1)?,
+                unit_minor: row.get(2)?,
+                total_minor: row.get(3)?,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "sale lines query failed");
+                Vec::new()
+            }
+        }
+    };
+
+    // Payments are summed in Rust rather than `SUM`-ed in SQL because a sale
+    // settled across two methods must show both, not one pile. Today the till
+    // writes one cash row per sale, so the loop runs once and is ready for the
+    // day a second method lands.
+    let mut method_parts = Vec::new();
+    let mut tendered_minor = 0;
+    let mut change_minor = 0;
+    if let Ok(mut statement) =
+        conn.prepare("SELECT method, tendered_minor, change_minor FROM payments WHERE sale_id = ?1")
+    {
+        if let Ok(rows) = statement.query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            for payment in rows.filter_map(Result::ok) {
+                method_parts.push(payment.0);
+                tendered_minor += payment.1;
+                change_minor += payment.2;
+            }
+        }
+    } else {
+        tracing::warn!("payments prepare failed");
+    };
+
+    Some(SaleDetail {
+        id,
+        cashier: head.3,
+        created_at: head.2,
+        total_minor: head.0,
+        rounding_minor: head.1,
+        paid_minor: head.0 + head.1,
+        method: if method_parts.is_empty() {
+            "-".to_owned()
+        } else {
+            method_parts.join(" + ")
+        },
+        tendered_minor,
+        change_minor,
+        lines,
+    })
+}
+
+/// Revenue and sale count per person, for the range — the end-of-shift view.
+///
+/// Revenue is what the drawer took, `total + rounding`, the same figure the
+/// list shows per sale. The name is joined not copied, so a renamed person's
+/// history renames with them; "system" sales that predate staff, and sales
+/// whose account was removed, land in one unpromising row under `-`.
+pub struct PersonTotal {
+    pub name: String,
+    pub sales: i64,
+    pub revenue: i64,
+}
+
+pub fn by_person(store: &storage::Store, range: usize) -> Vec<PersonTotal> {
+    let sql = match range_clause(range, "s.created_at") {
+        Some(clause) => format!(
+            "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
+             FROM sales s LEFT JOIN users u ON u.id = s.user_id
+             WHERE {clause}
+             GROUP BY s.user_id
+             ORDER BY 3 DESC"
+        ),
+        None => "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
+             FROM sales s LEFT JOIN users u ON u.id = s.user_id
+             GROUP BY s.user_id
+             ORDER BY 3 DESC"
+            .to_owned(),
+    };
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "by person prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(PersonTotal {
+            name: row.get(0)?,
+            sales: row.get(1)?,
+            revenue: row.get(2)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "by person query failed");
             Vec::new()
         }
     }
@@ -1169,6 +1369,199 @@ mod tests {
 
         clear_attempts(&store, &cashier.id);
         assert_eq!(attempts(&store, &cashier.id), (0, None));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_detail_reads_back_its_receipt() {
+        let (store, path) = store("sale-detail");
+        let brian = insert_user(
+            &store,
+            "Brian",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$brian",
+        )
+        .expect("cashier");
+
+        let sale = record_sale(
+            &store,
+            &[
+                SaleLine {
+                    product_id: None,
+                    name: "Sugar 1kg".to_owned(),
+                    qty: 2,
+                    unit_minor: 8000,
+                },
+                SaleLine {
+                    product_id: None,
+                    name: "Tea".to_owned(),
+                    qty: 1,
+                    unit_minor: 500,
+                },
+            ],
+            // Total is 16 500; UGX coins end in 100, so the till rounds up 100.
+            100,
+            16_600,
+            Some(&brian.id),
+        )
+        .expect("record");
+
+        let detail = sale_detail(&store, sale.id).expect("detail");
+        assert_eq!(detail.total_minor, 16_500);
+        assert_eq!(detail.rounding_minor, 100);
+        assert_eq!(detail.paid_minor, 16_600);
+        assert_eq!(detail.cashier.as_deref(), Some("Brian"));
+        assert_eq!(detail.tendered_minor, 16_600);
+        assert_eq!(detail.change_minor, 0);
+        assert_eq!(detail.method, "cash");
+
+        assert_eq!(detail.lines.len(), 2);
+        assert_eq!(detail.lines[0].name, "Sugar 1kg");
+        assert_eq!(detail.lines[0].qty, 2);
+        assert_eq!(detail.lines[0].unit_minor, 8000);
+        assert_eq!(detail.lines[0].total_minor, 16_000);
+        assert_eq!(detail.lines[1].name, "Tea");
+        assert_eq!(detail.lines[1].total_minor, 500);
+
+        // An id that points nowhere reads as nothing, not as an empty record
+        // pretending to be sale 99.
+        assert!(sale_detail(&store, 999_999).is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_change_returns_in_the_sale_detail() {
+        let (store, path) = store("sale-change");
+
+        let sale = record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Tea".to_owned(),
+                qty: 1,
+                unit_minor: 500,
+            }],
+            0,
+            1_000,
+            None,
+        )
+        .expect("record");
+
+        let detail = sale_detail(&store, sale.id).expect("detail");
+        assert_eq!(detail.tendered_minor, 1_000);
+        assert_eq!(detail.change_minor, 500);
+        // A sale written before the till had staff still opens: the receipt is
+        // the record, and "someone" is honest enough for its header.
+        assert_eq!(detail.cashier, None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_shift_totals_reach_the_person_who_took_the_money() {
+        let (store, path) = store("by-person");
+        let brian = insert_user(
+            &store,
+            "Brian",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$brian",
+        )
+        .expect("cashier");
+        let amina = insert_user(
+            &store,
+            "Amina",
+            Role::Owner,
+            CredentialKind::Password,
+            "$argon2id$amina",
+        )
+        .expect("owner");
+
+        // Brian, two sales: 5 000 exact and 340 with rounding up 60 — the
+        // UGX-denomination case that made this column worth having.
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Tea".to_owned(),
+                qty: 1,
+                unit_minor: 5_000,
+            }],
+            0,
+            5_000,
+            Some(&brian.id),
+        )
+        .expect("record");
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Sugar".to_owned(),
+                qty: 1,
+                unit_minor: 340,
+            }],
+            60,
+            400,
+            Some(&brian.id),
+        )
+        .expect("record");
+        // Amina, one sale, before staff existed this would land under "-".
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Rice".to_owned(),
+                qty: 1,
+                unit_minor: 12_000,
+            }],
+            0,
+            12_000,
+            Some(&amina.id),
+        )
+        .expect("record");
+
+        let people = by_person(&store, 3);
+        // Ordered by revenue, not by count: Amina takes fewer, bigger sales.
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].name, "Amina");
+        assert_eq!(people[0].sales, 1);
+        assert_eq!(people[0].revenue, 12_000);
+        assert_eq!(people[1].name, "Brian");
+        assert_eq!(people[1].sales, 2);
+        assert_eq!(
+            people[1].revenue, 5_400,
+            "5 000 exact plus 400 that the drawer took for a 340 sale"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_that_predates_staff_totals_under_a_dash() {
+        let (store, path) = store("by-person-dash");
+
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Tea".to_owned(),
+                qty: 1,
+                unit_minor: 500,
+            }],
+            0,
+            500,
+            None,
+        )
+        .expect("record");
+
+        let people = by_person(&store, 3);
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].name, "-");
+        assert_eq!(people[0].sales, 1);
+        assert_eq!(people[0].revenue, 500);
 
         let _ = std::fs::remove_file(path);
     }

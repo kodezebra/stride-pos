@@ -497,12 +497,47 @@ impl Module for Dashboard {
             ui.set_min_width(ui.available_width());
             table_row(ui, "Sale", "When", "By", "Total", true, false);
             for (index, sale) in sales.iter().enumerate() {
-                table_row(
+                if table_row(
                     ui,
                     &format!("#{}", sale.id),
                     &sale.created_at,
                     sale.cashier.as_deref().unwrap_or("-"),
                     &state.money(sale.paid_minor),
+                    false,
+                    index % 2 == 1,
+                )
+                .clicked()
+                {
+                    state.open_sale(sale.id);
+                }
+            }
+        });
+
+        // End-of-shift is not about the shop: it is about who took what. The
+        // summary follows the range on the sidebar, so "today" already asks
+        // the question the owner came to answer.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "By person");
+        let people = crate::db::by_person(&state.store, state.range);
+        if people.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No sales yet in this range",
+                "Whoever takes the money shows up here, with their share.",
+                160.0,
+            );
+            return;
+        }
+
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            person_row(ui, "Person", "Sales", "Total", true, false);
+            for (index, person) in people.iter().enumerate() {
+                person_row(
+                    ui,
+                    &person.name,
+                    &person.sales.to_string(),
+                    &state.money(person.revenue),
                     false,
                     index % 2 == 1,
                 );
@@ -551,6 +586,11 @@ fn kpi(ui: &mut egui::Ui, width: f32, label: &str, value: &str) {
 /// Drawn by rectangle rather than with `Grid` because the amount must sit on the
 /// card's right edge: a left-to-right grid sizes every column to its content, so
 /// a column of totals ends up ragged in the middle of the pane.
+/// One row of a sales table: sale number, when, by whom, and the amount paid.
+///
+/// Data rows answer clicks, which is what makes a sale worth talking about:
+/// a list can only abbreviate, and the reverberating truth — lines, tender
+/// and change — lives one tap away in the detail modal.
 fn table_row(
     ui: &mut egui::Ui,
     id: &str,
@@ -559,11 +599,16 @@ fn table_row(
     amount: &str,
     header: bool,
     stripe: bool,
-) {
+) -> egui::Response {
     let palette = theme::current(ui.ctx());
     let width = ui.available_width();
     let height = if header { 30.0 } else { ROW_HEIGHT };
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let sense = if header {
+        egui::Sense::hover()
+    } else {
+        egui::Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), sense);
 
     let painter = ui.painter();
     if stripe {
@@ -572,6 +617,16 @@ fn table_row(
             egui::CornerRadius::ZERO,
             egui::Color32::from(palette.surface_alt),
         );
+    }
+    // The hover highlight replaces the stripe rather than layering on it, so
+    // a row being reached for reads the same on even and odd rows.
+    if response.hovered() {
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from(palette.surface),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
     let color = if header {
@@ -633,8 +688,87 @@ fn table_row(
             egui::Stroke::new(1.0_f32, palette.border),
         );
     }
+
+    response
 }
 
+/// One row of the per-person totals: who, how many sales, and the money.
+///
+/// Kept beside `table_row` rather than bending its four columns to three,
+/// because nothing here lines up: the middle cell is a count, not a time.
+fn person_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    count: &str,
+    amount: &str,
+    header: bool,
+    stripe: bool,
+) {
+    let palette = theme::current(ui.ctx());
+    let width = ui.available_width();
+    let height = if header { 30.0 } else { ROW_HEIGHT };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+    let painter = ui.painter();
+    if stripe {
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from(palette.surface_alt),
+        );
+    }
+
+    let color = if header {
+        egui::Color32::from(palette.text_muted)
+    } else {
+        egui::Color32::from(palette.text)
+    };
+    let size = if header { TYPE.small } else { TYPE.body };
+    let proportional = if header {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let mono = theme::numeric();
+    let y = rect.center().y;
+
+    let left = painter.layout_no_wrap(
+        name.to_owned(),
+        egui::FontId::new(size, proportional),
+        color,
+    );
+    painter.galley(
+        egui::pos2(rect.left(), y - left.size().y * 0.5),
+        left,
+        color,
+    );
+
+    let middle = painter.layout_no_wrap(
+        count.to_owned(),
+        egui::FontId::new(size, mono.clone()),
+        color,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + width * 0.45, y - middle.size().y * 0.5),
+        middle,
+        color,
+    );
+
+    let right = painter.layout_no_wrap(amount.to_owned(), egui::FontId::new(size, mono), color);
+    painter.galley(
+        egui::pos2(rect.right() - right.size().x, y - right.size().y * 0.5),
+        right,
+        color,
+    );
+
+    if header {
+        painter.hline(
+            rect.x_range(),
+            rect.max.y,
+            egui::Stroke::new(1.0_f32, palette.border),
+        );
+    }
+}
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
@@ -669,16 +803,23 @@ impl Module for Products {
         }
 
         let mut new = false;
+        let mut import = false;
         ui.horizontal(|ui| {
             components::section_title(ui, "Catalog");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if components::primary_button(ui, "New product").clicked() {
                     new = true;
                 }
+                if ui.button("Import CSV").clicked() {
+                    import = true;
+                }
             });
         });
         if new {
             state.start_product();
+        }
+        if import {
+            state.start_import();
         }
 
         if state.products.is_empty() {
@@ -855,6 +996,13 @@ fn product_row(
 /// backdrop covers the screen and the list behind it cannot be clicked.
 pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
+    // Suggested category names, computed before the form is borrowed for
+    // editing: the list comes from the catalog read-only, the chips are filled
+    // into the draft being edited.
+    let suggestions: Vec<String> = match state.product_editor.as_ref() {
+        Some(draft) => crate::state::category_suggestions(&state.categories, &draft.category),
+        None => Vec::new(),
+    };
     let Some(draft) = state.product_editor.as_mut() else {
         return;
     };
@@ -900,6 +1048,25 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             });
         });
 
+        // Category names the till knows, tapped instead of typed: the
+        // catalog's own first, then a starter set for a shop that has not
+        // named its shelves yet. Typos are why this exists — "Drinks" and
+        // "drinks" must not become two filters because they were typed twice.
+        if !suggestions.is_empty() {
+            ui.add_space(SPACING.sm);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+                for name in &suggestions {
+                    if name.eq_ignore_ascii_case(draft.category.trim()) {
+                        continue;
+                    }
+                    if ui.add(egui::Button::new(name.clone()).small()).clicked() {
+                        draft.category = name.clone();
+                    }
+                }
+            });
+        }
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Barcode (optional)");
         ui.add_space(SPACING.xs);
@@ -941,6 +1108,168 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     }
     if cancel {
         state.product_editor = None;
+    }
+}
+
+/// The CSV import, drawn with the other foreground layers in `shell.rs`.
+///
+/// The path is typed rather than picked from a dialog: importing is a one-time
+/// setup job for the owner, not a daily flow, and a file-dialog dependency is
+/// not worth what it costs a till this small. The modal closes on a successful
+/// import and stays open on anything the till could not read, with the reason
+/// it could not.
+pub fn import_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(draft) = state.import.as_mut() else {
+        return;
+    };
+
+    let mut import = false;
+    let mut cancel = false;
+
+    egui::Modal::new(egui::Id::new("pos_import")).show(ctx, |ui| {
+        ui.set_width(460.0);
+
+        ui.label(components::semibold("Import products from CSV").size(TYPE.heading));
+        components::caption(
+            ui,
+            "Rows are read as name, category, price and an optional barcode. Headings \
+             are honoured when present, so a file from the shop's spreadsheet works as is; \
+             prices are read in this till's currency.",
+        );
+        components::caption(
+            ui,
+            "Rows that cannot be read are skipped and counted, never half-imported.",
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "File path");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.path, "/home/shop/products.csv", 350.0);
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Import").clicked() {
+                import = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    // Keyboard, matching the product form: Enter runs the import and Escape
+    // leaves without touching the catalog.
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        import = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+
+    if import {
+        state.import_products();
+    }
+    if cancel {
+        state.import = None;
+    }
+}
+
+/// The sale detail, drawn with the other foreground layers in `shell.rs`.
+///
+/// The receipt behind a list row. Every figure on it is what was recorded at
+/// the time — `unit × qty` as charged, the rounding the customer actually
+/// paid — because a customer conversation starts from "this is what the till
+/// says", not from a re-derivation that can disagree with the ledger.
+pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(detail) = state.sale_open.as_ref() else {
+        return;
+    };
+
+    let mut close = false;
+
+    egui::Modal::new(egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
+        ui.set_width(460.0);
+
+        ui.label(components::semibold(format!("Sale #{}", detail.id)).size(TYPE.heading));
+        components::caption(
+            ui,
+            &format!(
+                "By {} — {}",
+                detail.cashier.as_deref().unwrap_or("-"),
+                detail.created_at
+            ),
+        );
+
+        ui.add_space(SPACING.md);
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if detail.lines.is_empty() {
+                components::caption(ui, "No line items were recorded on this sale.");
+                return;
+            }
+            for line in &detail.lines {
+                // A paper receipt prints "4 × Sugar @ USh 500"; a single item
+                // needs neither count nor unit, so the label is just the name.
+                let label = if line.qty == 1 {
+                    line.name.clone()
+                } else {
+                    format!(
+                        "{} × {} @ {}",
+                        line.qty,
+                        line.name,
+                        state.money(line.unit_minor)
+                    )
+                };
+                components::receipt_line(ui, &label, &state.money(line.total_minor));
+            }
+        });
+
+        ui.add_space(SPACING.md);
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            components::receipt_line(ui, "Total", &state.money(detail.total_minor));
+            if detail.rounding_minor != 0 {
+                components::receipt_line(ui, "Cash rounding", &state.money(detail.rounding_minor));
+            }
+            // "Paid" is the answer the owner is after: total plus rounding,
+            // the figure that entered the drawer.
+            crate::modules::amount_row(ui, "Paid", &state.money(detail.paid_minor), true);
+
+            ui.add_space(SPACING.sm);
+            components::receipt_line(ui, "Method", &detail.method);
+            if detail.tendered_minor != 0 {
+                components::receipt_line(
+                    ui,
+                    "Tendered (cash)",
+                    &state.money(detail.tendered_minor),
+                );
+            }
+            if detail.change_minor != 0 {
+                components::receipt_line(ui, "Change", &state.money(detail.change_minor));
+            }
+        });
+
+        ui.add_space(SPACING.md);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if components::primary_button(ui, "Close").clicked() {
+                close = true;
+            }
+        });
+    });
+
+    // Escape, because an owner checking sale after sale keeps one hand on the
+    // keyboard and the list one keypress away.
+    if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        state.close_sale();
     }
 }
 
@@ -1065,7 +1394,7 @@ impl Module for Sales {
                     ui.set_min_width(ui.available_width());
                     table_row(ui, "Sale", "When", "By", "Total", true, false);
                     for (index, sale) in sales.iter().enumerate() {
-                        table_row(
+                        if table_row(
                             ui,
                             &format!("#{}", sale.id),
                             &sale.created_at,
@@ -1073,7 +1402,11 @@ impl Module for Sales {
                             &state.money(sale.paid_minor),
                             false,
                             index % 2 == 1,
-                        );
+                        )
+                        .clicked()
+                        {
+                            state.open_sale(sale.id);
+                        }
                     }
                 });
             });

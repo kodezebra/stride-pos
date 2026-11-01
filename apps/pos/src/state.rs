@@ -63,6 +63,66 @@ impl ProductDraft {
     }
 }
 
+/// Category names offered in the product form even when the catalog is empty.
+///
+/// They are a sketch of a grocery until, not a schema: suggestions the owner
+/// can tap instead of typing "Drniks" twice. Nothing is written to the
+/// database until a product actually uses one, so a shop that names its own
+/// shelves simply outgrows the list — and a till whose catalog is untouched
+/// still filters on nothing, exactly as before.
+pub const STARTER_CATEGORIES: &[&str] = &[
+    "Grains, Rice & Flours",
+    "Spices, Masalas & Seasonings",
+    "Tea, Coffee & Cocoa",
+    "Pasta, Oils & Sauces",
+    "Fresh Milk & Yogurt",
+    "Bakery & Breads",
+    "Fresh Produce",
+    "Soft Drinks & Water",
+    "Snacks & Sweets",
+    "Laundry & Cleaning",
+    "Personal Hygiene",
+    "Loose / Weighed Items",
+    "Services & Digital",
+];
+
+/// Suggested names for the product form's category field: what the catalog
+/// already uses first, then the starter list. Case is ignored when
+/// de-duplicating, because "Drinks" and "drinks" are meant to be one category
+/// and must not advertise themselves as two. `current` is left out — a chip
+/// for the name already in the field is noise.
+pub fn category_suggestions(categories: &[String], current: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let current = current.trim();
+
+    for source in categories
+        .iter()
+        .map(String::as_str)
+        .chain(STARTER_CATEGORIES.iter().copied())
+    {
+        if names.iter().any(|name| name.eq_ignore_ascii_case(source)) {
+            continue;
+        }
+        if source.eq_ignore_ascii_case(current) {
+            continue;
+        }
+        names.push(source.to_owned());
+    }
+
+    names
+}
+
+/// The CSV import, open as a modal over the app.
+///
+/// The path is typed or pasted rather than picked from a dialog: importing is
+/// a one-time setup job for the owner, and a file-dialog dependency is not
+/// worth what it costs a till this small. Rows that cannot be read are
+/// skipped and counted; the summary line is the receipt for the import.
+pub struct ImportDraft {
+    pub path: String,
+    pub error: Option<String>,
+}
+
 /// The payment screen, open as a modal over the app.
 ///
 /// Cash received is text, for the same reason a price is: it is mid-edit, and
@@ -232,12 +292,18 @@ pub struct State {
     pub categories: Vec<String>,
     /// The product form, when it is open.
     pub product_editor: Option<ProductDraft>,
+    /// The CSV import modal, when it is open.
+    pub import: Option<ImportDraft>,
     /// A product the operator asked to delete, waiting for confirmation. Inline
     /// in the row rather than a modal: the row is where the mistake would be.
     pub product_delete: Option<i64>,
 
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
+
+    /// The sale the operator tapped in a list, read in full for the detail
+    /// modal. `None` while every list is just a list.
+    pub sale_open: Option<crate::db::SaleDetail>,
 
     /// One-line feedback for an action that has no flow behind it yet. Cleared
     /// by the next action, so it never turns into a permanent lie in the UI.
@@ -324,8 +390,10 @@ impl State {
             products,
             categories,
             product_editor: None,
+            import: None,
             product_delete: None,
             payment: None,
+            sale_open: None,
             notice: None,
             settings,
             settings_path,
@@ -1018,9 +1086,14 @@ impl State {
         if name.is_empty() {
             return self.editor_error("A product needs a name.");
         }
-        if category.is_empty() {
-            return self.editor_error("A product needs a category.");
-        }
+        // An unnamed category is not worth an error: a product whose shelf has
+        // no name yet still sells, so it lands in the default one instead of
+        // stopping the save.
+        let category = if category.is_empty() {
+            "General".to_owned()
+        } else {
+            category
+        };
 
         let price_minor = match Money::parse(&price_text, self.currency) {
             Ok(price) if price.minor() >= 0 => price.minor(),
@@ -1087,6 +1160,114 @@ impl State {
         if let Some(draft) = self.product_editor.as_mut() {
             draft.error = Some(message.into());
         }
+    }
+
+    /// Add products from a CSV file, as listed in the import draft.
+    ///
+    /// Everything the parser accepts is written; anything else — a row the
+    /// file spells wrongly, a barcode another product already uses — is
+    /// skipped and counted. One bad line must not stop the other hundreds,
+    /// and a partial import is honest as long as the summary says what it is:
+    /// the modal closes on what landed, and the counts name what did not.
+    pub fn import_products(&mut self) {
+        let Some(path) = self
+            .import
+            .as_ref()
+            .map(|draft| draft.path.trim().to_owned())
+        else {
+            return;
+        };
+
+        if path.is_empty() {
+            return self.import_error("Type or paste the file's path first.");
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(error = %error, "reading a CSV import failed");
+                return self.import_error(format!(
+                    "Could not read {path}. Check the path and try again."
+                ));
+            }
+        };
+
+        let (rows, errors) = crate::import::parse(&text, self.currency);
+        let mut added = 0;
+        let mut skipped = errors.len();
+
+        for row in rows {
+            if row
+                .barcode
+                .as_deref()
+                .is_some_and(|code| crate::db::barcode_taken(&self.store, code, None))
+            {
+                skipped += 1;
+                continue;
+            }
+            if let Err(error) = crate::db::insert_product(
+                &self.store,
+                &row.name,
+                row.price_minor,
+                &row.category,
+                row.barcode.as_deref(),
+            ) {
+                // The catalog's own rejects count like the file's: a row the
+                // till cannot take does not stop the others.
+                tracing::warn!(error = %error, "a CSV row could not be saved");
+                skipped += 1;
+            } else {
+                added += 1;
+            }
+        }
+
+        if added == 0 {
+            let message = match errors.first() {
+                Some(error) => format!("Nothing was imported. {error}"),
+                None => "Nothing was imported: the file has no products in it.".to_owned(),
+            };
+            return self.import_error(message);
+        }
+
+        let noun = if added == 1 { "product" } else { "products" };
+        let summary = if skipped == 0 {
+            format!("Imported {added} {noun}.")
+        } else {
+            format!("Imported {added} {noun}, skipped {skipped}.")
+        };
+        self.import = None;
+        self.reload_products();
+        self.notice = Some(summary);
+    }
+
+    fn import_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.import.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    /// Open the CSV import modal with a fresh draft.
+    pub fn start_import(&mut self) {
+        self.import = Some(ImportDraft {
+            path: String::new(),
+            error: None,
+        });
+    }
+
+    /// Read one sale's full record for the detail modal.
+    ///
+    /// The list abbreviates by design; this is the answer to "what was in
+    /// sale 4?". An id that points nowhere is logged and ignored — a row can
+    /// only be clicked while it is on screen, so nothing to show is not an
+    /// operator-visible error.
+    pub fn open_sale(&mut self, id: i64) {
+        match crate::db::sale_detail(&self.store, id) {
+            Some(detail) => self.sale_open = Some(detail),
+            None => tracing::warn!(sale = id, "a clicked sale could not be read"),
+        }
+    }
+
+    pub fn close_sale(&mut self) {
+        self.sale_open = None;
     }
 
     pub fn clear_cart(&mut self) {
@@ -1456,5 +1637,132 @@ mod tests {
         assert!(state.payment.is_none());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tapping_a_listed_sale_opens_its_receipt() {
+        let (mut state, path) = state("sale-open", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 400)];
+
+        state.start_payment();
+        state.confirm_payment();
+
+        let id = crate::db::sales(&state.store, 3, 10)[0].id;
+        state.open_sale(id);
+
+        let detail = state.sale_open.as_ref().expect("the receipt opened");
+        assert_eq!(detail.id, id);
+        assert_eq!(detail.lines.len(), 1);
+        assert_eq!(detail.lines[0].name, "Sugar");
+
+        state.close_sale();
+        assert!(state.sale_open.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unnamed_category_lands_in_general() {
+        let (mut state, path) = state("general", Currency::UGX);
+
+        state.product_editor = Some(ProductDraft {
+            id: None,
+            name: "Hot water".to_owned(),
+            price: "100".to_owned(),
+            category: "   ".to_owned(),
+            barcode: String::new(),
+            error: None,
+        });
+        state.save_product();
+
+        assert!(state.product_editor.is_none(), "the form closed");
+        let saved = state
+            .products
+            .iter()
+            .find(|product| product.name == "Hot water")
+            .expect("saved with its default category");
+        assert_eq!(saved.category, "General");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn category_suggestions_lead_with_the_catalog_and_ignore_case() {
+        let catalog = vec!["Drinks".to_owned()];
+        let suggestions = category_suggestions(&catalog, "drinks ");
+
+        // "Drinks" holds the field already, so the catalog is skipped, "Pantry"
+        // style names never invented here, and the starter list follows in full.
+        assert!(
+            !suggestions
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Drinks"))
+        );
+        assert!(suggestions.len() >= 2);
+        assert!(
+            suggestions[1..]
+                .iter()
+                .all(|name| STARTER_CATEGORIES.contains(&name.as_str()))
+        );
+
+        let catalog = vec!["Pantry".to_owned()];
+        let suggestions = category_suggestions(&catalog, "");
+        assert_eq!(
+            suggestions[0], "Pantry",
+            "a catalog name comes before the studio list"
+        );
+    }
+
+    #[test]
+    fn an_import_saves_what_parses_and_counts_the_rest() {
+        let (mut state, path) = state("import", Currency::UGX);
+
+        let csv = std::env::temp_dir().join(format!("pos-import-{}.csv", std::process::id()));
+        std::fs::write(&csv, "name,category,price,barcode\nSoap 250g,Household,1200,111\nSoap lite,Household,free\nMilo tin,Pantry,9000,111").expect("write csv");
+        state.start_import();
+        state.import.as_mut().expect("open").path = csv.display().to_string();
+        state.import_products();
+
+        assert!(state.import.is_none(), "a partial import still closes");
+        assert_eq!(state.products.len(), 2, "one seeded, one imported");
+        let soap = state
+            .products
+            .iter()
+            .find(|product| product.name == "Soap 250g")
+            .expect("the well-formed row landed");
+        assert_eq!(soap.barcode.as_deref(), Some("111"));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Imported 1 product, skipped 2.")
+        );
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(csv);
+    }
+
+    #[test]
+    fn an_import_that_lands_nothing_keeps_the_modal_and_gives_the_reason() {
+        let (mut state, path) = state("import-err", Currency::UGX);
+
+        let csv = std::env::temp_dir().join(format!("pos-import-empty-{}.csv", std::process::id()));
+        std::fs::write(&csv, "name,category,price\n").expect("write csv");
+        state.start_import();
+        state.import.as_mut().expect("open").path = csv.display().to_string();
+        state.import_products();
+
+        let error = state
+            .import
+            .as_ref()
+            .expect("still open")
+            .error
+            .as_deref()
+            .expect("a reason");
+        assert_eq!(
+            error,
+            "Nothing was imported: the file has no products in it."
+        );
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(csv);
     }
 }
