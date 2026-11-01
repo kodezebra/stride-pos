@@ -756,6 +756,7 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
 }
 
 /// One line of a sale, as recorded at the time.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailLine {
     /// The name on the receipt. The catalog may have moved on since.
     pub name: String,
@@ -778,6 +779,7 @@ pub struct DetailLine {
 /// Payments are already summed in Rust (not `SUM` in SQL) because a split
 /// payment — part cash, part something else one day — must read honestly, and
 /// each row's method tells the story; a combined string handles both.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaleDetail {
     pub id: i64,
     pub cashier: Option<String>,

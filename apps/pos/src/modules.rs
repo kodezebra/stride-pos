@@ -909,6 +909,11 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
         ui.allocate_exact_size(egui::vec2(width, CHART_HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
 
+    let hue = chart_hue(ui);
+    // The slot wash is the series colour at a whisper, not the accent wash:
+    // the highlight has to belong to the bar under it.
+    let wash = egui::Color32::from_rgba_unmultiplied(hue.r(), hue.g(), hue.b(), 26);
+
     let peak = days.iter().map(|day| day.revenue).max().unwrap_or_default();
     let (axis_max, step) = nice_axis(peak);
 
@@ -990,7 +995,7 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
                     egui::pos2(centre + slot * 0.5 - 1.0, plot.bottom()),
                 ),
                 egui::CornerRadius::same(6),
-                egui::Color32::from(palette.accent_soft),
+                wash,
             );
         }
 
@@ -1007,7 +1012,7 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
                 sw: 0,
                 se: 0,
             },
-            egui::Color32::from(palette.accent),
+            hue,
         );
     }
 
@@ -1046,24 +1051,97 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
 
     if let Some(index) = hovered {
         let day = &days[count - 1 - index];
-        response.on_hover_ui(|ui| {
-            ui.label(
-                egui::RichText::new(long_date(day))
-                    .family(theme::semibold())
-                    .size(TYPE.small),
-            );
-            ui.label(
-                egui::RichText::new(format!("{} sales", day.sales))
-                    .size(TYPE.small)
-                    .color(ui.visuals().weak_text_color()),
-            );
-            ui.label(
-                egui::RichText::new(state.money(day.revenue))
-                    .family(mono)
-                    .size(TYPE.body),
-            );
-        });
+        let centre = plot.left() + slot * (index as f32 + 0.5);
+        let fraction = (day.revenue as f32 / axis_max as f32).clamp(0.0, 1.0);
+        let top = plot.bottom() - plot.height() * fraction;
+        day_callout(painter, plot, centre, top, day, state, &palette);
     }
+}
+
+/// The chart's own colour.
+///
+/// Deliberately not `accent`: in this app blue is the colour of things you can
+/// press, and a bar is a recorded fact, not a button. Violet also stays clear
+/// of the green that means "paid" and the red that means "wrong", so a bar can
+/// never be misread as a state.
+fn chart_hue(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(0xa5, 0x96, 0xff)
+    } else {
+        egui::Color32::from_rgb(0x6a, 0x5c, 0xe8)
+    }
+}
+
+/// The hover card over a bar: two lines, pinned to the bar rather than to the
+/// pointer.
+///
+/// egui's default tooltip follows the cursor, so on a chart it drifts off the
+/// bar it describes and covers its neighbours. This one sits directly above
+/// the bar, stays inside the plot, and is only as tall as a date and a figure —
+/// the three stacked labels of the old tooltip read as a paragraph.
+fn day_callout(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    centre: f32,
+    bar_top: f32,
+    day: &crate::db::DayTotal,
+    state: &State,
+    palette: &ui_kit::tokens::Palette,
+) {
+    let text = egui::Color32::from(palette.text);
+    let muted = egui::Color32::from(palette.text_muted);
+
+    let heading = painter.layout_no_wrap(
+        format!("{} · {} sales", long_date(day), day.sales),
+        egui::FontId::new(TYPE.small, theme::semibold()),
+        muted,
+    );
+    let amount = painter.layout_no_wrap(
+        state.money(day.revenue),
+        egui::FontId::new(TYPE.body, theme::numeric()),
+        text,
+    );
+    let heading_size = heading.size();
+    let amount_size = amount.size();
+
+    let pad_x = SPACING.sm;
+    let pad_y = 7.0;
+    let gap = 2.0;
+    let width = heading_size.x.max(amount_size.x) + pad_x * 2.0;
+    let height = heading_size.y + gap + amount_size.y + pad_y * 2.0;
+
+    // Above the bar when the plot has room, otherwise inside the bar's top; and
+    // never past either edge, so the card cannot hang over the axis labels.
+    let left = (centre - width * 0.5).clamp(plot.left(), (plot.right() - width).max(plot.left()));
+    let above = bar_top - SPACING.sm - height;
+    let top = if above >= plot.top() {
+        above
+    } else {
+        (bar_top + SPACING.sm).min(plot.bottom() - height)
+    };
+    let rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
+    let corner = egui::CornerRadius::same(RADII.sm as u8);
+
+    painter.rect_filled(rect, corner, egui::Color32::from(palette.surface));
+    painter.rect_stroke(
+        rect,
+        corner,
+        egui::Stroke::new(1.0_f32, egui::Color32::from(palette.border_strong)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + pad_x, rect.top() + pad_y),
+        heading,
+        muted,
+    );
+    painter.galley(
+        egui::pos2(
+            rect.left() + pad_x,
+            rect.top() + pad_y + heading_size.y + gap,
+        ),
+        amount,
+        text,
+    );
 }
 
 /// A round axis that fits `peak`: a step of a 1/2/2.5/5 × 10ⁿ size, chosen so
@@ -1637,70 +1715,19 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
     let Some(detail) = state.sale_open.as_ref() else {
         return;
     };
+    let currency = state.currency;
 
     let mut close = false;
 
     modal(ctx, egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
         ui.set_width(460.0);
 
-        ui.label(components::semibold(format!("Sale #{}", detail.id)).size(TYPE.heading));
-        components::caption(
-            ui,
-            &format!(
-                "By {} — {}",
-                detail.cashier.as_deref().unwrap_or("-"),
-                detail.created_at
-            ),
-        );
-
-        ui.add_space(SPACING.md);
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            if detail.lines.is_empty() {
-                components::caption(ui, "No line items were recorded on this sale.");
-                return;
-            }
-            for line in &detail.lines {
-                // A paper receipt prints "4 × Sugar @ USh 500"; a single item
-                // needs neither count nor unit, so the label is just the name.
-                let label = if line.qty == 1 {
-                    line.name.clone()
-                } else {
-                    format!(
-                        "{} × {} @ {}",
-                        line.qty,
-                        line.name,
-                        state.money(line.unit_minor)
-                    )
-                };
-                components::receipt_line(ui, &label, &state.money(line.total_minor));
-            }
-        });
-
-        ui.add_space(SPACING.md);
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            components::receipt_line(ui, "Total", &state.money(detail.total_minor));
-            if detail.rounding_minor != 0 {
-                components::receipt_line(ui, "Cash rounding", &state.money(detail.rounding_minor));
-            }
-            // "Paid" is the answer the owner is after: total plus rounding,
-            // the figure that entered the drawer.
-            crate::modules::amount_row(ui, "Paid", &state.money(detail.paid_minor), true);
-
-            ui.add_space(SPACING.sm);
-            components::receipt_line(ui, "Method", &detail.method);
-            if detail.tendered_minor != 0 {
-                components::receipt_line(
-                    ui,
-                    "Tendered (cash)",
-                    &state.money(detail.tendered_minor),
-                );
-            }
-            if detail.change_minor != 0 {
-                components::receipt_line(ui, "Change", &state.money(detail.change_minor));
-            }
-        });
+        // The same block the customer saw at the till, scrolled when the sale
+        // is longer than the window: an owner checking a discrepancy is
+        // reading paper, not a summary of paper.
+        egui::ScrollArea::vertical()
+            .max_height(420.0)
+            .show(ui, |ui| crate::receipt::body(ui, detail, currency, true));
 
         ui.add_space(SPACING.md);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -47,35 +47,55 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     {
         let just_finished = payment.focus;
         payment.focus = false;
+        // Cloned out of the borrow: the receipt renderer needs the state's
+        // currency, and holding `payment` open for the whole closure would
+        // fight it. A receipt is a handful of lines, not a table.
+        let receipt = payment.detail.clone();
 
         let change = state.money(sale.change_minor);
-        let tendered = state.money(sale.tendered_minor);
-        let paid = state.money(sale.paid_minor());
         let mut close = false;
 
         crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
             ui.set_width(420.0);
             let palette = theme::current(ui.ctx());
+            let success = egui::Color32::from(palette.success);
 
             ui.label(
                 components::semibold("Paid")
                     .size(TYPE.heading)
-                    .color(egui::Color32::from(palette.success)),
+                    .color(success),
             );
             components::caption(ui, &format!("Sale #{}", sale.id));
 
             ui.add_space(SPACING.md);
-            change_row(ui, &change, egui::Color32::from(palette.success));
+            // The change stays the big figure on this screen: it is the number
+            // the cashier acts on. The receipt below is what the customer
+            // keeps, and it repeats the change because paper has to.
+            change_row(ui, &change, success);
             ui.add_space(SPACING.md);
-            components::receipt_line(ui, "Cash", &tendered);
-            if sale.rounding_minor != 0 {
-                components::receipt_line(
-                    ui,
-                    "Rounding",
-                    &Money::new(sale.rounding_minor, currency).format(),
-                );
+
+            if let Some(detail) = receipt.as_ref() {
+                // A twenty-line sale scrolls inside the modal rather than
+                // growing it past the bottom of the window.
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        crate::receipt::body(ui, detail, currency, false);
+                    });
+            } else {
+                // The row was just written, so this should not happen; but a
+                // cashier standing over a paid sale is owed the figures either
+                // way, and the four we hold are better than a blank screen.
+                components::receipt_line(ui, "Cash", &state.money(sale.tendered_minor));
+                if sale.rounding_minor != 0 {
+                    components::receipt_line(
+                        ui,
+                        "Rounding",
+                        &Money::new(sale.rounding_minor, currency).format(),
+                    );
+                }
+                components::receipt_line(ui, "Total", &state.money(sale.paid_minor()));
             }
-            components::receipt_line(ui, "Total", &paid);
 
             ui.add_space(SPACING.md);
             ui.horizontal(|ui| {
@@ -336,6 +356,7 @@ mod tests {
             tendered: String::new(),
             error: Some("Previous error".into()),
             done: None,
+            detail: None,
             focus: false,
         };
 

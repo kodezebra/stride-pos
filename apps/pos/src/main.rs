@@ -12,6 +12,7 @@
 //! | `checkout.rs` | the payment modal: cash in, change out             |
 //! | `commands.rs` | the command palette's contents                     |
 //! | `prefs.rs`    | window/UI habits, persisted across restarts        |
+//! | `receipt.rs`  | the receipt, shared by the confirmation and Sales  |
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
@@ -23,6 +24,7 @@ mod db;
 mod import;
 mod modules;
 mod prefs;
+mod receipt;
 mod settings;
 mod shell;
 mod state;

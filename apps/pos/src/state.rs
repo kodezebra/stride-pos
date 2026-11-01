@@ -134,6 +134,10 @@ pub struct Payment {
     /// Set once the sale is written. The modal then shows the change instead of
     /// the form, so the cashier reads the number before the drawer opens.
     pub done: Option<RecordedSale>,
+    /// The same sale read back with its lines and header. `done` drives the
+    /// screen; this is what the receipt says, and it can only be filled from
+    /// the ledger, never from the cart that has just been emptied.
+    pub detail: Option<crate::db::SaleDetail>,
     /// Put the cursor in the cash field on the first frame.
     pub focus: bool,
 }
@@ -1320,6 +1324,7 @@ impl State {
             tendered: String::new(),
             error: None,
             done: None,
+            detail: None,
             focus: true,
         });
     }
@@ -1377,9 +1382,14 @@ impl State {
         ) {
             Ok(sale) => {
                 self.cart.clear();
+                // Read the sale back once, here, so the confirmation can print
+                // a receipt instead of four remembered numbers. The cart is
+                // already empty: this is the only copy of what was sold.
+                let detail = crate::db::sale_detail(&self.store, sale.id);
                 if let Some(payment) = self.payment.as_mut() {
                     payment.error = None;
                     payment.done = Some(sale);
+                    payment.detail = detail;
                     payment.focus = true;
                 }
             }
@@ -1556,6 +1566,17 @@ mod tests {
         assert_eq!(sale.rounding_minor, -40, "1340 rounds down to 1300");
         assert_eq!(sale.paid_minor(), 1_300);
         assert_eq!(sale.change_minor, 700);
+
+        // The confirmation prints the receipt, so the lines have to come back
+        // from the ledger — the cart they came from is already empty.
+        let detail = state
+            .payment
+            .as_ref()
+            .and_then(|payment| payment.detail.as_ref())
+            .expect("the sale was read back");
+        assert_eq!(detail.lines.len(), 2);
+        assert_eq!(detail.lines[0].name, "Sugar");
+        assert_eq!(detail.change_minor, 700);
 
         assert!(state.cart.is_empty(), "the till is ready for the next sale");
         assert_eq!(crate::db::totals(&state.store, 3), (1, 1_300));
