@@ -673,8 +673,16 @@ fn range_clause(range: usize, column: &str) -> Option<String> {
         0 => Some(format!(
             "date({column}, 'localtime') = date('now', 'localtime')"
         )),
-        1 => Some(format!("{column} >= datetime('now', '-7 days')")),
-        2 => Some(format!("{column} >= datetime('now', '-30 days')")),
+        // Whole calendar days, not a rolling 168 hours: the last week is seven
+        // bars, not eight with the two ends cut off at the clock, and the chip
+        // says what the chart shows. The boundary is a UTC instant computed
+        // once, so the column still answers from its index.
+        1 => Some(format!(
+            "{column} >= datetime(date('now', 'localtime', '-6 days'), 'utc')"
+        )),
+        2 => Some(format!(
+            "{column} >= datetime(date('now', 'localtime', '-29 days'), 'utc')"
+        )),
         _ => None,
     }
 }
@@ -953,6 +961,10 @@ pub struct DayTotal {
     /// `dd/mm`, terminal clock — SQLite's `strftime` has no month names.
     /// Grouped on the full date, so two sales on the same day share one row.
     pub day: String,
+    /// `0`–`6`, Sunday first, as `strftime('%w')` numbers them. Carried beside
+    /// the date because a week reads better as names, and only the calendar
+    /// knows which name a date wears.
+    pub weekday: u8,
     pub sales: i64,
     pub revenue: i64,
 }
@@ -962,16 +974,18 @@ pub fn by_day(store: &storage::Store, range: usize) -> Vec<DayTotal> {
 
     let sql = match range_clause(range, "s.created_at") {
         Some(clause) => format!(
-            "SELECT strftime('%d/%m', s.created_at, 'localtime'), COUNT(*),
-                    COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+            "SELECT strftime('%d/%m', s.created_at, 'localtime'),
+                    CAST(strftime('%w', s.created_at, 'localtime') AS INTEGER),
+                    COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
              FROM sales s
              WHERE {clause}
              GROUP BY date(s.created_at, 'localtime')
              ORDER BY date(s.created_at, 'localtime') DESC
              LIMIT ?1"
         ),
-        None => "SELECT strftime('%d/%m', s.created_at, 'localtime'), COUNT(*),
-                    COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+        None => "SELECT strftime('%d/%m', s.created_at, 'localtime'),
+                    CAST(strftime('%w', s.created_at, 'localtime') AS INTEGER),
+                    COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
              FROM sales s
              GROUP BY date(s.created_at, 'localtime')
              ORDER BY date(s.created_at, 'localtime') DESC
@@ -990,8 +1004,9 @@ pub fn by_day(store: &storage::Store, range: usize) -> Vec<DayTotal> {
     let rows = statement.query_map([MAX_DAYS], |row| {
         Ok(DayTotal {
             day: row.get(0)?,
-            sales: row.get(1)?,
-            revenue: row.get(2)?,
+            weekday: row.get(1)?,
+            sales: row.get(2)?,
+            revenue: row.get(3)?,
         })
     });
 
@@ -1185,6 +1200,29 @@ mod tests {
             .expect("insert line");
         }
         id
+    }
+
+    #[test]
+    fn a_week_is_seven_calendar_days_not_168_hours() {
+        let (store, path) = store("week-window");
+
+        insert_sale(&store, "-0 days", &[("Tea", 1, 100)]);
+        insert_sale(&store, "-6 days", &[("Tea", 1, 100)]);
+        insert_sale(&store, "-7 days", &[("Tea", 1, 100)]);
+
+        assert_eq!(
+            by_day(&store, 1).len(),
+            2,
+            "today and six days back, so a week is seven bars"
+        );
+        assert_eq!(totals(&store, 1), (2, 200));
+        assert_eq!(
+            by_day(&store, 2).len(),
+            3,
+            "the seventh day is still inside the month"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
