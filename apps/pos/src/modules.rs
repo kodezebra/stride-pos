@@ -16,7 +16,7 @@
 use ui_kit::components;
 use ui_kit::icons::Icon;
 use ui_kit::theme;
-use ui_kit::tokens::{SPACING, TYPE};
+use ui_kit::tokens::{RADII, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
@@ -80,6 +80,16 @@ pub trait Module {
         None
     }
 
+    /// Whether the shell wraps this page in a vertical scroll area.
+    ///
+    /// On by default: a 30-day chart or a full staff list must not end below the
+    /// fold with no way to reach it. Sell opts out because its workspace is a
+    /// fixed two-column frame — inside a scroll area `available_height` is
+    /// unbounded, and the cart's Pay button would drift off the screen.
+    fn scrolls(&self) -> bool {
+        true
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State);
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State);
@@ -120,6 +130,12 @@ impl Module for Sell {
     /// 40 px sidebar is a mistake the cashier pays for.
     fn fixed_sidebar(&self) -> Option<f32> {
         Some(regions::size::SIDEBAR_MIN)
+    }
+
+    /// The till owns its own frame: grid on the left, cart pinned right. A page
+    /// scroll would make the cart's height unbounded and un-pin the Pay button.
+    fn scrolls(&self) -> bool {
+        false
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -323,27 +339,56 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                 let mut steps: Vec<(usize, components::Step)> = Vec::new();
 
                 for (index, line) in state.cart.iter().enumerate() {
+                    // The name and the line total share the first row, with the
+                    // amount placed first from the right so the name truncates
+                    // into what is left. A long product name then costs an
+                    // ellipsis, never the price or the stepper.
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(components::semibold(&line.name).size(TYPE.body));
-                            ui.label(
-                                components::numeric(format!(
-                                    "{} × {}",
-                                    line.qty,
-                                    state.money(line.unit_minor)
-                                ))
-                                .size(TYPE.small)
-                                .color(palette.text_muted),
-                            );
-                        });
-
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Registered right-to-left: the line total is the
-                            // right edge, the stepper sits inboard of it.
                             ui.label(
                                 components::numeric(state.money(line.total_minor()))
                                     .size(TYPE.body),
                             );
+
+                            // The child is sized to the whole remainder, so a
+                            // short name stays on the left edge instead of
+                            // hugging the amount.
+                            let width =
+                                (ui.available_width() - ui.spacing().item_spacing.x).max(0.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(width, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    let name = ui.add(
+                                        egui::Label::new(
+                                            components::semibold(&line.name).size(TYPE.body),
+                                        )
+                                        .truncate(),
+                                    );
+                                    // Only when something is hidden: a tooltip
+                                    // repeating a name already on screen is
+                                    // noise on every hover.
+                                    if is_cut(ui, &line.name, width) {
+                                        name.on_hover_text(&line.name);
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                    // Quantity and unit price under the name, the stepper under
+                    // the amount: the control belongs to the number it changes.
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            components::numeric(format!(
+                                "{} × {}",
+                                line.qty,
+                                state.money(line.unit_minor)
+                            ))
+                            .size(TYPE.small)
+                            .color(palette.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let step = components::stepper(ui, line.qty);
                             if step != components::Step::None {
                                 steps.push((index, step));
@@ -410,6 +455,21 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     if pay.clicked() {
         state.start_payment();
     }
+}
+
+/// Whether `text` is wider than the space its label was given.
+///
+/// The cart asks before offering a tooltip: a name that already fits needs no
+/// second copy on hover, and a truncated one is exactly the case where the full
+/// name is worth the hover.
+fn is_cut(ui: &egui::Ui, text: &str, width: f32) -> bool {
+    let font = egui::FontId::new(TYPE.body, theme::semibold());
+    let measured = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER)
+        .size()
+        .x;
+    measured > width
 }
 
 /// One label/amount row: the cart's totals and the payment screen's due.
@@ -1202,22 +1262,19 @@ impl Module for Products {
         }
 
         let mut action = None;
-        egui::ScrollArea::vertical()
-            .id_salt("products_rows")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                components::card(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    product_header(ui);
-                    for &product_index in &visible {
-                        let product = &state.products[product_index];
-                        let deleting = state.product_delete == Some(product.id);
-                        if let Some(row_action) = product_row(ui, product, state, deleting) {
-                            action = Some(row_action);
-                        }
-                    }
-                });
-            });
+        // The page scrolls (the shell owns it), so the catalog card is laid out
+        // whole: a list inside a list would fight the page for the wheel.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            product_header(ui);
+            for &product_index in &visible {
+                let product = &state.products[product_index];
+                let deleting = state.product_delete == Some(product.id);
+                if let Some(row_action) = product_row(ui, product, state, deleting) {
+                    action = Some(row_action);
+                }
+            }
+        });
 
         match action {
             Some(ProductAction::Edit(id)) => {
@@ -1357,6 +1414,20 @@ fn product_row(
     action
 }
 
+/// A dialog frame, with the same breathing room everywhere.
+///
+/// egui's popup frame is sized for a menu: fine for a list of choices, cramped
+/// for a form that is read and typed into. Every modal in the till goes through
+/// here, so the product form, the receipt and the payment screen sit the same
+/// distance from their edge — and at the dialog radius rather than the menu's.
+pub(crate) fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    egui::Modal::new(id).frame(
+        egui::Frame::popup(&ctx.global_style())
+            .inner_margin(egui::Margin::same(SPACING.xl as i8))
+            .corner_radius(egui::CornerRadius::same(RADII.lg as u8)),
+    )
+}
+
 /// The add/edit form, as a modal drawn by the shell.
 ///
 /// A modal rather than a card above the list: the catalog is a list you click
@@ -1383,7 +1454,7 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let mut save = false;
     let mut cancel = false;
 
-    egui::Modal::new(egui::Id::new("pos_product_editor")).show(ctx, |ui| {
+    modal(ctx, egui::Id::new("pos_product_editor")).show(ctx, |ui| {
         ui.set_width(460.0);
 
         let heading = if draft.id.is_some() {
@@ -1499,7 +1570,7 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
     let mut import = false;
     let mut cancel = false;
 
-    egui::Modal::new(egui::Id::new("pos_import")).show(ctx, |ui| {
+    modal(ctx, egui::Id::new("pos_import")).show(ctx, |ui| {
         ui.set_width(460.0);
 
         ui.label(components::semibold("Import products from CSV").size(TYPE.heading));
@@ -1569,7 +1640,7 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
 
     let mut close = false;
 
-    egui::Modal::new(egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
+    modal(ctx, egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
         ui.set_width(460.0);
 
         ui.label(components::semibold(format!("Sale #{}", detail.id)).size(TYPE.heading));
@@ -1759,30 +1830,26 @@ impl Module for Sales {
             return;
         }
 
-        egui::ScrollArea::vertical()
-            .id_salt("sales_rows")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                components::card(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    table_row(ui, "Sale", "When", "By", "Total", true, false);
-                    for (index, sale) in sales.iter().enumerate() {
-                        if table_row(
-                            ui,
-                            &format!("#{}", sale.id),
-                            &sale.created_at,
-                            sale.cashier.as_deref().unwrap_or("-"),
-                            &state.money(sale.paid_minor),
-                            false,
-                            index % 2 == 1,
-                        )
-                        .clicked()
-                        {
-                            state.open_sale(sale.id);
-                        }
-                    }
-                });
-            });
+        // The page scrolls (the shell owns it), so the table is laid out whole.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            table_row(ui, "Sale", "When", "By", "Total", true, false);
+            for (index, sale) in sales.iter().enumerate() {
+                if table_row(
+                    ui,
+                    &format!("#{}", sale.id),
+                    &sale.created_at,
+                    sale.cashier.as_deref().unwrap_or("-"),
+                    &state.money(sale.paid_minor),
+                    false,
+                    index % 2 == 1,
+                )
+                .clicked()
+                {
+                    state.open_sale(sale.id);
+                }
+            }
+        });
     }
 }
 

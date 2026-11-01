@@ -53,7 +53,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         let paid = state.money(sale.paid_minor());
         let mut close = false;
 
-        egui::Modal::new(egui::Id::new("pos_payment")).show(ctx, |ui| {
+        crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
             ui.set_width(420.0);
             let palette = theme::current(ui.ctx());
 
@@ -78,11 +78,23 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             components::receipt_line(ui, "Total", &paid);
 
             ui.add_space(SPACING.md);
-            if components::primary_button(ui, "New sale").clicked() {
-                close = true;
-            }
+            ui.horizontal(|ui| {
+                if components::primary_button(ui, "New sale").clicked() {
+                    close = true;
+                }
+                // The receipt is already written, so this cannot undo the sale;
+                // it dismisses the screen. It exists because "New sale" is a
+                // commitment, and the cashier may only want the receipt gone.
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("Close this receipt")
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
             ui.add_space(SPACING.xs);
-            components::caption(ui, "Enter or Space starts the next sale.");
+            components::caption(ui, "Enter or Space starts the next sale. Escape closes.");
         });
 
         if close
@@ -111,7 +123,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     let mut close = false;
     let mut field_submitted = false;
 
-    egui::Modal::new(egui::Id::new("pos_payment")).show(ctx, |ui| {
+    crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
         ui.set_width(420.0);
         let palette = theme::current(ui.ctx());
 
