@@ -943,6 +943,122 @@ pub fn by_person(store: &storage::Store, range: usize) -> Vec<PersonTotal> {
     }
 }
 
+/// One local day's totals — the trend behind the range.
+///
+/// Revenue is `total + rounding`, the drawer figure `totals` and the list
+/// already agree on. Days are newest first and capped at the most recent
+/// thirty, so "All time" cannot grow a list taller than the rest of the
+/// dashboard; the cap is on display, not on what the database keeps.
+pub struct DayTotal {
+    /// `dd/mm`, terminal clock — SQLite's `strftime` has no month names.
+    /// Grouped on the full date, so two sales on the same day share one row.
+    pub day: String,
+    pub sales: i64,
+    pub revenue: i64,
+}
+
+pub fn by_day(store: &storage::Store, range: usize) -> Vec<DayTotal> {
+    const MAX_DAYS: i64 = 30;
+
+    let sql = match range_clause(range, "s.created_at") {
+        Some(clause) => format!(
+            "SELECT strftime('%d/%m', s.created_at, 'localtime'), COUNT(*),
+                    COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+             FROM sales s
+             WHERE {clause}
+             GROUP BY date(s.created_at, 'localtime')
+             ORDER BY date(s.created_at, 'localtime') DESC
+             LIMIT ?1"
+        ),
+        None => "SELECT strftime('%d/%m', s.created_at, 'localtime'), COUNT(*),
+                    COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+             FROM sales s
+             GROUP BY date(s.created_at, 'localtime')
+             ORDER BY date(s.created_at, 'localtime') DESC
+             LIMIT ?1"
+            .to_owned(),
+    };
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "by day prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([MAX_DAYS], |row| {
+        Ok(DayTotal {
+            day: row.get(0)?,
+            sales: row.get(1)?,
+            revenue: row.get(2)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "by day query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// The range's bestselling lines, ranked by revenue.
+///
+/// Ranked by the recorded line total, before rounding: rounding belongs to
+/// the sale as a whole, not to any one item. Grouped by the name on the line,
+/// not by product id — a deleted product's receipts keep their history, and
+/// there is no join to break when the catalog changes.
+pub struct ItemTotal {
+    pub name: String,
+    pub qty: i64,
+    pub revenue: i64,
+}
+
+pub fn top_items(store: &storage::Store, range: usize, limit: i64) -> Vec<ItemTotal> {
+    let sql = match range_clause(range, "s.created_at") {
+        Some(clause) => format!(
+            "SELECT l.name, SUM(l.qty), SUM(l.total_minor)
+             FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+             WHERE {clause}
+             GROUP BY l.name
+             ORDER BY 3 DESC
+             LIMIT ?1"
+        ),
+        None => "SELECT l.name, SUM(l.qty), SUM(l.total_minor)
+             FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+             GROUP BY l.name
+             ORDER BY 3 DESC
+             LIMIT ?1"
+            .to_owned(),
+    };
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "top items prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([limit], |row| {
+        Ok(ItemTotal {
+            name: row.get(0)?,
+            qty: row.get(1)?,
+            revenue: row.get(2)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "top items query failed");
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,6 +1159,89 @@ mod tests {
 
         assert_eq!(totals(&store, 0), (0, 0));
         assert!(sales(&store, 3, 5).is_empty());
+        assert!(by_day(&store, 3).is_empty());
+        assert!(top_items(&store, 3, 5).is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A sale with its lines, dated relative to now — `sale_lines` carries the
+    /// name, so nothing has to exist in the catalog for this to be real.
+    fn insert_sale(store: &storage::Store, offset: &str, lines: &[(&str, i64, i64)]) -> i64 {
+        let conn = store.conn();
+        let total: i64 = lines.iter().map(|(_, qty, unit)| qty * unit).sum();
+        conn.execute(
+            "INSERT INTO sales (total_minor, created_at) VALUES (?1, datetime('now', ?2))",
+            (total, offset),
+        )
+        .expect("insert sale");
+        let id = conn.last_insert_rowid();
+        for (name, qty, unit) in lines {
+            conn.execute(
+                "INSERT INTO sale_lines (sale_id, product_id, name, qty, unit_minor, total_minor)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                (id, name, *qty, *unit, qty * unit),
+            )
+            .expect("insert line");
+        }
+        id
+    }
+
+    #[test]
+    fn the_trend_and_the_top_items_follow_their_sales() {
+        let (store, path) = store("analytics");
+
+        // 3500 today, 1000 three days ago, 5000 ten days ago, 500 forty days ago.
+        insert_sale(&store, "-0 days", &[("Tea", 3, 500), ("Sugar", 1, 2_000)]);
+        insert_sale(&store, "-3 days", &[("Tea", 2, 500)]);
+        insert_sale(&store, "-10 days", &[("Rice", 1, 5_000)]);
+        insert_sale(&store, "-40 days", &[("Tea", 1, 500)]);
+
+        assert_eq!(
+            by_day(&store, 0).len(),
+            1,
+            "today is one row, however many sales it had"
+        );
+        assert_eq!(
+            by_day(&store, 2).len(),
+            3,
+            "the forty-day-old sale is outside a 30-day range"
+        );
+
+        let days = by_day(&store, 3);
+        assert_eq!(days.len(), 4);
+        assert_eq!(
+            days[0].revenue, 3_500,
+            "newest first, like every other list"
+        );
+        assert_eq!(days[0].sales, 1, "two sales on one day share its row");
+        assert_eq!(days[1].revenue, 1_000);
+        assert_eq!(days[3].revenue, 500);
+
+        let items = top_items(&store, 3, 5);
+        assert_eq!(
+            items.len(),
+            3,
+            "the same product on different days is one item, not three"
+        );
+        assert_eq!(items[0].name, "Rice", "revenue ranks first, not units");
+        assert_eq!(items[0].revenue, 5_000);
+        assert_eq!(items[1].name, "Tea");
+        assert_eq!(items[1].qty, 6, "units sum across every sale in the range");
+        assert_eq!(items[1].revenue, 3_000);
+        assert_eq!(items[2].name, "Sugar");
+        assert_eq!(items[2].qty, 1);
+
+        assert_eq!(
+            top_items(&store, 0, 5)[0].name,
+            "Sugar",
+            "the ranking follows the chosen range, not all history"
+        );
+        assert_eq!(
+            top_items(&store, 3, 2).len(),
+            2,
+            "the limit ranks, not hides"
+        );
 
         let _ = std::fs::remove_file(path);
     }
