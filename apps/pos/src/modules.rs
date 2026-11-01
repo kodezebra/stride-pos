@@ -470,15 +470,55 @@ impl Module for Dashboard {
         let (count, revenue) = crate::db::totals(&state.store, state.range);
 
         components::section_title(ui, state::range_caption(state.range));
+        // Derived, not stored: revenue over sales, same range. A range with
+        // no sales shows "-", never a zero that could be read as "we made
+        // nothing today".
+        let average = if count > 0 {
+            state.money(revenue / count)
+        } else {
+            "-".to_owned()
+        };
         kpi_row(
             ui,
             &[
                 ("Sales", count.to_string()),
                 ("Revenue", state.money(revenue)),
+                ("Average", average),
                 ("In cart", state.cart_count().to_string()),
                 ("Cart value", state.money(state.cart_total_minor())),
             ],
         );
+
+        // The shape of the range: each day that sold draws one bar, scaled
+        // against the range's own busiest day, newest first like the lists.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "By day");
+        let days = crate::db::by_day(&state.store, state.range);
+        if days.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No sales yet in this range",
+                "Each day that takes money grows a bar here.",
+                160.0,
+            );
+        } else {
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                tally_row(ui, "Day", "", "Revenue", true, false);
+                let peak = days.iter().map(|day| day.revenue).max().unwrap_or_default();
+                for (index, day) in days.iter().enumerate() {
+                    day_row(
+                        ui,
+                        &day.day,
+                        &day.sales.to_string(),
+                        &state.money(day.revenue),
+                        day.revenue,
+                        peak,
+                        index % 2 == 1,
+                    );
+                }
+            });
+        }
 
         ui.add_space(SPACING.lg);
         components::section_title(ui, "Latest sales");
@@ -531,9 +571,9 @@ impl Module for Dashboard {
 
         components::card(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            person_row(ui, "Person", "Sales", "Total", true, false);
+            tally_row(ui, "Person", "Sales", "Total", true, false);
             for (index, person) in people.iter().enumerate() {
-                person_row(
+                tally_row(
                     ui,
                     &person.name,
                     &person.sales.to_string(),
@@ -543,6 +583,37 @@ impl Module for Dashboard {
                 );
             }
         });
+
+        // What actually sells. Ranked by the money each name took, with the
+        // units beside it — neither number alone is the story: many cheap
+        // units can out-earn a few dear ones, and either way the owner wants
+        // both.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "Top items");
+        let items = crate::db::top_items(&state.store, state.range, 5);
+        if items.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No items sold in this range",
+                "Once the till rings things up, the best movers rank here.",
+                160.0,
+            );
+        } else {
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                tally_row(ui, "Item", "Sold", "Revenue", true, false);
+                for (index, item) in items.iter().enumerate() {
+                    tally_row(
+                        ui,
+                        &item.name,
+                        &item.qty.to_string(),
+                        &state.money(item.revenue),
+                        false,
+                        index % 2 == 1,
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -692,18 +763,13 @@ fn table_row(
     response
 }
 
-/// One row of the per-person totals: who, how many sales, and the money.
+/// One row of a three-column tally: a name, a count, and the money.
 ///
-/// Kept beside `table_row` rather than bending its four columns to three,
-/// because nothing here lines up: the middle cell is a count, not a time.
-fn person_row(
-    ui: &mut egui::Ui,
-    name: &str,
-    count: &str,
-    amount: &str,
-    header: bool,
-    stripe: bool,
-) {
+/// Shared by "By person" (who, sales, take) and "Top items" (what, units,
+/// revenue) on purpose: both are ranked lists whose middle column is a count
+/// the shopkeeper glances at, and neither lines up under `table_row`'s four
+/// columns — there is no time cell to reuse.
+fn tally_row(ui: &mut egui::Ui, name: &str, count: &str, amount: &str, header: bool, stripe: bool) {
     let palette = theme::current(ui.ctx());
     let width = ui.available_width();
     let height = if header { 30.0 } else { ROW_HEIGHT };
@@ -769,6 +835,95 @@ fn person_row(
         );
     }
 }
+
+/// One day of the range: the date with its sale count, a bar scaled to that
+/// day's revenue, and the revenue itself.
+///
+/// Money is only half of a day: the small count beside the date says whether
+/// it was one big sale or many small ones. The bar answers at a glance what a
+/// second number column would need reading for; the scale is the range's own
+/// peak, so a quiet week still shows its shape. The card's header is
+/// `tally_row`'s — the two columns sit on the same pixels.
+fn day_row(
+    ui: &mut egui::Ui,
+    day: &str,
+    count: &str,
+    amount: &str,
+    revenue_minor: i64,
+    peak: i64,
+    stripe: bool,
+) {
+    let palette = theme::current(ui.ctx());
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+
+    let painter = ui.painter();
+    if stripe {
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from(palette.surface_alt),
+        );
+    }
+
+    let color = egui::Color32::from(palette.text);
+    let size = TYPE.body;
+    let mono = theme::numeric();
+    let y = rect.center().y;
+
+    let left = painter.layout_no_wrap(day.to_owned(), egui::FontId::new(size, mono.clone()), color);
+    let label_width = left.size().x;
+    painter.galley(
+        egui::pos2(rect.left(), y - left.size().y * 0.5),
+        left,
+        color,
+    );
+
+    // Sales count rides beside the date, one size down and muted: money is
+    // the headline, transactions are the footnote.
+    let count = painter.layout_no_wrap(
+        count.to_owned(),
+        egui::FontId::new(TYPE.small, mono.clone()),
+        egui::Color32::from(palette.text_muted),
+    );
+    painter.galley(
+        egui::pos2(rect.left() + label_width + 8.0, y - count.size().y * 0.5),
+        count,
+        egui::Color32::from(palette.text_muted),
+    );
+
+    // Between the date column and the money column: a track the full span's
+    // width, and a filled bar of the day's share of the range peak.
+    let span = width * 0.72 - width * 0.18;
+    let track_height = 10.0;
+    let track = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + width * 0.18, y - track_height * 0.5),
+        egui::vec2(span, track_height),
+    );
+    painter.rect_filled(
+        track,
+        egui::CornerRadius::same(4),
+        egui::Color32::from(palette.surface),
+    );
+    let share = revenue_minor as f32 / (peak.max(1) as f32);
+    let bar = egui::Rect::from_min_size(
+        track.min,
+        egui::vec2((span * share.clamp(0.0, 1.0)).max(2.0), track_height),
+    );
+    painter.rect_filled(
+        bar,
+        egui::CornerRadius::same(4),
+        egui::Color32::from(palette.accent),
+    );
+
+    let right = painter.layout_no_wrap(amount.to_owned(), egui::FontId::new(size, mono), color);
+    painter.galley(
+        egui::pos2(rect.right() - right.size().x, y - right.size().y * 0.5),
+        right,
+        color,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
