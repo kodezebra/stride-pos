@@ -58,6 +58,8 @@ const ROW_HEIGHT: f32 = 40.0;
 const CHART_HEIGHT: f32 = 232.0;
 /// Steps in the chart's value axis.
 const AXIS_STEPS: usize = 4;
+/// `%w` names, Sunday first, because that is how SQLite numbers the week.
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 pub trait Module {
     /// Activity-bar tooltip, palette label, and sidebar heading.
@@ -930,15 +932,27 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
     }
 
     // As many dates as fit without colliding, counted from the newest day so
-    // the right edge is always labelled.
-    let every = (count as f32 * 34.0 / plot.width()).ceil().max(1.0) as usize;
+    // the right edge is always labelled. A week is read as a rhythm, so its
+    // days are named; a month is read as a calendar, so it is dated. The step
+    // comes from the width of a real label rather than a guess, so a long
+    // range thins out instead of running the dates together.
+    let label_width = painter
+        .layout_no_wrap(
+            axis_label(&days[0], count),
+            egui::FontId::new(TYPE.small, mono.clone()),
+            muted,
+        )
+        .size()
+        .x
+        + 10.0;
+    let every = (count as f32 * label_width / plot.width()).ceil().max(1.0) as usize;
     for (index, day) in days.iter().rev().enumerate() {
         if !(count - 1 - index).is_multiple_of(every) {
             continue;
         }
         let centre = plot.left() + slot * (index as f32 + 0.5);
         let galley = painter.layout_no_wrap(
-            day.day.clone(),
+            axis_label(day, count),
             egui::FontId::new(TYPE.small, mono.clone()),
             muted,
         );
@@ -953,7 +967,7 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
         let day = &days[count - 1 - index];
         response.on_hover_ui(|ui| {
             ui.label(
-                egui::RichText::new(&day.day)
+                egui::RichText::new(format!("{} {}", weekday_name(day.weekday), day.day))
                     .family(theme::semibold())
                     .size(TYPE.small),
             );
@@ -1014,6 +1028,22 @@ fn compact_amount(minor: i64, state: &State) -> String {
     } else {
         format!("{value:.0}")
     }
+}
+
+/// One date-axis label. A week is read as a rhythm, so its days are named; a
+/// month is read as a calendar, so its days are dated. A lone day carries
+/// both, because "Sun" alone does not say which Sunday.
+fn axis_label(day: &crate::db::DayTotal, count: usize) -> String {
+    let weekday = weekday_name(day.weekday);
+    match count {
+        0 | 1 => format!("{weekday} {}", day.day),
+        2..=8 => weekday.to_owned(),
+        _ => day.day.clone(),
+    }
+}
+
+fn weekday_name(weekday: u8) -> &'static str {
+    WEEKDAYS[(weekday as usize).min(WEEKDAYS.len() - 1)]
 }
 
 // ---------------------------------------------------------------------------
