@@ -77,7 +77,8 @@ pub fn body(ui: &mut egui::Ui, detail: &SaleDetail, currency: Currency, with_cha
     components::divider(ui);
 
     // Subtotal earns a line only when rounding moved the figure: otherwise it
-    // would repeat the total a centimetre above it.
+    // would repeat the total a centimetre above it. The rounding is named by
+    // the direction it went, the same words the payment screen uses.
     if detail.rounding_minor != 0 {
         row(
             ui,
@@ -87,7 +88,11 @@ pub fn body(ui: &mut egui::Ui, detail: &SaleDetail, currency: Currency, with_cha
         );
         row(
             ui,
-            "Cash rounding",
+            if detail.rounding_minor < 0 {
+                "Rounded down"
+            } else {
+                "Rounded up"
+            },
             &money(detail.rounding_minor, currency),
             Weight::Plain,
         );

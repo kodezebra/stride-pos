@@ -39,7 +39,6 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     let subtotal = state.money(subtotal_minor);
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
-    let exact = state::plain_amount(due_minor, currency);
 
     // A finished sale is a different screen and needs no mutable payment.
     if let Some(payment) = state.payment.as_mut()
@@ -90,7 +89,11 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 if sale.rounding_minor != 0 {
                     components::receipt_line(
                         ui,
-                        "Rounding",
+                        if sale.rounding_minor < 0 {
+                            "Rounded down"
+                        } else {
+                            "Rounded up"
+                        },
                         &Money::new(sale.rounding_minor, currency).format(),
                     );
                 }
@@ -148,18 +151,36 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         let palette = theme::current(ui.ctx());
 
         ui.label(components::semibold("Take payment").size(TYPE.heading));
-        components::caption(
-            ui,
-            "The exact total is kept on the sale. Only the cash changes hands in whole coins.",
-        );
 
         ui.add_space(SPACING.md);
         components::receipt_line(ui, "Subtotal", &subtotal);
         if rounding_minor != 0 {
-            components::receipt_line(ui, &format!("Rounding ({})", currency.code()), &rounding);
+            // Named by the direction the drawer moved, not by the mechanism: a
+            // cashier can act on "rounded down" without knowing what a rounding
+            // step is, and the receipt says the same words.
+            let label = if rounding_minor < 0 {
+                "Rounded down"
+            } else {
+                "Rounded up"
+            };
+            components::receipt_line(ui, label, &rounding);
         }
         components::divider(ui);
         crate::modules::amount_row(ui, "To pay", &due, true);
+
+        if rounding_minor != 0 {
+            // The line a shop owner stops at, so it gets the whole of it: why
+            // the figure moved, and that the sale still carries the exact total.
+            ui.add_space(SPACING.xs);
+            components::caption(
+                ui,
+                &format!(
+                    "Cash is rounded to the nearest {}, the smallest coin in circulation. \
+                     The customer pays {due}; the sale still records {subtotal}.",
+                    Money::new(crate::currencies::cash_step(currency), currency).format(),
+                ),
+            );
+        }
 
         ui.add_space(SPACING.md);
         components::field_label(ui, "Cash received");
@@ -183,15 +204,6 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             }
 
             if ui
-                .button("Exact")
-                .on_hover_text("Fill in the amount due")
-                .clicked()
-            {
-                payment.tendered = exact.clone();
-                edited = true;
-            }
-
-            if ui
                 .button("Clear")
                 .on_hover_text("Clear cash received")
                 .clicked()
@@ -201,31 +213,37 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             }
         });
 
-        let denoms = crate::currencies::denominations(currency);
-        if !denoms.is_empty() {
-            ui.add_space(SPACING.xs);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-                for &denom in denoms {
-                    let label = Money::new(denom, currency).format();
-                    let btn = egui::Button::new(
-                        egui::RichText::new(&label)
-                            .size(TYPE.small)
-                            .family(theme::semibold()),
-                    )
-                    .min_size(egui::vec2(0.0, 30.0));
+        // Exact first, then the notes that can actually cover the bill. A chip
+        // smaller than the total can only make the drawer come up short, so it
+        // is not offered.
+        ui.add_space(SPACING.xs);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+            for &amount in &quick_amounts(currency, due_minor) {
+                let exact_amount = amount == due_minor;
+                let label = if exact_amount {
+                    "Exact".to_owned()
+                } else {
+                    Money::new(amount, currency).format()
+                };
+                let btn = egui::Button::new(
+                    egui::RichText::new(&label)
+                        .size(TYPE.small)
+                        .family(theme::semibold()),
+                )
+                .min_size(egui::vec2(0.0, 30.0));
 
-                    if ui
-                        .add(btn)
-                        .on_hover_text(format!("Tender {label}"))
-                        .clicked()
-                    {
-                        apply_denomination(payment, denom, due_minor, currency);
-                        edited = true;
-                    }
+                let hint = if exact_amount {
+                    format!("Tender the exact {due}")
+                } else {
+                    format!("Tender {label}")
+                };
+                if ui.add(btn).on_hover_text(hint).clicked() {
+                    apply_denomination(payment, amount, due_minor, currency);
+                    edited = true;
                 }
-            });
-        }
+            }
+        });
 
         // An error about the previous attempt is not about the new one.
         if edited {
@@ -304,6 +322,33 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     }
 }
 
+/// How many one-tap amounts the payment screen offers, exact amount included.
+///
+/// Four notes above the bill is what a customer's pocket realistically holds;
+/// past that the strip stops being a shortcut and becomes the currency.
+const QUICK_AMOUNTS: usize = 5;
+
+/// The amounts worth one tap, in order: the exact total, then the notes that
+/// can cover it, smallest first.
+///
+/// Anything below the total is left out. A 500 shilling chip against a 12,440
+/// bill can only produce a "Short by" line, and the cashier counting a
+/// customer's money is not looking for arithmetic to do. A total that lands on
+/// a note is offered once, not twice.
+fn quick_amounts(currency: money::Currency, due_minor: i64) -> Vec<i64> {
+    let mut amounts = Vec::with_capacity(QUICK_AMOUNTS);
+    amounts.push(due_minor);
+    for &denom in crate::currencies::denominations(currency) {
+        if amounts.len() == QUICK_AMOUNTS {
+            break;
+        }
+        if denom > due_minor {
+            amounts.push(denom);
+        }
+    }
+    amounts
+}
+
 /// Tap a denomination button: fill the note if empty or already sufficient,
 /// or accumulate notes if the cashier is counting in multiple bills.
 fn apply_denomination(
@@ -349,6 +394,31 @@ fn change_row(ui: &mut egui::Ui, amount: &str, color: egui::Color32) {
 mod tests {
     use super::*;
     use money::Currency;
+
+    #[test]
+    fn quick_amounts_start_at_the_total_and_only_go_up() {
+        // 12,440 rounds to 12,400; the 500 and 2,000 chips would leave the
+        // drawer short, so they are not offered.
+        assert_eq!(
+            quick_amounts(Currency::UGX, 12_400),
+            vec![12_400, 20_000, 50_000]
+        );
+
+        // A total that lands on a note is offered once, not twice.
+        assert_eq!(
+            quick_amounts(Currency::UGX, 10_000),
+            vec![10_000, 20_000, 50_000]
+        );
+
+        // Past the biggest note there is still the exact amount.
+        assert_eq!(quick_amounts(Currency::UGX, 80_000), vec![80_000]);
+
+        // A decimal currency, and the cap: four notes, not the whole ladder.
+        assert_eq!(
+            quick_amounts(Currency::USD, 1_234),
+            vec![1_234, 2_000, 5_000, 10_000]
+        );
+    }
 
     #[test]
     fn denomination_clicks_accumulate_when_short_and_replace_when_sufficient() {
