@@ -60,6 +60,10 @@ const CHART_HEIGHT: f32 = 232.0;
 const AXIS_STEPS: usize = 4;
 /// `%w` names, Sunday first, because that is how SQLite numbers the week.
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/// Months for the span over the plot — `strftime` hands back numbers only.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 pub trait Module {
     /// Activity-bar tooltip, palette label, and sidebar heading.
@@ -848,13 +852,29 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
     let peak = days.iter().map(|day| day.revenue).max().unwrap_or_default();
     let (axis_max, step) = nice_axis(peak);
 
-    // A gutter for the value labels and a strip under the bars for the dates.
-    let plot = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + 46.0, rect.top() + 8.0),
-        egui::pos2(rect.right(), rect.bottom() - 24.0),
+    let muted = egui::Color32::from(palette.text_muted);
+
+    // The month is said once, over the plot, so the ticks below can be bare
+    // day numbers. `26 27 28` under a "26 Oct – 1 Nov" is a calendar; `26/10`
+    // ten times over is a spreadsheet.
+    let caption = painter.layout_no_wrap(
+        period_label(days),
+        egui::FontId::new(TYPE.small, mono.clone()),
+        muted,
+    );
+    let caption_height = caption.size().y;
+    painter.galley(
+        egui::pos2(rect.right() - caption.size().x, rect.top()),
+        caption,
+        muted,
     );
 
-    let muted = egui::Color32::from(palette.text_muted);
+    // A gutter for the value labels, the caption's row, and a strip under the
+    // bars for the dates.
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 46.0, rect.top() + caption_height + 10.0),
+        egui::pos2(rect.right(), rect.bottom() - 24.0),
+    );
 
     // Four steps of a round size. The baseline is the axis and gets the
     // stronger hairline; the rest are hints behind the bars.
@@ -933,18 +953,19 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
 
     // As many dates as fit without colliding, counted from the newest day so
     // the right edge is always labelled. A week is read as a rhythm, so its
-    // days are named; a month is read as a calendar, so it is dated. The step
-    // comes from the width of a real label rather than a guess, so a long
-    // range thins out instead of running the dates together.
+    // days are named; a month is read as a calendar, so it is numbered. The
+    // step comes from the widest label the axis will draw, so a long range
+    // thins out instead of running the numbers together.
+    let widest = days
+        .iter()
+        .map(|day| axis_label(day, count))
+        .max_by_key(|label| label.len())
+        .unwrap_or_default();
     let label_width = painter
-        .layout_no_wrap(
-            axis_label(&days[0], count),
-            egui::FontId::new(TYPE.small, mono.clone()),
-            muted,
-        )
+        .layout_no_wrap(widest, egui::FontId::new(TYPE.small, mono.clone()), muted)
         .size()
         .x
-        + 10.0;
+        + 12.0;
     let every = (count as f32 * label_width / plot.width()).ceil().max(1.0) as usize;
     for (index, day) in days.iter().rev().enumerate() {
         if !(count - 1 - index).is_multiple_of(every) {
@@ -967,7 +988,7 @@ fn day_chart(ui: &mut egui::Ui, state: &State, days: &[crate::db::DayTotal]) {
         let day = &days[count - 1 - index];
         response.on_hover_ui(|ui| {
             ui.label(
-                egui::RichText::new(format!("{} {}", weekday_name(day.weekday), day.day))
+                egui::RichText::new(long_date(day))
                     .family(theme::semibold())
                     .size(TYPE.small),
             );
@@ -1031,15 +1052,67 @@ fn compact_amount(minor: i64, state: &State) -> String {
 }
 
 /// One date-axis label. A week is read as a rhythm, so its days are named; a
-/// month is read as a calendar, so its days are dated. A lone day carries
-/// both, because "Sun" alone does not say which Sunday.
+/// month is read as a calendar, so it is numbered. The month itself is said
+/// once over the plot, so no tick repeats it.
 fn axis_label(day: &crate::db::DayTotal, count: usize) -> String {
-    let weekday = weekday_name(day.weekday);
-    match count {
-        0 | 1 => format!("{weekday} {}", day.day),
-        2..=8 => weekday.to_owned(),
-        _ => day.day.clone(),
+    if count <= 8 {
+        weekday_name(day.weekday).to_owned()
+    } else {
+        day_of_month(day).to_owned()
     }
+}
+
+/// The span the chart covers: `26 Oct – 1 Nov`, or one month said once.
+fn period_label(days: &[crate::db::DayTotal]) -> String {
+    match days {
+        [] => String::new(),
+        [only] => format!("{} {}", day_of_month(only), month_name(only)),
+        [newest, .., oldest] => {
+            if month_name(newest) == month_name(oldest) {
+                format!(
+                    "{}–{} {}",
+                    day_of_month(oldest),
+                    day_of_month(newest),
+                    month_name(newest)
+                )
+            } else {
+                format!(
+                    "{} {} – {} {}",
+                    day_of_month(oldest),
+                    month_name(oldest),
+                    day_of_month(newest),
+                    month_name(newest)
+                )
+            }
+        }
+    }
+}
+
+/// `Sun 1 Nov` — the way a day is said out loud, for the hover card.
+fn long_date(day: &crate::db::DayTotal) -> String {
+    format!(
+        "{} {} {}",
+        weekday_name(day.weekday),
+        day_of_month(day),
+        month_name(day)
+    )
+}
+
+/// `dd/mm` without the zero the calendar pads it with: an axis tick says `9`.
+fn day_of_month(day: &crate::db::DayTotal) -> &str {
+    match day.day.get(..2).map(|day| day.trim_start_matches('0')) {
+        Some(day) if !day.is_empty() => day,
+        _ => "0",
+    }
+}
+
+fn month_name(day: &crate::db::DayTotal) -> &'static str {
+    let month = day
+        .day
+        .get(3..5)
+        .and_then(|month| month.parse::<usize>().ok())
+        .unwrap_or(1);
+    MONTHS[month.clamp(1, MONTHS.len()) - 1]
 }
 
 fn weekday_name(weekday: u8) -> &'static str {
@@ -1958,5 +2031,42 @@ mod tests {
         for module in all() {
             assert!(!module.title().is_empty());
         }
+    }
+
+    fn day(day: &str, weekday: u8, revenue: i64) -> crate::db::DayTotal {
+        crate::db::DayTotal {
+            day: day.to_owned(),
+            weekday,
+            sales: 1,
+            revenue,
+        }
+    }
+
+    /// The axis names the month once and then only numbers the days, so the
+    /// reading of `dd/mm` is the whole contract: a leading zero reads as a
+    /// typo, and a misread month captions the chart with the wrong span.
+    #[test]
+    fn the_axis_names_the_week_and_numbers_the_month() {
+        let week = day("26/10", 1, 0);
+        assert_eq!(axis_label(&week, 7), "Mon");
+        assert_eq!(axis_label(&week, 8), "Mon");
+        assert_eq!(axis_label(&week, 9), "26");
+        assert_eq!(axis_label(&day("01/11", 0, 0), 30), "1");
+    }
+
+    #[test]
+    fn the_caption_says_the_span_once() {
+        // Newest first, the order `by_day` hands them over in.
+        let crossing = [day("01/11", 0, 0), day("26/10", 1, 0)];
+        assert_eq!(period_label(&crossing), "26 Oct – 1 Nov");
+        let one_month = [day("31/10", 6, 0), day("12/10", 1, 0)];
+        assert_eq!(period_label(&one_month), "12–31 Oct");
+        assert_eq!(period_label(&[day("01/11", 0, 0)]), "1 Nov");
+        assert_eq!(period_label(&[]), "");
+    }
+
+    #[test]
+    fn a_day_is_said_with_its_weekday() {
+        assert_eq!(long_date(&day("01/11", 0, 0)), "Sun 1 Nov");
     }
 }
