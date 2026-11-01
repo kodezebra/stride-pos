@@ -147,9 +147,10 @@ pub fn cash_step(currency: Currency) -> i64 {
 
 /// The common tender denominations for a currency, in minor units.
 ///
-/// Displayed as quick-tap buttons on the payment modal so a cashier whose
-/// customer handed them cash other than the exact amount does not have to
-/// type into the number field.
+/// The payment modal rounds the bill up to the biggest of these to offer the
+/// cashier one-tap amounts, so the list is the note ladder rather than a menu:
+/// a cashier whose customer handed cash other than the exact amount should not
+/// have to type into the number field.
 pub fn denominations(currency: Currency) -> &'static [i64] {
     match currency.code() {
         // Uganda (UGX): 500 coin, 1k, 2k, 5k, 10k, 20k, 50k notes
