@@ -324,28 +324,39 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
 
 /// How many one-tap amounts the payment screen offers, exact amount included.
 ///
-/// Four notes above the bill is what a customer's pocket realistically holds;
-/// past that the strip stops being a shortcut and becomes the currency.
+/// Three handovers above the bill is what a customer's pocket realistically
+/// holds; past that the strip stops being a shortcut and becomes the currency.
 const QUICK_AMOUNTS: usize = 5;
 
-/// The amounts worth one tap, in order: the exact total, then the notes that
-/// can cover it, smallest first.
+/// The amounts worth one tap, in order: the exact total first, then the bill
+/// rounded up to each of the biggest notes, smallest first.
 ///
-/// Anything below the total is left out. A 500 shilling chip against a 12,440
-/// bill can only produce a "Short by" line, and the cashier counting a
-/// customer's money is not looking for arithmetic to do. A total that lands on
-/// a note is offered once, not twice.
+/// A chip is an amount, not a note. A 27,500 bill is settled with a twenty and
+/// a ten (30,000) or with two twenties (40,000) at least as often as with a
+/// single 50,000, so each big note is a step the bill is rounded up to rather
+/// than a chip in its own right. That is also why a total that lands on a note
+/// still gets the round-ups above it: the customer holding two notes of the
+/// exact amount is not the common case.
+///
+/// Only the biggest notes are steps. Below them rounding turns into change
+/// counting — nobody is helped by a chip that turns 12,400 into 12,500 — and
+/// nothing under the total is offered at all, because it can only produce a
+/// "Short by" line.
 fn quick_amounts(currency: money::Currency, due_minor: i64) -> Vec<i64> {
     let mut amounts = Vec::with_capacity(QUICK_AMOUNTS);
     amounts.push(due_minor);
-    for &denom in crate::currencies::denominations(currency) {
-        if amounts.len() == QUICK_AMOUNTS {
-            break;
-        }
-        if denom > due_minor {
-            amounts.push(denom);
+    // Denominations are ascending, so the biggest notes are at the end.
+    for &step in crate::currencies::denominations(currency)
+        .iter()
+        .rev()
+        .take(QUICK_AMOUNTS - 1)
+    {
+        let rounded = due_minor - due_minor.rem_euclid(step) + step;
+        if !amounts.contains(&rounded) {
+            amounts.push(rounded);
         }
     }
+    amounts.sort_unstable();
     amounts
 }
 
@@ -396,24 +407,29 @@ mod tests {
     use money::Currency;
 
     #[test]
-    fn quick_amounts_start_at_the_total_and_only_go_up() {
-        // 12,440 rounds to 12,400; the 500 and 2,000 chips would leave the
-        // drawer short, so they are not offered.
+    fn quick_amounts_start_at_the_total_and_round_up_to_the_big_notes() {
+        // 12,440 rounds to 12,400. A customer reaches for a 15,000 or a 20,000
+        // long before they reach for 600 shillings to make it 13,000.
         assert_eq!(
             quick_amounts(Currency::UGX, 12_400),
-            vec![12_400, 20_000, 50_000]
+            vec![12_400, 15_000, 20_000, 50_000]
         );
 
-        // A total that lands on a note is offered once, not twice.
+        // The case the strip exists for: 27,500 is paid with a twenty and a
+        // ten, with two twenties, or with one fifty — never with one note.
+        assert_eq!(
+            quick_amounts(Currency::UGX, 27_500),
+            vec![27_500, 30_000, 40_000, 50_000]
+        );
+
+        // A total that lands on a note keeps the round-ups above it.
         assert_eq!(
             quick_amounts(Currency::UGX, 10_000),
-            vec![10_000, 20_000, 50_000]
+            vec![10_000, 15_000, 20_000, 50_000]
         );
 
-        // Past the biggest note there is still the exact amount.
-        assert_eq!(quick_amounts(Currency::UGX, 80_000), vec![80_000]);
-
-        // A decimal currency, and the cap: four notes, not the whole ladder.
+        // A decimal currency rounds to the same ladder: $12.34 to $20, $50,
+        // $100, and no chip for the two cents that would make it $12.36.
         assert_eq!(
             quick_amounts(Currency::USD, 1_234),
             vec![1_234, 2_000, 5_000, 10_000]
