@@ -20,6 +20,7 @@ mod checkout;
 mod commands;
 mod currencies;
 mod db;
+mod import;
 mod modules;
 mod prefs;
 mod settings;

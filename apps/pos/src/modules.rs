@@ -669,16 +669,23 @@ impl Module for Products {
         }
 
         let mut new = false;
+        let mut import = false;
         ui.horizontal(|ui| {
             components::section_title(ui, "Catalog");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if components::primary_button(ui, "New product").clicked() {
                     new = true;
                 }
+                if ui.button("Import CSV").clicked() {
+                    import = true;
+                }
             });
         });
         if new {
             state.start_product();
+        }
+        if import {
+            state.start_import();
         }
 
         if state.products.is_empty() {
@@ -855,6 +862,13 @@ fn product_row(
 /// backdrop covers the screen and the list behind it cannot be clicked.
 pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
+    // Suggested category names, computed before the form is borrowed for
+    // editing: the list comes from the catalog read-only, the chips are filled
+    // into the draft being edited.
+    let suggestions: Vec<String> = match state.product_editor.as_ref() {
+        Some(draft) => crate::state::category_suggestions(&state.categories, &draft.category),
+        None => Vec::new(),
+    };
     let Some(draft) = state.product_editor.as_mut() else {
         return;
     };
@@ -900,6 +914,25 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             });
         });
 
+        // Category names the till knows, tapped instead of typed: the
+        // catalog's own first, then a starter set for a shop that has not
+        // named its shelves yet. Typos are why this exists — "Drinks" and
+        // "drinks" must not become two filters because they were typed twice.
+        if !suggestions.is_empty() {
+            ui.add_space(SPACING.sm);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+                for name in &suggestions {
+                    if name.eq_ignore_ascii_case(draft.category.trim()) {
+                        continue;
+                    }
+                    if ui.add(egui::Button::new(name.clone()).small()).clicked() {
+                        draft.category = name.clone();
+                    }
+                }
+            });
+        }
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Barcode (optional)");
         ui.add_space(SPACING.xs);
@@ -941,6 +974,78 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     }
     if cancel {
         state.product_editor = None;
+    }
+}
+
+/// The CSV import, drawn with the other foreground layers in `shell.rs`.
+///
+/// The path is typed rather than picked from a dialog: importing is a one-time
+/// setup job for the owner, not a daily flow, and a file-dialog dependency is
+/// not worth what it costs a till this small. The modal closes on a successful
+/// import and stays open on anything the till could not read, with the reason
+/// it could not.
+pub fn import_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(draft) = state.import.as_mut() else {
+        return;
+    };
+
+    let mut import = false;
+    let mut cancel = false;
+
+    egui::Modal::new(egui::Id::new("pos_import")).show(ctx, |ui| {
+        ui.set_width(460.0);
+
+        ui.label(components::semibold("Import products from CSV").size(TYPE.heading));
+        components::caption(
+            ui,
+            "Rows are read as name, category, price and an optional barcode. Headings \
+             are honoured when present, so a file from the shop's spreadsheet works as is; \
+             prices are read in this till's currency.",
+        );
+        components::caption(
+            ui,
+            "Rows that cannot be read are skipped and counted, never half-imported.",
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "File path");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.path, "/home/shop/products.csv", 350.0);
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Import").clicked() {
+                import = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    // Keyboard, matching the product form: Enter runs the import and Escape
+    // leaves without touching the catalog.
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        import = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+
+    if import {
+        state.import_products();
+    }
+    if cancel {
+        state.import = None;
     }
 }
 
