@@ -776,7 +776,7 @@ pub fn override_modal(ctx: &egui::Context, state: &mut State) {
     let mut cancel = false;
     let mut submit = false;
 
-    egui::Modal::new(egui::Id::new("pos_override")).show(ctx, |ui| {
+    crate::modules::modal(ctx, egui::Id::new("pos_override")).show(ctx, |ui| {
         ui.set_width(380.0);
         let (permission, error, opening, mut secret, mut pick) = {
             let request = state.override_request.as_ref().expect("open");

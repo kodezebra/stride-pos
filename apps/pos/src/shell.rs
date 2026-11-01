@@ -155,7 +155,7 @@ impl PosShell {
         let mut chosen = None;
         let mut cancel = false;
 
-        egui::Modal::new(egui::Id::new("pos_currency_picker")).show(ctx, |ui| {
+        crate::modules::modal(ctx, egui::Id::new("pos_currency_picker")).show(ctx, |ui| {
             ui.set_width(400.0);
 
             ui.label(components::semibold("Currency").size(TYPE.heading));
@@ -280,7 +280,21 @@ impl PosShell {
         regions::sidebar(ui, spec, &mut open, |ui| module.sidebar(ui, state));
         state.set_sidebar_open(active, open);
 
-        regions::workspace(ui, |ui| modules[active].workspace(ui, state));
+        regions::workspace(ui, |ui| {
+            // Pages scroll as a whole: the dashboard's 30-day chart and the
+            // staff list both run past the fold, and a page that cannot scroll
+            // hides the bottom of itself. Sell opts out — its cart is pinned to
+            // the pane, and an unbounded height would un-pin it.
+            let module = &mut modules[active];
+            if module.scrolls() {
+                egui::ScrollArea::vertical()
+                    .id_salt(("page", active))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| module.workspace(ui, state));
+            } else {
+                module.workspace(ui, state);
+            }
+        });
     }
 
     fn persist(&mut self) {
