@@ -301,6 +301,10 @@ pub struct State {
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
 
+    /// The sale the operator tapped in a list, read in full for the detail
+    /// modal. `None` while every list is just a list.
+    pub sale_open: Option<crate::db::SaleDetail>,
+
     /// One-line feedback for an action that has no flow behind it yet. Cleared
     /// by the next action, so it never turns into a permanent lie in the UI.
     pub notice: Option<String>,
@@ -389,6 +393,7 @@ impl State {
             import: None,
             product_delete: None,
             payment: None,
+            sale_open: None,
             notice: None,
             settings,
             settings_path,
@@ -1248,6 +1253,23 @@ impl State {
         });
     }
 
+    /// Read one sale's full record for the detail modal.
+    ///
+    /// The list abbreviates by design; this is the answer to "what was in
+    /// sale 4?". An id that points nowhere is logged and ignored — a row can
+    /// only be clicked while it is on screen, so nothing to show is not an
+    /// operator-visible error.
+    pub fn open_sale(&mut self, id: i64) {
+        match crate::db::sale_detail(&self.store, id) {
+            Some(detail) => self.sale_open = Some(detail),
+            None => tracing::warn!(sale = id, "a clicked sale could not be read"),
+        }
+    }
+
+    pub fn close_sale(&mut self) {
+        self.sale_open = None;
+    }
+
     pub fn clear_cart(&mut self) {
         self.cart.clear();
         self.notice = None;
@@ -1613,6 +1635,28 @@ mod tests {
 
         state.start_payment();
         assert!(state.payment.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tapping_a_listed_sale_opens_its_receipt() {
+        let (mut state, path) = state("sale-open", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 400)];
+
+        state.start_payment();
+        state.confirm_payment();
+
+        let id = crate::db::sales(&state.store, 3, 10)[0].id;
+        state.open_sale(id);
+
+        let detail = state.sale_open.as_ref().expect("the receipt opened");
+        assert_eq!(detail.id, id);
+        assert_eq!(detail.lines.len(), 1);
+        assert_eq!(detail.lines[0].name, "Sugar");
+
+        state.close_sale();
+        assert!(state.sale_open.is_none());
 
         let _ = std::fs::remove_file(path);
     }

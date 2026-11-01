@@ -119,6 +119,9 @@ impl PosShell {
         // The bulk sibling of the product editor: a CSV import is one owner's
         // setup job, but it still owns the screen while it reads its file.
         crate::modules::import_modal(ui.ctx(), &mut self.state);
+        // The receipt behind a sales row, one tap from either list that shows
+        // sales; it owns the screen while it holds the floor.
+        crate::modules::sale_detail_modal(ui.ctx(), &mut self.state);
         // Same reason: paying is the one flow that writes a sale, and it must own
         // the screen while the cashier counts notes.
         crate::checkout::payment_modal(ui.ctx(), &mut self.state);
