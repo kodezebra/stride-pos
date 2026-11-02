@@ -1400,6 +1400,8 @@ impl Module for Products {
 
         let mut new = false;
         let mut import = false;
+        let mut export_visible = false;
+        let mut export_all = false;
         ui.horizontal(|ui| {
             components::section_title(ui, "Catalog");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1409,6 +1411,12 @@ impl Module for Products {
                 if ui.button("Import CSV").clicked() {
                     import = true;
                 }
+                if ui.button("Export all").clicked() {
+                    export_all = true;
+                }
+                if ui.button("Export CSV").clicked() {
+                    export_visible = true;
+                }
             });
         });
         if new {
@@ -1416,6 +1424,33 @@ impl Module for Products {
         }
         if import {
             state.start_import();
+        }
+
+        let needle = state.search.trim().to_lowercase();
+        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+
+        // "Export CSV" is what is on screen; "Export all" is the whole catalog.
+        // The names of the files carry the difference, because a folder with
+        // both in it must not make the operator open them to find out which
+        // one they got.
+        if export_visible {
+            let rows: Vec<Product> = visible
+                .iter()
+                .map(|&index| state.products[index].clone())
+                .collect();
+            export_products(state, &rows, "products");
+        }
+        if export_all {
+            let rows = state.products.clone();
+            export_products(state, &rows, "products-all");
+        }
+
+        components::caption(
+            ui,
+            "Barcodes that start with 0 may need a text column in Excel.",
+        );
+        if let Some(notice) = state.file_notice.as_deref() {
+            components::caption(ui, notice);
         }
 
         if state.products.is_empty() {
@@ -1427,9 +1462,6 @@ impl Module for Products {
             );
             return;
         }
-
-        let needle = state.search.trim().to_lowercase();
-        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
         if visible.is_empty() {
             components::empty_state_card(
@@ -1490,6 +1522,51 @@ fn categories_sidebar(ui: &mut egui::Ui, state: &mut State) {
             state.category = Some(category.clone());
         }
     }
+}
+
+/// Write a product export and say where it went.
+///
+/// The path is the point: an operator who does not know where the file is has
+/// not been helped. A failure lands in the same line a success would have, so a
+/// missing export cannot look like a button that did nothing.
+fn export_products(state: &mut State, rows: &[Product], name: &str) {
+    let body = crate::export::products_csv(rows, state.currency);
+    save_export(state, name, &body, rows.len(), ("product", "products"));
+}
+
+/// Write the sales export for the range the screen is showing.
+fn export_sales(state: &mut State) {
+    let rows = match crate::db::export_sales(&state.store, state.range) {
+        Ok(rows) => rows,
+        Err(err) => {
+            state.file_notice = Some(format!("Export failed: {err:#}"));
+            return;
+        }
+    };
+    let body = crate::export::sales_csv(&rows, state.currency);
+    save_export(state, "sales", &body, rows.len(), ("sale", "sales"));
+}
+
+/// Name a file after the second it was written and report it in `file_notice`.
+///
+/// The stamp comes from SQLite, the same clock that dates the sales inside the
+/// file, so two exports cannot disagree about when the books were taken.
+fn save_export(state: &mut State, name: &str, body: &str, count: usize, nouns: (&str, &str)) {
+    let stamp = match crate::db::stamp(&state.store) {
+        Ok(stamp) => stamp,
+        Err(err) => {
+            state.file_notice = Some(format!("Export failed: {err:#}"));
+            return;
+        }
+    };
+
+    let noun = if count == 1 { nouns.0 } else { nouns.1 };
+    let dir = state.paths.data.join("exports");
+    let file = format!("{name}-{stamp}.csv");
+    state.file_notice = Some(match crate::export::write(&dir, &file, body) {
+        Ok(path) => format!("Exported {count} {noun} to {}", path.display()),
+        Err(err) => format!("Export failed: {err:#}"),
+    });
 }
 
 /// Whether a product passes the category and search filters.
@@ -2030,7 +2107,21 @@ impl Module for Sales {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::section_title(ui, "Transactions");
+        let mut export = false;
+        ui.horizontal(|ui| {
+            components::section_title(ui, "Transactions");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Export CSV").clicked() {
+                    export = true;
+                }
+            });
+        });
+        if export {
+            export_sales(state);
+        }
+        if let Some(notice) = state.file_notice.as_deref() {
+            components::caption(ui, notice);
+        }
 
         let sales = crate::db::sales(&state.store, state.range, 100);
         if sales.is_empty() {
@@ -2522,5 +2613,41 @@ mod tests {
 
         assert_eq!(scan_target(&products, "999", &visible), Scan::None);
         assert_eq!(scan_target(&products, "   ", &visible), Scan::None);
+    }
+
+    /// The two product buttons answer different questions: one is "what I am
+    /// looking at", the other "everything this shop sells". With a filter on,
+    /// the files must differ in rows, not just in name.
+    #[test]
+    fn a_filtered_export_is_shorter_than_the_whole_catalog() {
+        let mut products = [
+            product(1, "Cola", None),
+            product(2, "Bread", None),
+            product(3, "Milk", None),
+        ];
+        products[1].category = "Food".to_owned();
+        products[2].category = "Food".to_owned();
+
+        let visible = visible_products(&products, Some("Food"), "");
+        let filtered: Vec<Product> = visible
+            .iter()
+            .map(|&index| products[index].clone())
+            .collect();
+
+        let currency = money::tender_from_code("UGX").expect("UGX is a tender");
+        assert_eq!(
+            crate::export::products_csv(&filtered, currency)
+                .lines()
+                .count(),
+            3,
+            "a header and the two Food products"
+        );
+        assert_eq!(
+            crate::export::products_csv(&products, currency)
+                .lines()
+                .count(),
+            4,
+            "a header and all three products, whatever the sidebar says"
+        );
     }
 }
