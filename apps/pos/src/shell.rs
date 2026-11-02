@@ -10,8 +10,8 @@
 //!
 //! | Key         | Action                    |
 //! |-------------|---------------------------|
-//! | `F1`..`F5`, `F7` | Switch module        |
-//! | `F6`, `F8`  | Reserved: inventory, purchase orders |
+//! | `F1`..`F7`  | Switch module             |
+//! | `F8`        | Reserved: purchase orders |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
 //! | `Ctrl+Enter`| Take payment              |
@@ -119,6 +119,12 @@ impl PosShell {
         // The supplier directory's form, owned by its module for the same
         // reason and drawn in the same foreground layer.
         crate::modules::supplier_editor_modal(ui.ctx(), &mut self.state);
+        // Inventory's three surfaces: starting a count, recording one movement,
+        // and reading the ledger behind one product. Drawn in that order so a
+        // history modal never opens underneath a movement form.
+        crate::modules::track_modal(ui.ctx(), &mut self.state);
+        crate::modules::stock_move_modal(ui.ctx(), &mut self.state);
+        crate::modules::stock_history_modal(ui.ctx(), &mut self.state);
         // Choosing the file to read or the folder to write into. Drawn before
         // the typed import form so that "Type the path instead" can hand the
         // screen over in the same frame, without a flash of both.
@@ -255,6 +261,9 @@ impl PosShell {
         if take_payment
             && self.state.product_editor.is_none()
             && self.state.supplier_editor.is_none()
+            && self.state.stock_editor.is_none()
+            && self.state.stock_move.is_none()
+            && self.state.stock_history.is_none()
             && self.state.payment.is_none()
         {
             self.state.start_payment();

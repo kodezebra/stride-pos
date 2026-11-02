@@ -34,6 +34,14 @@ pub fn all() -> Vec<Command<State>> {
             modules::open(state, modules::SETTINGS)
         })
         .hint("F5"),
+        Command::new("Go to Inventory", |state: &mut State| {
+            modules::open(state, modules::INVENTORY)
+        })
+        .hint("F6"),
+        Command::new("Go to Suppliers", |state: &mut State| {
+            modules::open(state, modules::SUPPLIERS)
+        })
+        .hint("F7"),
         Command::new("Toggle sidebar", State::toggle_sidebar).hint("Ctrl+B"),
         Command::new("Toggle theme", State::toggle_theme).hint("Ctrl+T"),
         Command::new("Take payment", State::start_payment).hint("F12 or Ctrl+Enter"),

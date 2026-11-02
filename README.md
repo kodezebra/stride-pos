@@ -29,6 +29,15 @@ category, give it a barcode. Everything here becomes a key on the Sell screen.
 notes. Search by any of them, and archive a supplier you no longer use without
 losing the record. Purchases and stock are not part of this screen yet.
 
+**Inventory** — what the ledger says is on the shelf. Tracking is opt-in per
+product: choose a product, count it, and set the level that counts as low. From
+then on every sale of that product subtracts automatically. Receiving, customer
+returns, waste and a physical count are recorded as movements, and each product
+keeps its own history. Stock is always the sum of those movements; deleting a
+product deletes its history, because the ledger is operational and not a
+financial record. Cashiers can see stock; a manager or the owner records a
+movement.
+
 **Sales** — every completed sale in the chosen range, newest first.
 
 **Settings** — light or dark appearance, a preview of the receipt layout, the
@@ -43,7 +52,7 @@ Three roles, and a till that asks for the person rather than a username.
 |---|---|---|---|
 | Sell and take payment | yes | yes | yes |
 | Lock the till | yes | yes | yes |
-| Void, refund, discount, change a price, open the drawer without a sale, edit settings, manage suppliers | — | yes | yes |
+| Void, refund, discount, change a price, open the drawer without a sale, edit settings, manage suppliers, change stock | — | yes | yes |
 | Add staff, switch an account off, reset a PIN, change the currency | — | — | yes |
 
 The owner account is the back office. An owner who also works the counter should
@@ -67,7 +76,7 @@ try up to fifteen minutes. The till locks itself after five idle minutes
 
 | Key | Does |
 |---|---|
-| `F1` … `F5`, `F7` | switch between the six sections |
+| `F1` … `F7` | switch between the seven sections |
 | `Ctrl+Enter` | take payment for the cart |
 | `Ctrl+L` | lock the till |
 | `Ctrl+P` | command palette — jump anywhere by name |
@@ -93,14 +102,15 @@ stops working the moment it has been used once.
 
 ## Status
 
-This is an early build. You can sign in, sell, and lock the till: build a cart,
-take the cash, and the sale is recorded with the name of whoever took it, on the
-Dashboard and in Sales.
+This is an early build. You can sign in, sell, lock the till, keep a supplier
+directory, and track stock: build a cart, take the cash, and the sale is recorded
+with the name of whoever took it, on the Dashboard and in Sales.
 
 - payments are cash only — mobile money and cards come later
 - the catalogue is entered by hand; importing a supplier's list comes later
 - receipts can be previewed but not printed
 - void, refund and discount have permissions but no screen yet
+- inventory tracks counts, not cost: purchase orders and valuation come later
 - each till runs alone; there is no sync between terminals yet
 
 ## Running it

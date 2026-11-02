@@ -130,6 +130,100 @@ pub struct SupplierFields<'a> {
     pub notes: &'a str,
 }
 
+/// Why a movement happened.
+///
+/// The stored spelling is stable: it is in a shipped migration and in every row
+/// already written. The label is the till's wording and may change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StockKind {
+    /// The count taken when tracking started.
+    Opening,
+    /// Written by [`record_sale`], one row per sold line.
+    Sale,
+    /// Goods arriving from a supplier.
+    Receive,
+    /// Stock coming back onto the shelf.
+    Return,
+    /// Spoiled, broken, or otherwise unsellable.
+    Waste,
+    /// A correction after a physical count, positive or negative.
+    Adjust,
+}
+
+impl StockKind {
+    pub const ALL: [StockKind; 6] = [
+        StockKind::Opening,
+        StockKind::Sale,
+        StockKind::Receive,
+        StockKind::Return,
+        StockKind::Waste,
+        StockKind::Adjust,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            StockKind::Opening => "opening",
+            StockKind::Sale => "sale",
+            StockKind::Receive => "receive",
+            StockKind::Return => "return",
+            StockKind::Waste => "waste",
+            StockKind::Adjust => "adjust",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StockKind::Opening => "Opening count",
+            StockKind::Sale => "Sale",
+            StockKind::Receive => "Received",
+            StockKind::Return => "Returned",
+            StockKind::Waste => "Waste",
+            StockKind::Adjust => "Adjustment",
+        }
+    }
+}
+
+/// One tracked product and what the ledger says is on the shelf.
+///
+/// `on_hand` is always `SUM(delta)`, never a stored count. Negative is allowed:
+/// the till must keep selling when the shelf and the database disagree, and an
+/// adjustment is how the shop says so afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StockItem {
+    pub product_id: i64,
+    pub name: String,
+    pub category: String,
+    pub on_hand: i64,
+    pub low_stock: i64,
+}
+
+impl StockItem {
+    pub fn is_out(&self) -> bool {
+        self.on_hand <= 0
+    }
+
+    pub fn is_low(&self) -> bool {
+        !self.is_out() && self.on_hand <= self.low_stock
+    }
+}
+
+/// One line of a product's stock history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StockMovement {
+    pub id: i64,
+    /// Signed: positive puts stock on the shelf, negative takes it off.
+    pub delta: i64,
+    pub kind: StockKind,
+    pub note: Option<String>,
+    pub created_at: String,
+    /// Who recorded it, when the movement names a staff account.
+    pub user: Option<String>,
+}
+
 /// Owner stamp in the SQLite header. Arbitrary, permanent, and never derived
 /// from the app's name — a rename must not orphan a till's database.
 pub const APPLICATION_ID: i64 = 1_836_624_513;
@@ -313,6 +407,53 @@ pub const MIGRATIONS: &[Migration] = &[
 
             CREATE UNIQUE INDEX IF NOT EXISTS suppliers_name
                 ON suppliers (name COLLATE NOCASE);
+        "#,
+    },
+    // Stock, as a ledger rather than a number.
+    //
+    // `stock_movements` is append-only: every receive, sale, return, waste and
+    // adjustment is a signed `delta`, and what the shop has is the sum. That is
+    // the only shape that survives corrections — an "on hand" column has to be
+    // repaired by hand the first time somebody mistypes a count, while a wrong
+    // movement can be answered with another one that says why.
+    //
+    // Tracking is opt-in per product. A catalog imported from a spreadsheet has
+    // no counts, and inventing zero for every row would claim the shop is out
+    // of everything. `tracked` marks the rows that have been counted.
+    //
+    // `low_stock` is a per-product warning line, not a reorder policy: units are
+    // whole things on a shelf, and a shop that sells crates and single sweets
+    // needs two different lines. Five is a default, not a truth.
+    //
+    // Deleting a product deletes its movements. This is inventory, not the
+    // ledger: there is no valuation or cost to preserve, and a receipt keeps the
+    // name and price of what was sold. A purchasing module that needs history
+    // past a deleted catalog row will have to carry its own snapshot.
+    Migration {
+        version: 7,
+        name: "create_stock_ledger",
+        sql: r#"
+            ALTER TABLE products ADD COLUMN tracked INTEGER NOT NULL DEFAULT 0
+                CHECK (tracked IN (0, 1));
+            ALTER TABLE products ADD COLUMN low_stock INTEGER NOT NULL DEFAULT 5
+                CHECK (low_stock >= 0);
+
+            CREATE TABLE IF NOT EXISTS stock_movements (
+                id         INTEGER PRIMARY KEY,
+                product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                delta      INTEGER NOT NULL CHECK (delta <> 0),
+                kind       TEXT NOT NULL CHECK
+                    (kind IN ('opening', 'sale', 'receive', 'return', 'waste', 'adjust')),
+                note       TEXT,
+                sale_id    INTEGER REFERENCES sales(id),
+                user_id    TEXT REFERENCES users(id),
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS stock_movements_product
+                ON stock_movements (product_id, id);
+            CREATE INDEX IF NOT EXISTS stock_movements_sale
+                ON stock_movements (sale_id) WHERE sale_id IS NOT NULL;
         "#,
     },
 ];
@@ -899,6 +1040,191 @@ fn optional_text(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Every product whose stock is tracked, with the ledger's sum.
+///
+/// One query rather than a count kept on `products`: the ledger is the truth,
+/// and a cached number is the thing that silently disagrees with it. The list is
+/// small enough to read whole, like the catalog.
+pub fn stock(store: &storage::Store) -> Vec<StockItem> {
+    let mut statement = match store.conn().prepare(
+        "SELECT p.id, p.name, p.category, p.low_stock, COALESCE(SUM(m.delta), 0)
+         FROM products p
+         LEFT JOIN stock_movements m ON m.product_id = p.id
+         WHERE p.tracked = 1
+         GROUP BY p.id
+         ORDER BY p.name COLLATE NOCASE",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "stock prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(StockItem {
+            product_id: row.get(0)?,
+            name: row.get(1)?,
+            category: row.get(2)?,
+            low_stock: row.get(3)?,
+            on_hand: row.get(4)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "stock query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Start tracking a product, with the count on the shelf right now.
+///
+/// The opening count is one movement, not a quantity column: later sales and
+/// deliveries append to the same ledger, and a wrong opening count is corrected
+/// by another movement like any other mistake. A zero opening count writes no
+/// movement — nothing moved — but still marks the product tracked, which is what
+/// puts it on the screen and makes sales decrement it.
+pub fn track_product(
+    store: &storage::Store,
+    product_id: i64,
+    opening: i64,
+    low_stock: i64,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(opening >= 0, "the opening count cannot be negative");
+    anyhow::ensure!(low_stock >= 0, "the low-stock level cannot be negative");
+
+    let transaction = store.conn().unchecked_transaction()?;
+
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1)",
+        [product_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(exists, "that product is no longer in the catalog");
+
+    let already: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND tracked = 1)",
+        [product_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(!already, "that product is already tracked");
+
+    transaction.execute(
+        "UPDATE products SET tracked = 1, low_stock = ?2 WHERE id = ?1",
+        (product_id, low_stock),
+    )?;
+
+    if opening != 0 {
+        transaction.execute(
+            "INSERT INTO stock_movements (product_id, delta, kind, user_id)
+             VALUES (?1, ?2, 'opening', ?3)",
+            (product_id, opening, user_id),
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Append a manual movement to a tracked product's ledger.
+///
+/// Signs are fixed by the kind, not left to the caller: `Receive` and `Return`
+/// add stock, `Waste` removes it, and only `Adjust` may go either way. A UI that
+/// computes the wrong sign is a bug this function refuses rather than stores.
+pub fn record_stock_movement(
+    store: &storage::Store,
+    product_id: i64,
+    delta: i64,
+    kind: StockKind,
+    note: &str,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(delta != 0, "a stock movement must change the count");
+    match kind {
+        StockKind::Receive | StockKind::Return => {
+            anyhow::ensure!(delta > 0, "{} must add stock", kind.label())
+        }
+        StockKind::Waste => anyhow::ensure!(delta < 0, "{} must remove stock", kind.label()),
+        StockKind::Adjust => {}
+        StockKind::Opening | StockKind::Sale => {
+            anyhow::bail!("{} is written by its own flow", kind.label())
+        }
+    }
+
+    let tracked: bool = store.conn().query_row(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND tracked = 1)",
+        [product_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(tracked, "that product's stock is not tracked");
+
+    store.conn().execute(
+        "INSERT INTO stock_movements (product_id, delta, kind, note, user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (product_id, delta, kind.key(), optional_text(note), user_id),
+    )?;
+    Ok(())
+}
+
+/// A product's movements, newest first.
+///
+/// Capped because the history is a question about recent stock, not an archive:
+/// a modal that has to paint ten thousand deliveries is slower than the answer
+/// is useful. The cap is stated on screen when it cuts the list.
+pub const MOVEMENT_HISTORY: i64 = 200;
+
+pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMovement> {
+    let mut statement = match store.conn().prepare(
+        "SELECT m.id, m.delta, m.kind, m.note,
+                strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name
+         FROM stock_movements m
+         LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.product_id = ?1
+         ORDER BY m.id DESC
+         LIMIT ?2",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "stock history prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map((product_id, MOVEMENT_HISTORY), |row| {
+        let kind: String = row.get(2)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            kind,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    });
+
+    let Ok(rows) = rows else {
+        tracing::warn!("stock history query failed");
+        return Vec::new();
+    };
+
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, delta, kind, note, created_at, user)| {
+            Some(StockMovement {
+                id,
+                delta,
+                kind: StockKind::from_key(&kind)?,
+                note,
+                created_at,
+                user,
+            })
+        })
+        .collect()
+}
+
 /// Record a sale and its payment in one transaction.
 ///
 /// The amounts are checked here rather than left to the CHECK constraints, so a
@@ -913,6 +1239,9 @@ fn optional_text(value: &str) -> Option<&str> {
 /// `user_id` is the cashier the money is attributed to. It is `None` only for a
 /// sale recorded while the till has no staff accounts, which cannot happen once
 /// the owner exists.
+///
+/// Each line for a tracked product also writes a negative `sale` movement to
+/// the stock ledger, inside the same transaction.
 pub fn record_sale(
     store: &storage::Store,
     lines: &[SaleLine],
@@ -970,6 +1299,30 @@ pub fn record_sale(
                 line.qty * line.unit_minor,
             ),
         )?;
+
+        // A tracked product's shelf count follows the sale in the same
+        // transaction. A sale that committed while the ledger did not is a
+        // discrepancy nobody can explain later, and the ledger is append-only,
+        // so the only clean moment to write the decrement is here.
+        //
+        // Untracked products are skipped: the catalog does not claim to know
+        // their stock, and writing a movement would make the Inventory screen
+        // claim it does. Negative results are allowed; the till must keep
+        // selling when the shelf and the database disagree.
+        if let Some(product_id) = line.product_id {
+            let tracked: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND tracked = 1)",
+                [product_id],
+                |row| row.get(0),
+            )?;
+            if tracked {
+                transaction.execute(
+                    "INSERT INTO stock_movements (product_id, delta, kind, sale_id, user_id)
+                     VALUES (?1, ?2, 'sale', ?3, ?4)",
+                    (product_id, -line.qty, id, user_id),
+                )?;
+            }
+        }
     }
 
     transaction.execute(
@@ -2175,6 +2528,213 @@ mod tests {
         assert_eq!(method, "cash");
         assert_eq!(amount, 3_780);
         assert_eq!(tendered, 4_000);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tracking_writes_an_opening_movement_and_manual_kinds_keep_their_signs() {
+        let (store, path) = store("stock-track");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+
+        track_product(&store, soap, 12, 3, None).expect("track");
+        let tracked = stock(&store);
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].on_hand, 12);
+        assert_eq!(tracked[0].low_stock, 3);
+        assert!(!tracked[0].is_out());
+        assert!(!tracked[0].is_low());
+
+        record_stock_movement(&store, soap, 5, StockKind::Receive, "Delivery", None)
+            .expect("receive");
+        record_stock_movement(&store, soap, 2, StockKind::Return, "", None).expect("return");
+        record_stock_movement(&store, soap, -4, StockKind::Waste, "Broken", None).expect("waste");
+        record_stock_movement(&store, soap, -2, StockKind::Adjust, "Counted", None)
+            .expect("adjust");
+
+        assert_eq!(stock(&store)[0].on_hand, 13);
+        assert!(!stock(&store)[0].is_out());
+        assert!(!stock(&store)[0].is_low());
+
+        let history = stock_movements(&store, soap);
+        assert_eq!(history.len(), 5, "opening plus four moves");
+        assert_eq!(history[0].delta, -2, "newest first");
+        assert_eq!(history[0].kind, StockKind::Adjust);
+        assert_eq!(history[0].note.as_deref(), Some("Counted"));
+        assert_eq!(history[4].kind, StockKind::Opening);
+
+        // The ledger is operational, not a financial record: it goes with the
+        // product rather than outliving it as orphaned rows.
+        delete_product(&store, soap).expect("delete");
+        assert!(stock(&store).is_empty());
+        assert!(stock_movements(&store, soap).is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_subtracts_only_the_tracked_lines() {
+        let (store, path) = store("stock-sale");
+        let soap = insert_product(&store, "Soap", 1_000, "Household", None).expect("soap");
+        let bun = insert_product(&store, "Bun", 500, "Bakery", None).expect("bun");
+        track_product(&store, soap, 10, 5, None).expect("track soap");
+
+        let cashier = insert_user(
+            &store,
+            "Amina",
+            Role::Owner,
+            CredentialKind::Password,
+            "$argon2id$stock",
+        )
+        .expect("cashier");
+
+        let sale = record_sale(
+            &store,
+            &[
+                SaleLine {
+                    product_id: Some(soap),
+                    name: "Soap".to_owned(),
+                    qty: 3,
+                    unit_minor: 1_000,
+                },
+                SaleLine {
+                    product_id: Some(bun),
+                    name: "Bun".to_owned(),
+                    qty: 2,
+                    unit_minor: 500,
+                },
+            ],
+            0,
+            4_000,
+            Some(&cashier.id),
+        )
+        .expect("sale");
+
+        let tracked = stock(&store);
+        assert_eq!(tracked.len(), 1, "untracked products stay out of inventory");
+        assert_eq!(tracked[0].on_hand, 7);
+
+        let movements = stock_movements(&store, soap);
+        assert_eq!(movements[0].kind, StockKind::Sale);
+        assert_eq!(movements[0].delta, -3);
+        assert_eq!(
+            movements[0].user.as_deref(),
+            Some("Amina"),
+            "the ledger names who took the money"
+        );
+        assert!(
+            stock_movements(&store, bun).is_empty(),
+            "a product with no ledger never gets a movement"
+        );
+
+        let sale_id: Option<i64> = store
+            .conn()
+            .query_row(
+                "SELECT sale_id FROM stock_movements WHERE product_id = ?1 AND kind = 'sale'",
+                [soap],
+                |row| row.get(0),
+            )
+            .expect("sale id");
+        assert_eq!(sale_id, Some(sale.id));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_zero_opening_count_tracks_without_pretending_anything_moved() {
+        let (store, path) = store("stock-zero");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+
+        track_product(&store, soap, 0, 5, None).expect("track");
+        let tracked = stock(&store);
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].on_hand, 0);
+        assert!(tracked[0].is_out());
+        assert!(stock_movements(&store, soap).is_empty());
+
+        // Tracking is a decision, not a button: starting twice is refused.
+        assert!(track_product(&store, soap, 4, 5, None).is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_movement_whose_sign_contradicts_its_kind_is_refused() {
+        let (store, path) = store("stock-signs");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        track_product(&store, soap, 5, 2, None).expect("track");
+
+        for (delta, kind) in [
+            (-1, StockKind::Receive),
+            (-1, StockKind::Return),
+            (1, StockKind::Waste),
+            (1, StockKind::Opening),
+            (-1, StockKind::Sale),
+            (0, StockKind::Adjust),
+        ] {
+            assert!(
+                record_stock_movement(&store, soap, delta, kind, "", None).is_err(),
+                "{kind:?} with a delta of {delta} should be refused"
+            );
+        }
+        assert_eq!(stock(&store)[0].on_hand, 5, "nothing was written");
+
+        let untracked = insert_product(&store, "Bun", 500, "Bakery", None).expect("bun");
+        assert!(
+            record_stock_movement(&store, untracked, 1, StockKind::Receive, "", None).is_err(),
+            "an untracked product has no ledger to append to"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stock_may_go_negative_when_the_shelf_and_the_ledger_disagree() {
+        let (store, path) = store("stock-negative");
+        let soap = insert_product(&store, "Soap", 1_000, "Household", None).expect("product");
+        track_product(&store, soap, 1, 2, None).expect("track");
+
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: Some(soap),
+                name: "Soap".to_owned(),
+                qty: 4,
+                unit_minor: 1_000,
+            }],
+            0,
+            4_000,
+            None,
+        )
+        .expect("the till sells even when the count says it cannot");
+
+        let tracked = stock(&store);
+        assert_eq!(tracked[0].on_hand, -3);
+        assert!(tracked[0].is_out());
+
+        // Receiving does not hide the debt: the count stays negative until the
+        // shelf has caught up with what was sold.
+        record_stock_movement(&store, soap, 2, StockKind::Receive, "", None).expect("receive");
+        assert_eq!(stock(&store)[0].on_hand, -1);
+        assert!(stock(&store)[0].is_out());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_is_newest_first_and_capped() {
+        let (store, path) = store("stock-history");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        track_product(&store, soap, 0, 5, None).expect("track");
+
+        for _ in 0..(MOVEMENT_HISTORY + 5) {
+            record_stock_movement(&store, soap, 1, StockKind::Receive, "", None).expect("receive");
+        }
+
+        let history = stock_movements(&store, soap);
+        assert_eq!(history.len() as i64, MOVEMENT_HISTORY);
+        assert!(history[0].id > history[1].id, "newest first");
+        assert_eq!(stock(&store)[0].on_hand, MOVEMENT_HISTORY + 5);
 
         let _ = std::fs::remove_file(path);
     }

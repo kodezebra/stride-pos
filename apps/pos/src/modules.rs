@@ -10,8 +10,8 @@
 //! entry, tooltip, palette entry, persistence index — follows from those two
 //! edits.
 //!
-//! F6 and F8 are reserved for Inventory and Purchase orders. They are
-//! documented here and nowhere else so the reservation cannot drift.
+//! F8 is reserved for Purchase orders. It is documented here and nowhere else
+//! so the reservation cannot drift. Inventory took F6.
 
 use std::path::Path;
 
@@ -22,7 +22,7 @@ use ui_kit::tokens::{RADII, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
-use crate::db::{Product, Supplier};
+use crate::db::{Product, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
 use crate::state::{self, State};
 
@@ -34,10 +34,11 @@ pub const PRODUCTS: usize = 2;
 pub const SALES: usize = 3;
 pub const SETTINGS: usize = 4;
 pub const SUPPLIERS: usize = 5;
+pub const INVENTORY: usize = 6;
 
 /// Number of modules. Used to clamp a persisted index from an older or newer
 /// build before it is used as an array index.
-pub const COUNT: usize = 6;
+pub const COUNT: usize = 7;
 
 /// Width of the cart column inside the Sell workspace.
 ///
@@ -108,6 +109,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(Sales),
         Box::new(Settings),
         Box::new(Suppliers),
+        Box::new(Inventory),
     ]
 }
 
@@ -2299,6 +2301,10 @@ pub fn permission(index: usize) -> crate::auth::Permission {
         SELL | DASHBOARD | SALES => Permission::Sell,
         PRODUCTS => Permission::ChangePrice,
         SUPPLIERS => Permission::ManageSuppliers,
+        // Seeing stock is part of selling: a cashier answering "do you have
+        // any?" must not need a manager. Changing it is gated inside the
+        // workspace on `ManageInventory`.
+        INVENTORY => Permission::Sell,
         _ => Permission::EditSettings,
     }
 }
@@ -2563,6 +2569,609 @@ fn archive_icon() -> Icon {
 
 fn restore_icon() -> Icon {
     Icon::named("archive-restore").unwrap_or(Icon::REFUND)
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+/// The stock ledger: what is tracked, what is low, and the movements behind it.
+///
+/// This is not a product list. The catalog answers "what does the shop sell";
+/// this screen answers "how many are on the shelf", which is a different
+/// question with a different truth. Products become visible here only when
+/// somebody counts them, because an imported catalog has no stock and a screen
+/// full of guessed zeros would teach the shop to distrust it.
+struct Inventory;
+
+impl Module for Inventory {
+    fn title(&self) -> &'static str {
+        "Inventory"
+    }
+
+    fn icon(&self) -> Icon {
+        Icon::BOXES
+    }
+
+    fn hotkey(&self) -> egui::Key {
+        egui::Key::F6
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Stock");
+        components::field_label(ui, "Search");
+        ui.add_space(SPACING.xs);
+        components::search_field(ui, &mut state.stock_search, "Name or category");
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Show");
+        ui.add_space(SPACING.xs);
+        for (index, label) in ["All", "Low", "Out"].into_iter().enumerate() {
+            if regions::nav_item(ui, state.stock_filter == index, label).clicked() {
+                state.stock_filter = index;
+            }
+        }
+
+        ui.add_space(SPACING.md);
+        components::caption(
+            ui,
+            "Stock is the sum of every movement. A sale subtracts what it sold.",
+        );
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // Seeing stock is part of selling; changing it is not. A cashier who is
+        // asked "do you have any?" must be able to answer, and the screen says
+        // who can record a movement instead of hiding the list outright.
+        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+
+        let mut track = false;
+        ui.horizontal(|ui| {
+            components::section_title(ui, "Inventory");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if can_manage && components::primary_button(ui, "Track stock").clicked() {
+                    track = true;
+                }
+            });
+        });
+        if track {
+            state.start_tracking();
+        }
+
+        components::caption(
+            ui,
+            "What the ledger says is on the shelf. Tracked products subtract sales \
+             automatically; receiving, returns, waste and adjustments are recorded here.",
+        );
+        if !can_manage {
+            components::caption(
+                ui,
+                "You can see stock. A manager or the owner records movements.",
+            );
+        }
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
+
+        if state.stock.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No stock tracked yet",
+                "Track a product and count what is on the shelf. Sales of tracked \
+                 products will subtract automatically.",
+                180.0,
+            );
+            return;
+        }
+
+        let tracked = state.stock.len();
+        let low = state.stock.iter().filter(|item| item.is_low()).count();
+        let out = state.stock.iter().filter(|item| item.is_out()).count();
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            &format!("{tracked} tracked · {low} low · {out} out of stock"),
+        );
+
+        let needle = state.stock_search.trim().to_lowercase();
+        let visible = visible_stock(&state.stock, &needle, state.stock_filter);
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or choose another filter.",
+                160.0,
+            );
+            return;
+        }
+
+        let mut action = None;
+        // The page scrolls (the shell owns it), so the ledger is laid out whole:
+        // a list inside a list would fight the page for the wheel.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            stock_header(ui);
+            for &index in &visible {
+                let item = &state.stock[index];
+                if let Some(row_action) = stock_row(ui, item, can_manage) {
+                    action = Some(row_action);
+                }
+            }
+        });
+
+        match action {
+            Some(StockAction::History { id, name }) => state.open_stock_history(id, &name),
+            Some(StockAction::Move { id, name, on_hand }) => {
+                state.start_stock_move(id, &name, on_hand, StockKind::Receive)
+            }
+            None => {}
+        }
+    }
+}
+
+enum StockAction {
+    Move { id: i64, name: String, on_hand: i64 },
+    History { id: i64, name: String },
+}
+
+fn stock_header(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        components::table_header(ui, "Product");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            components::table_header(ui, "On hand");
+        });
+    });
+    components::divider(ui);
+}
+
+/// One tracked product: name and category on the left, count and actions right.
+///
+/// The row returns what was clicked instead of mutating the state, because the
+/// caller is iterating `state.stock` and cannot borrow it mutably yet.
+fn stock_row(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
+    let palette = theme::current(ui.ctx());
+    let mut action = None;
+
+    let (status, status_color) = if item.is_out() {
+        ("Out", palette.danger)
+    } else if item.is_low() {
+        ("Low", palette.warning)
+    } else {
+        ("In stock", palette.success)
+    };
+    let count_color = if item.is_out() {
+        palette.danger
+    } else if item.is_low() {
+        palette.warning
+    } else {
+        palette.text
+    };
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(52.0);
+        ui.vertical(|ui| {
+            ui.label(components::semibold(&item.name).size(TYPE.body));
+            let mut detail = if item.category.is_empty() {
+                "Uncategorised".to_owned()
+            } else {
+                item.category.clone()
+            };
+            detail.push_str(&format!(" · warns at {}", item.low_stock));
+            components::caption(ui, &detail);
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.vertical(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        components::numeric(item.on_hand.to_string())
+                            .size(TYPE.body)
+                            .color(egui::Color32::from(count_color)),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    components::badge(ui, status, status_color);
+                });
+            });
+            if components::icon_button(ui, history_icon(), 32.0)
+                .on_hover_text("History")
+                .clicked()
+            {
+                action = Some(StockAction::History {
+                    id: item.product_id,
+                    name: item.name.clone(),
+                });
+            }
+            if can_manage
+                && ui
+                    .button("Move stock")
+                    .on_hover_text("Receive, return, waste or adjust this product")
+                    .clicked()
+            {
+                action = Some(StockAction::Move {
+                    id: item.product_id,
+                    name: item.name.clone(),
+                    on_hand: item.on_hand,
+                });
+            }
+        });
+    });
+    components::divider(ui);
+
+    action
+}
+
+/// The history glyph, resolved by name like the directory's archive icon: the
+/// vocabulary can move without taking a button with it.
+fn history_icon() -> Icon {
+    Icon::named("history").unwrap_or(Icon::RECEIPT)
+}
+
+/// Whether a tracked product passes the search box.
+fn stock_matches(item: &StockItem, needle: &str) -> bool {
+    needle.is_empty()
+        || item.name.to_lowercase().contains(needle)
+        || item.category.to_lowercase().contains(needle)
+}
+
+/// Indices of the products the ledger shows, in catalog name order.
+fn visible_stock(stock: &[StockItem], needle: &str, filter: usize) -> Vec<usize> {
+    stock
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            let passes = match filter {
+                1 => item.is_low(),
+                2 => item.is_out(),
+                _ => true,
+            };
+            passes && stock_matches(item, needle)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Start tracking a product: pick one, count the shelf, choose a warning line.
+pub fn track_modal(ctx: &egui::Context, state: &mut State) {
+    if state.stock_editor.is_none() {
+        return;
+    }
+
+    // Products with no ledger yet. Built before the draft is borrowed, because
+    // the modal needs the catalog and the ledger, and both live on `state`.
+    let candidates: Vec<(i64, String, String)> = state
+        .products
+        .iter()
+        .filter(|product| !state.stock.iter().any(|item| item.product_id == product.id))
+        .map(|product| (product.id, product.name.clone(), product.category.clone()))
+        .collect();
+
+    let Some(draft) = state.stock_editor.as_mut() else {
+        return;
+    };
+    let mut save = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_track_stock")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        ui.label(components::semibold("Track stock").size(TYPE.heading));
+        components::caption(
+            ui,
+            "Choose a product and count what is on the shelf. From then on, sales \
+             subtract from that count.",
+        );
+
+        if candidates.is_empty() {
+            ui.add_space(SPACING.md);
+            components::empty_state_card(
+                ui,
+                "Every product is tracked",
+                "Add a product in the catalog first, or adjust one already here.",
+                130.0,
+            );
+        } else {
+            ui.add_space(SPACING.md);
+            components::field_label(ui, "Product");
+            ui.add_space(SPACING.xs);
+            components::search_field(ui, &mut draft.search, "Name or category");
+
+            let needle = draft.search.trim().to_lowercase();
+            let matches: Vec<(i64, String, String)> = candidates
+                .iter()
+                .filter(|(_, name, category)| {
+                    needle.is_empty()
+                        || name.to_lowercase().contains(&needle)
+                        || category.to_lowercase().contains(&needle)
+                })
+                .cloned()
+                .collect();
+
+            ui.add_space(SPACING.xs);
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for (id, name, category) in &matches {
+                        let label = if category.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{name} — {category}")
+                        };
+                        if ui
+                            .selectable_label(draft.product_id == Some(*id), label)
+                            .clicked()
+                        {
+                            draft.product_id = Some(*id);
+                        }
+                    }
+                });
+            if matches.is_empty() {
+                components::caption(ui, "No untracked product matches.");
+            }
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+            ui.vertical(|ui| {
+                components::field_label(ui, "Opening count");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.opening, "0", 150.0);
+            });
+            ui.vertical(|ui| {
+                components::field_label(ui, "Warn at or below");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.low_stock, "5", 150.0);
+            });
+        });
+        components::caption(
+            ui,
+            "The opening count is what you counted today, not what the till has sold.",
+        );
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Start tracking").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    // Keyboard, matching the other forms: Enter saves and Escape leaves.
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        save = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    if save {
+        state.save_tracking();
+    }
+    if cancel {
+        state.stock_editor = None;
+    }
+}
+
+/// One manual movement: receive, a customer return, waste, or an adjustment.
+pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(draft) = state.stock_move.as_mut() else {
+        return;
+    };
+    let mut save = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_stock_move")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.label(components::semibold("Move stock").size(TYPE.heading));
+        components::caption(
+            ui,
+            &format!("{} · {} on hand", draft.product_name, draft.on_hand),
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "What happened");
+        ui.add_space(SPACING.xs);
+        ui.horizontal_wrapped(|ui| {
+            for kind in [
+                StockKind::Receive,
+                StockKind::Return,
+                StockKind::Waste,
+                StockKind::Adjust,
+            ] {
+                ui.selectable_value(&mut draft.kind, kind, movement_label(kind));
+            }
+        });
+        components::caption(ui, movement_hint(draft.kind));
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, movement_quantity_label(draft.kind));
+        ui.add_space(SPACING.xs);
+        text_field(
+            ui,
+            &mut draft.quantity,
+            if draft.kind == StockKind::Adjust {
+                "Counted quantity"
+            } else {
+                "Quantity"
+            },
+            160.0,
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Note (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.note, "Delivery, reason, reference", 320.0);
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Record").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        save = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    if save {
+        state.save_stock_move();
+    }
+    if cancel {
+        state.stock_move = None;
+    }
+}
+
+/// A movement kind in the till's words, not the stored ones.
+fn movement_label(kind: StockKind) -> &'static str {
+    match kind {
+        StockKind::Receive => "Received",
+        StockKind::Return => "Customer return",
+        StockKind::Waste => "Waste",
+        StockKind::Adjust => "Adjustment",
+        StockKind::Opening => "Opening count",
+        StockKind::Sale => "Sale",
+    }
+}
+
+fn movement_hint(kind: StockKind) -> &'static str {
+    match kind {
+        StockKind::Receive => "Goods arriving from a supplier add to the shelf.",
+        StockKind::Return => "Stock a customer brought back adds to the shelf.",
+        StockKind::Waste => "Spoiled, broken or unsellable stock leaves the shelf.",
+        StockKind::Adjust => "Enter what you counted. The till records the difference.",
+        StockKind::Opening | StockKind::Sale => "",
+    }
+}
+
+fn movement_quantity_label(kind: StockKind) -> &'static str {
+    if kind == StockKind::Adjust {
+        "Counted quantity"
+    } else {
+        "Quantity"
+    }
+}
+
+/// One product's recent movements, in the order they happened.
+pub fn stock_history_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(history) = state.stock_history.as_ref() else {
+        return;
+    };
+    let mut close = false;
+
+    modal(ctx, egui::Id::new("pos_stock_history")).show(ctx, |ui| {
+        ui.set_width(520.0);
+        ui.label(
+            components::semibold(format!("History · {}", history.product_name)).size(TYPE.heading),
+        );
+        components::caption(
+            ui,
+            "Every change to this count, newest first. A sale appears as a negative movement.",
+        );
+
+        ui.add_space(SPACING.md);
+        if history.movements.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No movements yet",
+                "The count has not changed since tracking started.",
+                130.0,
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .max_height(340.0)
+                .show(ui, |ui| {
+                    for movement in &history.movements {
+                        movement_row(ui, movement);
+                    }
+                });
+            if history.movements.len() as i64 >= crate::db::MOVEMENT_HISTORY {
+                components::caption(
+                    ui,
+                    &format!(
+                        "Showing the newest {} movements.",
+                        crate::db::MOVEMENT_HISTORY
+                    ),
+                );
+            }
+        }
+
+        ui.add_space(SPACING.md);
+        if ui.button("Close").clicked() {
+            close = true;
+        }
+    });
+
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        close = true;
+    }
+    if close {
+        state.stock_history = None;
+    }
+}
+
+fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovement) {
+    let palette = theme::current(ui.ctx());
+    let color = if movement.delta < 0 {
+        palette.danger
+    } else {
+        palette.success
+    };
+    let signed = if movement.delta > 0 {
+        format!("+{}", movement.delta)
+    } else {
+        movement.delta.to_string()
+    };
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(44.0);
+        ui.vertical(|ui| {
+            ui.label(components::semibold(movement_label(movement.kind)).size(TYPE.body));
+            let mut detail = movement.created_at.clone();
+            if let Some(user) = &movement.user {
+                detail.push_str(" · ");
+                detail.push_str(user);
+            }
+            if let Some(note) = &movement.note {
+                detail.push_str(" · ");
+                detail.push_str(note);
+            }
+            components::caption(ui, &detail);
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                components::numeric(signed)
+                    .size(TYPE.body)
+                    .color(egui::Color32::from(color)),
+            );
+        });
+    });
+    components::divider(ui);
 }
 
 // ---------------------------------------------------------------------------
@@ -2999,9 +3608,13 @@ mod tests {
         for key in &keys {
             assert!(
                 (*key >= f1) && (*key <= f8),
-                "hotkeys live in F1-F8; F6 and F8 are reserved for inventory and purchase orders"
+                "hotkeys live in F1-F8; F8 is reserved for purchase orders"
             );
         }
+        assert!(
+            !keys.contains(&f8),
+            "F8 stays free until purchase orders land"
+        );
 
         let before = keys.len();
         keys.sort_unstable();

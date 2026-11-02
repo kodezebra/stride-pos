@@ -88,7 +88,8 @@ impl Role {
             | Permission::ChangePrice
             | Permission::OpenDrawer
             | Permission::EditSettings
-            | Permission::ManageSuppliers => self >= Role::Manager,
+            | Permission::ManageSuppliers
+            | Permission::ManageInventory => self >= Role::Manager,
             Permission::ManageUsers | Permission::ChangeCurrency => self == Role::Owner,
         }
     }
@@ -127,6 +128,7 @@ pub enum Permission {
     EditSettings,
     ManageUsers,
     ManageSuppliers,
+    ManageInventory,
     ChangeCurrency,
 }
 
@@ -145,6 +147,7 @@ impl Permission {
             Permission::EditSettings => "change settings",
             Permission::ManageUsers => "manage staff",
             Permission::ManageSuppliers => "manage suppliers",
+            Permission::ManageInventory => "change stock",
             Permission::ChangeCurrency => "change the currency",
         }
     }
@@ -1200,11 +1203,15 @@ mod tests {
         assert!(Role::Manager.permits(Permission::ChangePrice));
         assert!(!Role::Cashier.permits(Permission::ManageSuppliers));
         assert!(Role::Manager.permits(Permission::ManageSuppliers));
+        // Cashiers must be able to see stock; only a manager may change it.
+        assert!(!Role::Cashier.permits(Permission::ManageInventory));
+        assert!(Role::Manager.permits(Permission::ManageInventory));
         // Nothing above a manager's authority is ever lent out.
         assert!(!Permission::ManageUsers.approvable());
         assert!(!Permission::ChangeCurrency.approvable());
         assert!(Permission::ChangePrice.approvable());
         assert!(Permission::ManageSuppliers.approvable());
+        assert!(Permission::ManageInventory.approvable());
     }
 
     #[test]

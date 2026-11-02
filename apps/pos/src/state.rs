@@ -13,7 +13,7 @@ use money::{Currency, Money};
 use ui_kit::theme::Theme;
 use ui_shell::egui;
 
-use crate::db::{Product, RecordedSale, SaleLine, Supplier};
+use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
 use crate::settings::Settings;
 
 /// One line on the till. Money is integer minor units, always.
@@ -106,6 +106,71 @@ impl SupplierDraft {
             error: None,
         }
     }
+}
+
+/// The "start tracking" form, open as a modal over Inventory.
+///
+/// Tracking is opt-in and starts with a count on the shelf, because an imported
+/// catalog has no stock and inventing zero would claim the shop is empty. The
+/// picker lists only untracked products; the two numbers are whole units, not
+/// money, so they are parsed as integers.
+pub struct TrackDraft {
+    pub product_id: Option<i64>,
+    /// Search inside the picker, separate from the screen's own filter.
+    pub search: String,
+    pub opening: String,
+    pub low_stock: String,
+    pub error: Option<String>,
+}
+
+impl TrackDraft {
+    fn new() -> Self {
+        Self {
+            product_id: None,
+            search: String::new(),
+            opening: "0".to_owned(),
+            low_stock: "5".to_owned(),
+            error: None,
+        }
+    }
+}
+
+/// One manual movement, open as a modal over Inventory.
+///
+/// `quantity` is a positive amount for receive, return and waste, and the
+/// counted total for an adjustment. The sign is derived in `save_stock_move`
+/// from the kind, never typed: "we counted forty and the ledger said forty-three"
+/// is a `-3` the operator should not have to work out.
+pub struct StockMoveDraft {
+    pub product_id: i64,
+    pub product_name: String,
+    /// What the ledger says now, so an adjustment can ask for the count the
+    /// operator sees rather than a difference they would have to subtract.
+    pub on_hand: i64,
+    pub kind: crate::db::StockKind,
+    pub quantity: String,
+    pub note: String,
+    pub error: Option<String>,
+}
+
+impl StockMoveDraft {
+    fn new(product_id: i64, product_name: &str, on_hand: i64, kind: crate::db::StockKind) -> Self {
+        Self {
+            product_id,
+            product_name: product_name.to_owned(),
+            on_hand,
+            kind,
+            quantity: String::new(),
+            note: String::new(),
+            error: None,
+        }
+    }
+}
+
+/// A product's recent movements, read once when the modal opens.
+pub struct StockHistory {
+    pub product_name: String,
+    pub movements: Vec<crate::db::StockMovement>,
 }
 
 /// Category names offered in the product form even when the catalog is empty.
@@ -384,6 +449,22 @@ pub struct State {
     /// A supplier waiting for an archive/restore confirmation, by id.
     pub supplier_archive: Option<String>,
 
+    /// Tracked stock, by product, with the ledger's sum. Re-read after every
+    /// sale and every movement: a cached count would be the thing that
+    /// disagrees with the ledger.
+    pub stock: Vec<StockItem>,
+    /// Search across name and category.
+    pub stock_search: String,
+    /// `0` all, `1` low, `2` out. The filter a shopkeeper uses standing in
+    /// front of the shelf, not a report.
+    pub stock_filter: usize,
+    /// The "start tracking" form, when it is open.
+    pub stock_editor: Option<TrackDraft>,
+    /// A receive/return/waste/adjust form, when it is open.
+    pub stock_move: Option<StockMoveDraft>,
+    /// One product's movements, read when the history modal opens.
+    pub stock_history: Option<StockHistory>,
+
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
 
@@ -481,6 +562,7 @@ impl State {
         let products = crate::db::products(&store);
         let categories = crate::db::categories(&store);
         let suppliers = crate::db::suppliers(&store);
+        let stock = crate::db::stock(&store);
         let users = crate::db::users(&store);
         Self {
             store,
@@ -506,6 +588,12 @@ impl State {
             show_archived_suppliers: false,
             supplier_editor: None,
             supplier_archive: None,
+            stock,
+            stock_search: String::new(),
+            stock_filter: 0,
+            stock_editor: None,
+            stock_move: None,
+            stock_history: None,
             payment: None,
             sale_open: None,
             notice: None,
@@ -1274,6 +1362,9 @@ impl State {
             Ok(()) => {
                 self.product_editor = None;
                 self.reload_products();
+                // A tracked product's name and category are shown in Inventory;
+                // re-read the ledger so the list does not keep the old spelling.
+                self.reload_stock();
                 self.notice = Some(format!("Saved {name}."));
             }
             Err(error) => {
@@ -1289,6 +1380,9 @@ impl State {
             Ok(()) => {
                 self.product_delete = None;
                 self.reload_products();
+                // Deleting a product cascades to its movements; without this,
+                // Inventory would keep painting a row that no longer exists.
+                self.reload_stock();
                 self.notice = Some("Product removed.".to_owned());
             }
             Err(error) => {
@@ -1415,6 +1509,192 @@ impl State {
 
     fn supplier_error(&mut self, message: impl Into<String>) {
         if let Some(draft) = self.supplier_editor.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stock
+    // -----------------------------------------------------------------------
+
+    /// Re-read tracked stock after a movement or a sale.
+    pub fn reload_stock(&mut self) {
+        self.stock = crate::db::stock(&self.store);
+    }
+
+    /// Open the "start tracking" form.
+    pub fn start_tracking(&mut self) {
+        self.stock_editor = Some(TrackDraft::new());
+        self.stock_move = None;
+        self.stock_history = None;
+        self.notice = None;
+    }
+
+    /// Start tracking the chosen product, with the count on the shelf.
+    ///
+    /// The opening count is deliberately explicit, even for zero. An imported
+    /// catalog has no counts, and a product that starts at zero is a statement
+    /// the operator made, not one the app guessed.
+    pub fn save_tracking(&mut self) {
+        let Some((product_id, opening_text, low_stock_text)) =
+            self.stock_editor.as_ref().map(|draft| {
+                (
+                    draft.product_id,
+                    draft.opening.trim().to_owned(),
+                    draft.low_stock.trim().to_owned(),
+                )
+            })
+        else {
+            return;
+        };
+        let Some(product_id) = product_id else {
+            return self.stock_editor_error("Choose a product to track.");
+        };
+        let opening = match opening_text.parse::<i64>() {
+            Ok(count) if count >= 0 => count,
+            Ok(_) => return self.stock_editor_error("Opening count cannot be negative."),
+            Err(_) => return self.stock_editor_error("Opening count must be a whole number."),
+        };
+        let low_stock = match low_stock_text.parse::<i64>() {
+            Ok(level) if level >= 0 => level,
+            _ => return self.stock_editor_error("Low-stock level must be zero or more."),
+        };
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+
+        match crate::db::track_product(
+            &self.store,
+            product_id,
+            opening,
+            low_stock,
+            user_id.as_deref(),
+        ) {
+            Ok(()) => {
+                self.stock_editor = None;
+                self.reload_stock();
+                self.notice = Some("Stock tracking started.".to_owned());
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "starting stock tracking failed");
+                self.stock_editor_error(format!("Could not start tracking: {error}"));
+            }
+        }
+    }
+
+    /// Open a manual movement form for one tracked product.
+    pub fn start_stock_move(
+        &mut self,
+        product_id: i64,
+        product_name: &str,
+        on_hand: i64,
+        kind: crate::db::StockKind,
+    ) {
+        self.stock_move = Some(StockMoveDraft::new(product_id, product_name, on_hand, kind));
+        self.stock_editor = None;
+        self.stock_history = None;
+        self.notice = None;
+    }
+
+    /// Write the manual movement, with the sign the kind implies.
+    ///
+    /// The database refuses a movement whose sign contradicts its kind, so this
+    /// form validates before the write as well: a rejected form keeps the typed
+    /// quantity and note on screen.
+    pub fn save_stock_move(&mut self) {
+        let Some((product_id, product_name, on_hand, kind, quantity_text, note)) =
+            self.stock_move.as_ref().map(|draft| {
+                (
+                    draft.product_id,
+                    draft.product_name.clone(),
+                    draft.on_hand,
+                    draft.kind,
+                    draft.quantity.trim().to_owned(),
+                    draft.note.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let counted = match quantity_text.parse::<i64>() {
+            Ok(counted) => counted,
+            Err(_) => {
+                return self.stock_move_error(match kind {
+                    crate::db::StockKind::Adjust => "Counted quantity must be a whole number.",
+                    _ => "Quantity must be a whole number.",
+                });
+            }
+        };
+        let delta = match kind {
+            crate::db::StockKind::Receive | crate::db::StockKind::Return => {
+                if counted <= 0 {
+                    return self.stock_move_error("Enter a positive quantity.");
+                }
+                counted
+            }
+            crate::db::StockKind::Waste => {
+                if counted <= 0 {
+                    return self.stock_move_error("Enter a positive quantity.");
+                }
+                -counted
+            }
+            crate::db::StockKind::Adjust => {
+                if counted < 0 {
+                    return self.stock_move_error("Counted quantity cannot be negative.");
+                }
+                match counted.checked_sub(on_hand) {
+                    Some(0) => {
+                        return self.stock_move_error("That matches what the till already has.");
+                    }
+                    Some(delta) => delta,
+                    None => return self.stock_move_error("That count is out of range."),
+                }
+            }
+            crate::db::StockKind::Opening | crate::db::StockKind::Sale => {
+                return self.stock_move_error("That movement is written by its own flow.");
+            }
+        };
+
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+
+        match crate::db::record_stock_movement(
+            &self.store,
+            product_id,
+            delta,
+            kind,
+            &note,
+            user_id.as_deref(),
+        ) {
+            Ok(()) => {
+                self.stock_move = None;
+                self.reload_stock();
+                self.notice = Some(format!("{} recorded for {product_name}.", kind.label()));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "recording a stock movement failed");
+                self.stock_move_error(format!("Could not record it: {error}"));
+            }
+        }
+    }
+
+    /// Read one product's recent movements for the history modal.
+    pub fn open_stock_history(&mut self, product_id: i64, product_name: &str) {
+        let movements = crate::db::stock_movements(&self.store, product_id);
+        self.stock_history = Some(StockHistory {
+            product_name: product_name.to_owned(),
+            movements,
+        });
+        self.stock_editor = None;
+        self.stock_move = None;
+        self.notice = None;
+    }
+
+    fn stock_editor_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.stock_editor.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    fn stock_move_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.stock_move.as_mut() {
             draft.error = Some(message.into());
         }
     }
@@ -1662,6 +1942,10 @@ impl State {
         ) {
             Ok(sale) => {
                 self.cart.clear();
+                // The sale wrote one negative movement per tracked line, in the
+                // same transaction. Re-read the sums now so the Inventory list
+                // agrees with what just happened.
+                self.reload_stock();
                 // Read the sale back once, here, so the confirmation can print
                 // a receipt instead of four remembered numbers. The cart is
                 // already empty: this is the only copy of what was sold.
@@ -2127,5 +2411,83 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(csv);
+    }
+
+    #[test]
+    fn tracking_and_an_adjustment_go_through_the_state_as_the_screen_does() {
+        let (mut state, path) = state("stock-track", Currency::UGX);
+
+        state.start_tracking();
+        {
+            let draft = state.stock_editor.as_mut().expect("open");
+            draft.product_id = Some(1);
+            draft.opening = "12".to_owned();
+            draft.low_stock = "3".to_owned();
+        }
+        state.save_tracking();
+
+        assert!(state.stock_editor.is_none(), "a saved form closes");
+        assert_eq!(state.stock.len(), 1);
+        assert_eq!(state.stock[0].on_hand, 12);
+        assert_eq!(state.stock[0].low_stock, 3);
+
+        // An adjustment asks for the count; the state stores the difference.
+        state.start_stock_move(1, "Test item", 12, crate::db::StockKind::Adjust);
+        {
+            let draft = state.stock_move.as_mut().expect("open");
+            draft.quantity = "9".to_owned();
+            draft.note = "Counted".to_owned();
+        }
+        state.save_stock_move();
+
+        assert!(state.stock_move.is_none());
+        assert_eq!(state.stock[0].on_hand, 9);
+
+        state.open_stock_history(1, "Test item");
+        let history = state.stock_history.as_ref().expect("history");
+        assert_eq!(history.movements.len(), 2);
+        assert_eq!(history.movements[0].delta, -3);
+        assert_eq!(history.movements[0].note.as_deref(), Some("Counted"));
+
+        // The catalog is the source of the name Inventory shows, and deleting a
+        // product takes its ledger with it. Both changes have to reach the list
+        // without a restart.
+        let product = state.products[0].clone();
+        state.edit_product(&product);
+        state.product_editor.as_mut().expect("open").name = "Renamed item".to_owned();
+        state.save_product();
+        assert_eq!(state.stock[0].name, "Renamed item");
+
+        state.delete_product(1);
+        assert!(state.products.is_empty());
+        assert!(state.stock.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_adjustment_that_changes_nothing_keeps_the_form_and_explains() {
+        let (mut state, path) = state("stock-zero", Currency::UGX);
+
+        state.start_tracking();
+        {
+            let draft = state.stock_editor.as_mut().expect("open");
+            draft.product_id = Some(1);
+            draft.opening = "5".to_owned();
+        }
+        state.save_tracking();
+
+        state.start_stock_move(1, "Test item", 5, crate::db::StockKind::Adjust);
+        state.stock_move.as_mut().expect("open").quantity = "5".to_owned();
+        state.save_stock_move();
+
+        let draft = state.stock_move.as_ref().expect("the form stays open");
+        assert_eq!(
+            draft.error.as_deref(),
+            Some("That matches what the till already has.")
+        );
+        assert_eq!(state.stock[0].on_hand, 5);
+
+        let _ = std::fs::remove_file(path);
     }
 }
