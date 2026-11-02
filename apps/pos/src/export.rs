@@ -79,6 +79,34 @@ pub fn products_csv(products: &[Product], currency: Currency) -> String {
     text
 }
 
+/// A starting point for the import: the same columns as [`products_csv`], with
+/// two example rows to replace.
+///
+/// Built from [`products_csv`] rather than written out by hand, so a change to
+/// the columns cannot leave the template behind. The prices are the export's
+/// own decimal spelling, which is exactly what the importer reads back.
+pub fn template_csv(currency: Currency) -> String {
+    products_csv(
+        &[
+            Product {
+                id: 0,
+                name: "Sugar 1 kg".to_owned(),
+                category: "Groceries".to_owned(),
+                price_minor: 4_500,
+                barcode: None,
+            },
+            Product {
+                id: 0,
+                name: "Bread".to_owned(),
+                category: "Bakery".to_owned(),
+                price_minor: 3_400,
+                barcode: None,
+            },
+        ],
+        currency,
+    )
+}
+
 /// Every sale in `rows`, one line each, header first.
 pub fn sales_csv(rows: &[ExportSale], currency: Currency) -> String {
     let mut text = csv_row(
@@ -204,6 +232,29 @@ mod tests {
             "sale_id,when,cashier,total,rounding,paid,method\n\
              7,2026-11-01 18:42:12,,340,60,400,cash\n"
         );
+    }
+
+    #[test]
+    fn the_template_is_a_file_the_import_reads_back() {
+        let text = template_csv(kes());
+
+        assert!(
+            text.starts_with("name,category,price,barcode\n"),
+            "the template must lead with the columns the import expects: {text}"
+        );
+        assert!(
+            text.contains("Sugar 1 kg,Groceries,45.00,\n"),
+            "the example price must be the export's own spelling: {text}"
+        );
+
+        let (rows, errors) = crate::import::parse(&text, kes());
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].name, "Bread");
+        assert_eq!(rows[1].category, "Bakery");
+        assert_eq!(rows[1].price_minor, 3_400);
+        assert_eq!(rows[1].barcode, None);
     }
 
     #[test]

@@ -344,6 +344,10 @@ pub struct State {
     /// The file the last [`State::file_notice`] is about, so the screen can
     /// offer the path for copying without parsing it back out of a sentence.
     pub file_path: Option<PathBuf>,
+    /// A backup asked for but not yet written. Inline rather than a modal, for
+    /// the same reason deleting a product asks in its row: the card is where
+    /// the button was.
+    pub backup_confirm: bool,
 
     /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
     /// so a half-typed name is never written to disk.
@@ -443,6 +447,7 @@ impl State {
             notice: None,
             file_notice: None,
             file_path: None,
+            backup_confirm: false,
             shop_draft,
             settings,
             paths,
@@ -533,6 +538,7 @@ impl State {
             self.notice = None;
             self.file_notice = None;
             self.file_path = None;
+            self.backup_confirm = false;
             // Opening the selling screen returns the cursor to the scan field, so
             // the next barcode lands in the cart without a click.
             if module == crate::modules::SELL {

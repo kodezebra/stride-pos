@@ -46,6 +46,8 @@ pub enum ExportKind {
     Products,
     AllProducts,
     Sales,
+    /// A CSV to start an import from, not a list of what is here now.
+    Template,
 }
 
 impl ExportKind {
@@ -54,6 +56,7 @@ impl ExportKind {
             Self::Products => "Save the products on screen",
             Self::AllProducts => "Save the whole catalog",
             Self::Sales => "Save the sales export",
+            Self::Template => "Save an import template",
         }
     }
 }
@@ -277,6 +280,7 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
     let mut confirm_pick = false;
     let mut cancel = false;
     let mut type_path = false;
+    let mut template = false;
 
     crate::modules::modal(ctx, egui::Id::new("pos_file_picker")).show(ctx, |ui| {
         ui.set_width(520.0);
@@ -285,7 +289,13 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
             Purpose::Import => (
                 "Import products from CSV",
                 "Pick the file to read. Rows are read as name, category, price and an \
-                 optional barcode; prices are read in this till's currency.",
+                 optional barcode; prices are read in this till's currency. No file yet? \
+                 Save a template and fill it in.",
+            ),
+            Purpose::Export(ExportKind::Template) => (
+                ExportKind::Template.heading(),
+                "Pick the folder to save into. The template keeps this name, so saving \
+                 it again replaces the last one instead of piling up copies.",
             ),
             Purpose::Export(kind) => (
                 kind.heading(),
@@ -383,6 +393,14 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
             if purpose == Purpose::Import && ui.button("Type the path instead").clicked() {
                 type_path = true;
             }
+            if purpose == Purpose::Import
+                && ui
+                    .button("Save a template")
+                    .on_hover_text("Save a CSV with these columns and two example rows")
+                    .clicked()
+            {
+                template = true;
+            }
         });
     });
 
@@ -418,6 +436,11 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
     } else if type_path {
         state.picker = None;
         state.start_import();
+    } else if template {
+        // The picker is already a folder chooser when it is exporting; reuse it
+        // rather than opening the import modal only to close it again.
+        state.picker = None;
+        state.start_export(ExportKind::Template);
     } else if confirm_pick && !moved {
         confirm(state);
     }
