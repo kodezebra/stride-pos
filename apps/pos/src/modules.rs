@@ -10,7 +10,7 @@
 //! entry, tooltip, palette entry, persistence index — follows from those two
 //! edits.
 //!
-//! F6–F8 are reserved for Inventory, Suppliers and Purchase orders. They are
+//! F6 and F8 are reserved for Inventory and Purchase orders. They are
 //! documented here and nowhere else so the reservation cannot drift.
 
 use std::path::Path;
@@ -22,7 +22,7 @@ use ui_kit::tokens::{RADII, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
-use crate::db::Product;
+use crate::db::{Product, Supplier};
 use crate::picker::ExportKind;
 use crate::state::{self, State};
 
@@ -33,10 +33,11 @@ pub const DASHBOARD: usize = 1;
 pub const PRODUCTS: usize = 2;
 pub const SALES: usize = 3;
 pub const SETTINGS: usize = 4;
+pub const SUPPLIERS: usize = 5;
 
 /// Number of modules. Used to clamp a persisted index from an older or newer
 /// build before it is used as an array index.
-pub const COUNT: usize = 5;
+pub const COUNT: usize = 6;
 
 /// Width of the cart column inside the Sell workspace.
 ///
@@ -106,6 +107,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(Products),
         Box::new(Sales),
         Box::new(Settings),
+        Box::new(Suppliers),
     ]
 }
 
@@ -1972,6 +1974,119 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     }
 }
 
+/// The supplier form, drawn by the shell beside the product form.
+///
+/// A modal for the same reason the product form is one: the directory is a list
+/// you click through, and a form pinned above it would be pushed off screen at
+/// the narrow end of the window and silently replaced by the next row's Edit.
+///
+/// Called from `shell` after the frame, so the backdrop covers the screen and
+/// the directory behind it cannot be clicked.
+pub fn supplier_editor_modal(ctx: &egui::Context, state: &mut State) {
+    let Some(draft) = state.supplier_editor.as_mut() else {
+        return;
+    };
+
+    let mut save = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_supplier_editor")).show(ctx, |ui| {
+        ui.set_width(460.0);
+
+        let heading = if draft.id.is_some() {
+            "Edit supplier"
+        } else {
+            "New supplier"
+        };
+        ui.label(components::semibold(heading).size(TYPE.heading));
+        components::caption(
+            ui,
+            "Only the name is required. Fill in the rest as you learn it.",
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Name");
+        ui.add_space(SPACING.xs);
+        components::search_field(ui, &mut draft.name, "Acme Wholesale");
+
+        // Contact and phone share a row because the modal has the width for it;
+        // they are the two things a shop knows first about a rep.
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+
+            ui.vertical(|ui| {
+                components::field_label(ui, "Contact (optional)");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.contact_name, "Amina", 210.0);
+            });
+
+            ui.vertical(|ui| {
+                components::field_label(ui, "Phone (optional)");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.phone, "+256 700 000", 210.0);
+            });
+        });
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Email (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.email, "orders@example.com", 360.0);
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Address (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.address, "Street, town", 360.0);
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Notes (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(
+            ui,
+            &mut draft.notes,
+            "Delivery days, terms, rep's name",
+            360.0,
+        );
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            if components::primary_button(ui, "Save").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    // Keyboard, because this form is typed into: Enter saves from any field and
+    // Escape leaves without saving, which is what the buttons do.
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        save = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+
+    // Applied outside the borrow of `state.supplier_editor`: saving reads the
+    // directory and writes the store, which needs the whole state.
+    if save {
+        state.save_supplier();
+    }
+    if cancel {
+        state.supplier_editor = None;
+    }
+}
+
 /// The CSV import, drawn with the other foreground layers in `shell.rs`.
 ///
 /// The normal route is the picker in [`crate::picker`]; the path field here is
@@ -2183,6 +2298,7 @@ pub fn permission(index: usize) -> crate::auth::Permission {
         // yesterday's takings cannot answer the customer holding a receipt.
         SELL | DASHBOARD | SALES => Permission::Sell,
         PRODUCTS => Permission::ChangePrice,
+        SUPPLIERS => Permission::ManageSuppliers,
         _ => Permission::EditSettings,
     }
 }
@@ -2191,6 +2307,262 @@ pub fn permission(index: usize) -> crate::auth::Permission {
 pub fn open(state: &mut State, index: usize) {
     let permission = permission(index);
     state.open(index, permission);
+}
+
+// ---------------------------------------------------------------------------
+// Suppliers
+// ---------------------------------------------------------------------------
+
+struct Suppliers;
+
+impl Module for Suppliers {
+    fn title(&self) -> &'static str {
+        "Suppliers"
+    }
+
+    fn icon(&self) -> Icon {
+        Icon::TRUCK
+    }
+
+    fn hotkey(&self) -> egui::Key {
+        egui::Key::F7
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Directory");
+        components::field_label(ui, "Search");
+        ui.add_space(SPACING.xs);
+        components::search_field(ui, &mut state.supplier_search, "Name, contact or phone");
+
+        ui.add_space(SPACING.md);
+        ui.checkbox(&mut state.show_archived_suppliers, "Show archived");
+        components::caption(
+            ui,
+            "Archived suppliers leave the working list but stay for the record.",
+        );
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ManageSuppliers) {
+            return locked_card(ui, crate::auth::Permission::ManageSuppliers);
+        }
+
+        let mut new = false;
+        ui.horizontal(|ui| {
+            components::section_title(ui, "Suppliers");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::primary_button(ui, "New supplier").clicked() {
+                    new = true;
+                }
+            });
+        });
+        if new {
+            state.start_supplier();
+        }
+
+        components::caption(
+            ui,
+            "Who the shop buys from. Only a name is required; add a contact and \
+             phone number as you learn them.",
+        );
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
+
+        if state.suppliers.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No suppliers yet",
+                "Add the first supplier. The directory is separate from the catalog.",
+                180.0,
+            );
+            return;
+        }
+
+        let needle = state.supplier_search.trim().to_lowercase();
+        let visible = visible_suppliers(&state.suppliers, &needle, state.show_archived_suppliers);
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or show archived suppliers.",
+                160.0,
+            );
+            return;
+        }
+
+        let mut action = None;
+        // The page scrolls (the shell owns it), so the directory card is laid
+        // out whole: a list inside a list would fight the page for the wheel.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            supplier_header(ui);
+            for &index in &visible {
+                let supplier = &state.suppliers[index];
+                let confirming = state.supplier_archive.as_deref() == Some(supplier.id.as_str());
+                if let Some(row_action) = supplier_row(ui, supplier, confirming) {
+                    action = Some(row_action);
+                }
+            }
+        });
+
+        match action {
+            Some(SupplierAction::Edit(id)) => {
+                if let Some(supplier) = state.suppliers.iter().find(|supplier| supplier.id == id) {
+                    let supplier = supplier.clone();
+                    state.edit_supplier(&supplier);
+                }
+            }
+            Some(SupplierAction::AskArchive(id)) => state.supplier_archive = Some(id),
+            Some(SupplierAction::Archive(id)) => state.set_supplier_archived(&id, true),
+            Some(SupplierAction::Restore(id)) => state.set_supplier_archived(&id, false),
+            Some(SupplierAction::CancelArchive) => state.supplier_archive = None,
+            None => {}
+        }
+    }
+}
+
+enum SupplierAction {
+    Edit(String),
+    AskArchive(String),
+    Archive(String),
+    Restore(String),
+    CancelArchive,
+}
+
+fn supplier_header(ui: &mut egui::Ui) {
+    components::table_header(ui, "Supplier");
+    components::divider(ui);
+}
+
+/// One supplier: name and whatever contact details exist, actions on the right.
+///
+/// The row returns what was clicked instead of mutating the state, because the
+/// caller is iterating `state.suppliers` and cannot borrow it mutably yet.
+fn supplier_row(
+    ui: &mut egui::Ui,
+    supplier: &Supplier,
+    confirming: bool,
+) -> Option<SupplierAction> {
+    let mut action = None;
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(52.0);
+        ui.vertical(|ui| {
+            ui.label(components::semibold(&supplier.name).size(TYPE.body));
+
+            let mut detail = supplier_detail(supplier);
+            if supplier.archived {
+                detail.insert_str(0, "Archived · ");
+            }
+            components::caption(ui, &detail);
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if confirming {
+                if components::icon_button(ui, Icon::CHECK, 32.0)
+                    .on_hover_text("Archive")
+                    .clicked()
+                {
+                    action = Some(SupplierAction::Archive(supplier.id.clone()));
+                }
+                if components::icon_button(ui, Icon::CLOSE, 32.0)
+                    .on_hover_text("Cancel")
+                    .clicked()
+                {
+                    action = Some(SupplierAction::CancelArchive);
+                }
+                components::caption(ui, "Archive this supplier?");
+            } else {
+                if supplier.archived {
+                    if components::icon_button(ui, restore_icon(), 32.0)
+                        .on_hover_text("Restore")
+                        .clicked()
+                    {
+                        action = Some(SupplierAction::Restore(supplier.id.clone()));
+                    }
+                } else if components::icon_button(ui, archive_icon(), 32.0)
+                    .on_hover_text("Archive")
+                    .clicked()
+                {
+                    action = Some(SupplierAction::AskArchive(supplier.id.clone()));
+                }
+                if components::icon_button(ui, edit_icon(), 32.0)
+                    .on_hover_text("Edit")
+                    .clicked()
+                {
+                    action = Some(SupplierAction::Edit(supplier.id.clone()));
+                }
+            }
+        });
+    });
+    components::divider(ui);
+
+    action
+}
+
+/// Contact details as one line, or a hint that there are none.
+fn supplier_detail(supplier: &Supplier) -> String {
+    let parts: Vec<&str> = [
+        supplier.contact_name.as_deref(),
+        supplier.phone.as_deref(),
+        supplier.email.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if parts.is_empty() {
+        "No contact details".to_owned()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// Whether a supplier passes the search box.
+///
+/// Searched fields are the ones a person at the counter would try: who they
+/// speak to, and the number they call.
+fn supplier_matches(supplier: &Supplier, needle: &str) -> bool {
+    needle.is_empty()
+        || supplier.name.to_lowercase().contains(needle)
+        || supplier
+            .contact_name
+            .as_deref()
+            .is_some_and(|contact| contact.to_lowercase().contains(needle))
+        || supplier
+            .phone
+            .as_deref()
+            .is_some_and(|phone| phone.to_lowercase().contains(needle))
+        || supplier
+            .email
+            .as_deref()
+            .is_some_and(|email| email.to_lowercase().contains(needle))
+}
+
+/// Indices of the suppliers the directory shows, in name order.
+fn visible_suppliers(suppliers: &[Supplier], needle: &str, show_archived: bool) -> Vec<usize> {
+    suppliers
+        .iter()
+        .enumerate()
+        .filter(|(_, supplier)| {
+            (show_archived || !supplier.archived) && supplier_matches(supplier, needle)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The archive glyph for a directory row.
+///
+/// `archive` is in the Lucide set but not in `ui-kit`'s vocabulary, so it is
+/// resolved by name. The fallback means a renamed glyph costs a different icon,
+/// never a missing button.
+fn archive_icon() -> Icon {
+    Icon::named("archive").unwrap_or(Icon::BOXES)
+}
+
+fn restore_icon() -> Icon {
+    Icon::named("archive-restore").unwrap_or(Icon::REFUND)
 }
 
 // ---------------------------------------------------------------------------
@@ -2627,7 +2999,7 @@ mod tests {
         for key in &keys {
             assert!(
                 (*key >= f1) && (*key <= f8),
-                "hotkeys live in F1-F8; F6-F8 are reserved for inventory, suppliers and POs"
+                "hotkeys live in F1-F8; F6 and F8 are reserved for inventory and purchase orders"
             );
         }
 
@@ -2789,5 +3161,63 @@ mod tests {
             4,
             "a header and all three products, whatever the sidebar says"
         );
+    }
+
+    fn supplier(id: &str, name: &str, contact: Option<&str>, phone: Option<&str>) -> Supplier {
+        Supplier {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            contact_name: contact.map(str::to_owned),
+            phone: phone.map(str::to_owned),
+            email: None,
+            address: None,
+            notes: None,
+            archived: false,
+        }
+    }
+
+    /// Archiving is the supplier equivalent of switching a staff account off:
+    /// the row stays, but the next order should not start from it.
+    #[test]
+    fn the_directory_hides_archived_suppliers_until_asked() {
+        let mut suppliers = [
+            supplier("a", "Acme", Some("Amina"), Some("+256 700")),
+            supplier("b", "Beta", None, None),
+        ];
+        suppliers[1].archived = true;
+
+        assert_eq!(
+            visible_suppliers(&suppliers, "", false),
+            [0],
+            "the working list leaves archived suppliers out"
+        );
+        assert_eq!(
+            visible_suppliers(&suppliers, "", true),
+            [0, 1],
+            "showing archived keeps name order"
+        );
+    }
+
+    /// The search is the directory's whole job: a shop may remember the rep's
+    /// name or the number long before it remembers the company's legal name.
+    #[test]
+    fn the_supplier_search_reaches_contact_and_phone() {
+        let suppliers = [
+            supplier("a", "Acme", Some("Amina"), Some("+256 700")),
+            supplier("b", "Beta", None, None),
+        ];
+
+        assert_eq!(visible_suppliers(&suppliers, "acme", false), [0]);
+        assert_eq!(
+            visible_suppliers(&suppliers, "amina", false),
+            [0],
+            "the contact is searchable"
+        );
+        assert_eq!(
+            visible_suppliers(&suppliers, "700", false),
+            [0],
+            "the phone number is searchable"
+        );
+        assert!(visible_suppliers(&suppliers, "nothing", false).is_empty());
     }
 }

@@ -10,8 +10,8 @@
 //!
 //! | Key         | Action                    |
 //! |-------------|---------------------------|
-//! | `F1`..`F5`  | Switch module             |
-//! | `F6`..`F8`  | Reserved: inventory, suppliers, purchase orders |
+//! | `F1`..`F5`, `F7` | Switch module        |
+//! | `F6`, `F8`  | Reserved: inventory, purchase orders |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
 //! | `Ctrl+Enter`| Take payment              |
@@ -116,6 +116,9 @@ impl PosShell {
         // the rest of the foreground: a modal inside a module's workspace would
         // be clipped to that panel and could not dim the list behind it.
         crate::modules::product_editor_modal(ui.ctx(), &mut self.state);
+        // The supplier directory's form, owned by its module for the same
+        // reason and drawn in the same foreground layer.
+        crate::modules::supplier_editor_modal(ui.ctx(), &mut self.state);
         // Choosing the file to read or the folder to write into. Drawn before
         // the typed import form so that "Type the path instead" can hand the
         // screen over in the same frame, without a flash of both.
@@ -246,10 +249,14 @@ impl PosShell {
             self.state.lock();
             return;
         }
-        // Not while another modal owns the keyboard: the product form's Enter
-        // saves, and a payment opening behind it would be a second, invisible
-        // thing to dismiss.
-        if take_payment && self.state.product_editor.is_none() && self.state.payment.is_none() {
+        // Not while another modal owns the keyboard: the product and supplier
+        // forms save on Enter, and a payment opening behind one would be a
+        // second, invisible thing to dismiss.
+        if take_payment
+            && self.state.product_editor.is_none()
+            && self.state.supplier_editor.is_none()
+            && self.state.payment.is_none()
+        {
             self.state.start_payment();
         }
     }

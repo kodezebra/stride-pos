@@ -13,7 +13,7 @@ use money::{Currency, Money};
 use ui_kit::theme::Theme;
 use ui_shell::egui;
 
-use crate::db::{Product, RecordedSale, SaleLine};
+use crate::db::{Product, RecordedSale, SaleLine, Supplier};
 use crate::settings::Settings;
 
 /// One line on the till. Money is integer minor units, always.
@@ -58,6 +58,51 @@ impl ProductDraft {
             price: String::new(),
             category,
             barcode: String::new(),
+            error: None,
+        }
+    }
+}
+
+/// The supplier form, open as a modal over the app.
+///
+/// Only the name is required. A shop often knows the rep and the phone number
+/// long before it knows an email or a postal address, and a form that refuses
+/// half-known suppliers teaches people to type junk.
+pub struct SupplierDraft {
+    /// `None` while adding, `Some` while editing.
+    pub id: Option<String>,
+    pub name: String,
+    pub contact_name: String,
+    pub phone: String,
+    pub email: String,
+    pub address: String,
+    pub notes: String,
+    pub error: Option<String>,
+}
+
+impl SupplierDraft {
+    fn new() -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            contact_name: String::new(),
+            phone: String::new(),
+            email: String::new(),
+            address: String::new(),
+            notes: String::new(),
+            error: None,
+        }
+    }
+
+    fn from(supplier: &Supplier) -> Self {
+        Self {
+            id: Some(supplier.id.clone()),
+            name: supplier.name.clone(),
+            contact_name: supplier.contact_name.clone().unwrap_or_default(),
+            phone: supplier.phone.clone().unwrap_or_default(),
+            email: supplier.email.clone().unwrap_or_default(),
+            address: supplier.address.clone().unwrap_or_default(),
+            notes: supplier.notes.clone().unwrap_or_default(),
             error: None,
         }
     }
@@ -326,6 +371,19 @@ pub struct State {
     /// in the row rather than a modal: the row is where the mistake would be.
     pub product_delete: Option<i64>,
 
+    /// The supplier directory, read once and re-read after every write. Like the
+    /// catalog it is small enough to filter in memory.
+    pub suppliers: Vec<Supplier>,
+    /// Search across name, contact and phone.
+    pub supplier_search: String,
+    /// Whether archived suppliers stay in the list. Off by default: a supplier
+    /// nobody uses any more is not what the next order should start from.
+    pub show_archived_suppliers: bool,
+    /// The supplier form, when it is open.
+    pub supplier_editor: Option<SupplierDraft>,
+    /// A supplier waiting for an archive/restore confirmation, by id.
+    pub supplier_archive: Option<String>,
+
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
 
@@ -422,6 +480,7 @@ impl State {
         let shop_draft = settings.shop_name.trim().to_owned();
         let products = crate::db::products(&store);
         let categories = crate::db::categories(&store);
+        let suppliers = crate::db::suppliers(&store);
         let users = crate::db::users(&store);
         Self {
             store,
@@ -442,6 +501,11 @@ impl State {
             import_dir: None,
             export_dir: None,
             product_delete: None,
+            suppliers,
+            supplier_search: String::new(),
+            show_archived_suppliers: false,
+            supplier_editor: None,
+            supplier_archive: None,
             payment: None,
             sale_open: None,
             notice: None,
@@ -589,6 +653,8 @@ impl State {
         self.payment = None;
         self.product_editor = None;
         self.product_delete = None;
+        self.supplier_editor = None;
+        self.supplier_archive = None;
         self.notice = None;
         self.sign_in = SignIn::default();
         self.recovery = None;
@@ -1239,6 +1305,120 @@ impl State {
         }
     }
 
+    /// Re-read the supplier directory after a write.
+    pub fn reload_suppliers(&mut self) {
+        self.suppliers = crate::db::suppliers(&self.store);
+    }
+
+    /// Open an empty supplier form.
+    pub fn start_supplier(&mut self) {
+        self.supplier_editor = Some(SupplierDraft::new());
+        self.supplier_archive = None;
+        self.notice = None;
+    }
+
+    /// Open the form on an existing supplier.
+    pub fn edit_supplier(&mut self, supplier: &Supplier) {
+        self.supplier_editor = Some(SupplierDraft::from(supplier));
+        self.supplier_archive = None;
+        self.notice = None;
+    }
+
+    /// Store the open supplier form.
+    ///
+    /// Everything is checked before the first write, so a rejected form leaves
+    /// the database untouched and the text the operator typed still on screen.
+    pub fn save_supplier(&mut self) {
+        let Some(draft) = self.supplier_editor.as_ref() else {
+            return;
+        };
+
+        let id = draft.id.clone();
+        let name = draft.name.trim().to_owned();
+        let contact_name = draft.contact_name.trim().to_owned();
+        let phone = draft.phone.trim().to_owned();
+        let email = draft.email.trim().to_owned();
+        let address = draft.address.trim().to_owned();
+        let notes = draft.notes.trim().to_owned();
+
+        if name.is_empty() {
+            return self.supplier_error("A supplier needs a name.");
+        }
+        if crate::db::supplier_name_taken(&self.store, &name, id.as_deref()) {
+            return self.supplier_error(
+                "Another supplier already uses that name. Show archived suppliers if it is hidden.",
+            );
+        }
+
+        let result = match id.as_deref() {
+            Some(id) => crate::db::update_supplier(
+                &self.store,
+                id,
+                &crate::db::SupplierFields {
+                    name: &name,
+                    contact_name: &contact_name,
+                    phone: &phone,
+                    email: &email,
+                    address: &address,
+                    notes: &notes,
+                },
+            ),
+            None => crate::db::insert_supplier(
+                &self.store,
+                &crate::db::SupplierFields {
+                    name: &name,
+                    contact_name: &contact_name,
+                    phone: &phone,
+                    email: &email,
+                    address: &address,
+                    notes: &notes,
+                },
+            )
+            .map(|_| ()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.supplier_editor = None;
+                self.reload_suppliers();
+                self.notice = Some(format!("Saved {name}."));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "saving a supplier failed");
+                self.supplier_error(format!("Could not save: {error}"));
+            }
+        }
+    }
+
+    /// Archive a supplier, or bring one back into the active list.
+    pub fn set_supplier_archived(&mut self, id: &str, archived: bool) {
+        match crate::db::set_supplier_archived(&self.store, id, archived) {
+            Ok(()) => {
+                self.supplier_archive = None;
+                self.reload_suppliers();
+                self.notice = Some(
+                    if archived {
+                        "Supplier archived."
+                    } else {
+                        "Supplier restored."
+                    }
+                    .to_owned(),
+                );
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "archiving a supplier failed");
+                self.supplier_archive = None;
+                self.notice = Some(format!("Could not change the supplier: {error}"));
+            }
+        }
+    }
+
+    fn supplier_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.supplier_editor.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
     /// Add products from a CSV file, as listed in the import draft.
     ///
     /// Everything the parser accepts is written; anything else — a row the
@@ -1806,6 +1986,65 @@ mod tests {
             .find(|product| product.name == "Hot water")
             .expect("saved with its default category");
         assert_eq!(saved.category, "General");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_supplier_needs_a_name_and_survives_archive() {
+        let (mut state, path) = state("suppliers", Currency::UGX);
+
+        state.start_supplier();
+        state.save_supplier();
+        assert!(
+            state.supplier_editor.is_some(),
+            "a blank name keeps the form open"
+        );
+        assert_eq!(
+            state
+                .supplier_editor
+                .as_ref()
+                .and_then(|draft| draft.error.as_deref()),
+            Some("A supplier needs a name.")
+        );
+
+        if let Some(draft) = state.supplier_editor.as_mut() {
+            draft.name = "  Acme  ".to_owned();
+            draft.contact_name = "Amina".to_owned();
+            draft.phone = "+256 700".to_owned();
+        }
+        state.save_supplier();
+
+        assert!(state.supplier_editor.is_none(), "the form closed");
+        assert_eq!(state.suppliers.len(), 1);
+        assert_eq!(state.suppliers[0].name, "Acme", "the name is trimmed");
+        assert_eq!(state.suppliers[0].contact_name.as_deref(), Some("Amina"));
+        let id = state.suppliers[0].id.clone();
+
+        state.start_supplier();
+        if let Some(draft) = state.supplier_editor.as_mut() {
+            draft.name = "acme".to_owned();
+        }
+        state.save_supplier();
+        assert!(
+            state.supplier_editor.is_some(),
+            "a duplicate name keeps the form open"
+        );
+        assert_eq!(
+            state
+                .supplier_editor
+                .as_ref()
+                .and_then(|draft| draft.error.as_deref()),
+            Some(
+                "Another supplier already uses that name. Show archived suppliers if it is hidden."
+            )
+        );
+
+        state.set_supplier_archived(&id, true);
+        assert!(state.suppliers[0].archived);
+
+        state.set_supplier_archived(&id, false);
+        assert!(!state.suppliers[0].archived);
 
         let _ = std::fs::remove_file(path);
     }

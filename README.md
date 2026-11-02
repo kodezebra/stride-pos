@@ -25,6 +25,10 @@ the last 7 days, the last 30 days, or all time.
 **Products** — the catalogue of what you sell: add a product, edit its price or
 category, give it a barcode. Everything here becomes a key on the Sell screen.
 
+**Suppliers** — who the shop buys from: name, contact, phone, email, address and
+notes. Search by any of them, and archive a supplier you no longer use without
+losing the record. Purchases and stock are not part of this screen yet.
+
 **Sales** — every completed sale in the chosen range, newest first.
 
 **Settings** — light or dark appearance, a preview of the receipt layout, the
@@ -39,7 +43,7 @@ Three roles, and a till that asks for the person rather than a username.
 |---|---|---|---|
 | Sell and take payment | yes | yes | yes |
 | Lock the till | yes | yes | yes |
-| Void, refund, discount, change a price, open the drawer without a sale, edit settings | — | yes | yes |
+| Void, refund, discount, change a price, open the drawer without a sale, edit settings, manage suppliers | — | yes | yes |
 | Add staff, switch an account off, reset a PIN, change the currency | — | — | yes |
 
 The owner account is the back office. An owner who also works the counter should
@@ -63,7 +67,7 @@ try up to fifteen minutes. The till locks itself after five idle minutes
 
 | Key | Does |
 |---|---|
-| `F1` … `F5` | switch between the five sections |
+| `F1` … `F5`, `F7` | switch between the six sections |
 | `Ctrl+Enter` | take payment for the cart |
 | `Ctrl+L` | lock the till |
 | `Ctrl+P` | command palette — jump anywhere by name |

@@ -8,7 +8,7 @@
 //! | `db.rs`       | schema and the few reads the shell needs           |
 //! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
-//! | `modules.rs`  | the five modules and their sidebar/workspace       |
+//! | `modules.rs`  | the modules and their sidebar/workspace             |
 //! | `picker.rs`   | choosing a file to import, or a folder to export into |
 //! | `auth.rs`     | staff, PINs, the lock screen, approvals            |
 //! | `checkout.rs` | the payment modal: cash in, change out             |
@@ -47,6 +47,10 @@ fn main() -> ExitCode {
         // Claim before migrating: a file that belongs to another app is refused
         // before this one writes a single table into it.
         store.claim_application_id(db::APPLICATION_ID)?;
+        // An intermediate build of the supplier directory created the table
+        // before its columns were settled; repair that shape before the
+        // forward-only migrations decide there is nothing left to do.
+        db::repair_suppliers(&store)?;
         store.migrate(db::MIGRATIONS)?;
 
         let settings_path = ctx.config_path("settings.json");

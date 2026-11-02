@@ -96,6 +96,40 @@ pub struct Product {
     pub barcode: Option<String>,
 }
 
+/// One of the shops or people the shop buys from.
+///
+/// The contact fields are optional because a till should not refuse a supplier
+/// just because nobody wrote down an email. `name` is the only thing that has
+/// to exist: it is what a purchase order would print.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Supplier {
+    pub id: String,
+    pub name: String,
+    pub contact_name: Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub address: Option<String>,
+    pub notes: Option<String>,
+    pub archived: bool,
+}
+
+/// The editable fields of a supplier, as the form holds them.
+///
+/// One struct rather than six string arguments: the insert and update paths
+/// must agree on which column is which, and a caller that transposes phone and
+/// email is a bug the compiler cannot see in a positional list.
+///
+/// The values are raw form text; [`insert_supplier`] and [`update_supplier`]
+/// trim them and store a blank optional field as `NULL`.
+pub struct SupplierFields<'a> {
+    pub name: &'a str,
+    pub contact_name: &'a str,
+    pub phone: &'a str,
+    pub email: &'a str,
+    pub address: &'a str,
+    pub notes: &'a str,
+}
+
 /// Owner stamp in the SQLite header. Arbitrary, permanent, and never derived
 /// from the app's name — a rename must not orphan a till's database.
 pub const APPLICATION_ID: i64 = 1_836_624_513;
@@ -250,7 +284,127 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    // Who the shop buys from.
+    //
+    // A supplier is a party, not a catalog row: the id is a UUIDv7 for the same
+    // reason the staff ids are, because the same supplier is the same supplier
+    // in the back office and on another till. Sync metadata is still absent
+    // until the sync layer lands; the id is the part that would be expensive to
+    // change later.
+    //
+    // Suppliers are archived rather than deleted. A purchase order will point
+    // at one, and "who did we buy this from" must survive the shop changing
+    // hands or a rep moving on.
+    Migration {
+        version: 6,
+        name: "create_suppliers",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS suppliers (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL CHECK (length(trim(name)) > 0),
+                contact_name TEXT,
+                phone        TEXT,
+                email        TEXT,
+                address      TEXT,
+                notes        TEXT,
+                archived     INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS suppliers_name
+                ON suppliers (name COLLATE NOCASE);
+        "#,
+    },
 ];
+
+/// Repair a `suppliers` table left behind by an intermediate build of the
+/// directory.
+///
+/// Migration 6 creates the table with `IF NOT EXISTS`, which is the right rule
+/// for a forward-only schema. A database that already held an earlier,
+/// unfinished `suppliers` table therefore kept the old columns while recording
+/// version 6, and the first save failed with "no column named contact_name".
+/// `CREATE TABLE IF NOT EXISTS` cannot fix that, and an applied migration must
+/// never be edited, so the repair runs before the migrations.
+///
+/// The old shape was `(id INTEGER, name, contact, phone, email)`. Rows are
+/// preserved: `contact` becomes `contact_name`, ids become the strings the rest
+/// of the schema uses, and names are made case-insensitively unique before the
+/// index goes back on. On every other database this is a cheap no-op: it reads
+/// the column list and returns without writing.
+pub fn repair_suppliers(store: &storage::Store) -> anyhow::Result<()> {
+    // Never touch a database a newer build has already moved past this schema.
+    let newest = MIGRATIONS.last().map_or(0, |migration| migration.version);
+    if store.user_version()? > newest {
+        return Ok(());
+    }
+
+    let columns: Vec<String> = {
+        let mut statement = store.conn().prepare("PRAGMA table_info(suppliers)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if columns.is_empty() || columns.iter().any(|column| column == "contact_name") {
+        return Ok(());
+    }
+
+    let transaction = store.conn().unchecked_transaction()?;
+    transaction.execute_batch(
+        r#"
+            ALTER TABLE suppliers RENAME TO suppliers_intermediate;
+
+            CREATE TABLE suppliers (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL CHECK (length(trim(name)) > 0),
+                contact_name TEXT,
+                phone        TEXT,
+                email        TEXT,
+                address      TEXT,
+                notes        TEXT,
+                archived     INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            INSERT INTO suppliers (id, name, contact_name, phone, email)
+                SELECT CAST(id AS TEXT), name, contact, phone, email
+                FROM suppliers_intermediate;
+
+            DROP TABLE suppliers_intermediate;
+        "#,
+    )?;
+
+    // The old table only checked that a name was non-empty, so it may hold
+    // duplicates. Rename them rather than refusing to open the till: a
+    // directory with "Acme" and "Acme (2)" is usable, a till that will not
+    // start is not.
+    let mut taken = std::collections::HashSet::new();
+    let rows: Vec<(String, String)> = {
+        let mut statement = transaction.prepare("SELECT id, name FROM suppliers ORDER BY rowid")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (id, name) in rows {
+        let mut candidate = name.clone();
+        let mut suffix = 2;
+        while !taken.insert(candidate.to_lowercase()) {
+            candidate = format!("{name} ({suffix})");
+            suffix += 1;
+        }
+        if candidate != name {
+            transaction.execute(
+                "UPDATE suppliers SET name = ?2 WHERE id = ?1",
+                (&id, &candidate),
+            )?;
+        }
+    }
+
+    transaction.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS suppliers_name
+             ON suppliers (name COLLATE NOCASE);",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
 
 /// Someone who works the till.
 ///
@@ -590,6 +744,159 @@ pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>)
             |row| row.get::<_, bool>(0),
         )
         .unwrap_or(true)
+}
+
+/// Every supplier, by name. Archived rows are included; the screen decides
+/// whether to show them, which keeps one read for both views.
+pub fn suppliers(store: &storage::Store) -> Vec<Supplier> {
+    let mut statement = match store.conn().prepare(
+        "SELECT id, name, contact_name, phone, email, address, notes, archived
+         FROM suppliers ORDER BY name COLLATE NOCASE",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "suppliers prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(Supplier {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            contact_name: row.get(2)?,
+            phone: row.get(3)?,
+            email: row.get(4)?,
+            address: row.get(5)?,
+            notes: row.get(6)?,
+            archived: row.get(7)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "suppliers query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Add a supplier and return it, id included.
+///
+/// A blank optional field is stored as `NULL`, so "no phone" is one value
+/// rather than an empty string every reader has to remember to trim.
+pub fn insert_supplier(
+    store: &storage::Store,
+    fields: &SupplierFields<'_>,
+) -> anyhow::Result<Supplier> {
+    let name = fields.name.trim();
+    anyhow::ensure!(!name.is_empty(), "a supplier needs a name");
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let contact_name = optional_text(fields.contact_name);
+    let phone = optional_text(fields.phone);
+    let email = optional_text(fields.email);
+    let address = optional_text(fields.address);
+    let notes = optional_text(fields.notes);
+
+    store.conn().execute(
+        "INSERT INTO suppliers (id, name, contact_name, phone, email, address, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (
+            id.as_str(),
+            name,
+            contact_name,
+            phone,
+            email,
+            address,
+            notes,
+        ),
+    )?;
+
+    Ok(Supplier {
+        id,
+        name: name.to_owned(),
+        contact_name: contact_name.map(str::to_owned),
+        phone: phone.map(str::to_owned),
+        email: email.map(str::to_owned),
+        address: address.map(str::to_owned),
+        notes: notes.map(str::to_owned),
+        archived: false,
+    })
+}
+
+/// Replace a supplier's editable fields.
+///
+/// Returns an error when the row is gone: the list on screen is a cache, and
+/// "Saved" over a supplier that no longer exists is a lie the operator would
+/// only discover on the next restart.
+pub fn update_supplier(
+    store: &storage::Store,
+    id: &str,
+    fields: &SupplierFields<'_>,
+) -> anyhow::Result<()> {
+    let name = fields.name.trim();
+    anyhow::ensure!(!name.is_empty(), "a supplier needs a name");
+
+    let changed = store.conn().execute(
+        "UPDATE suppliers
+         SET name = ?2, contact_name = ?3, phone = ?4, email = ?5,
+             address = ?6, notes = ?7
+         WHERE id = ?1",
+        (
+            id,
+            name,
+            optional_text(fields.contact_name),
+            optional_text(fields.phone),
+            optional_text(fields.email),
+            optional_text(fields.address),
+            optional_text(fields.notes),
+        ),
+    )?;
+    anyhow::ensure!(changed == 1, "supplier {id} is no longer in the directory");
+    Ok(())
+}
+
+/// Hide a supplier from the active list, or bring it back.
+///
+/// The row stays because a purchase order may point at it; archival is the
+/// supplier equivalent of a staff account being switched off.
+pub fn set_supplier_archived(
+    store: &storage::Store,
+    id: &str,
+    archived: bool,
+) -> anyhow::Result<()> {
+    let changed = store.conn().execute(
+        "UPDATE suppliers SET archived = ?2 WHERE id = ?1",
+        (id, archived),
+    )?;
+    anyhow::ensure!(changed == 1, "supplier {id} is no longer in the directory");
+    Ok(())
+}
+
+/// Whether a name already belongs to a supplier other than `except`.
+///
+/// Checked before the write so the operator gets "that name is taken" instead
+/// of a constraint error. The unique index still enforces it.
+pub fn supplier_name_taken(store: &storage::Store, name: &str, except: Option<&str>) -> bool {
+    store
+        .conn()
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM suppliers
+                 WHERE name = ?1 COLLATE NOCASE AND id IS NOT ?2
+             )",
+            (name.trim(), except),
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(true)
+}
+
+/// A blank optional field is the absence of a value, not a value.
+fn optional_text(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Record a sale and its payment in one transaction.
@@ -1641,6 +1948,171 @@ mod tests {
             insert_product(&store, "Refund", -100, "Coffee", None).is_err(),
             "a price is a non-negative amount; the CHECK is the guard"
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn supplier_fields(name: &str) -> SupplierFields<'_> {
+        SupplierFields {
+            name,
+            contact_name: "",
+            phone: "",
+            email: "",
+            address: "",
+            notes: "",
+        }
+    }
+
+    #[test]
+    fn suppliers_round_trip_and_archive() {
+        let (store, path) = store("suppliers");
+        assert!(
+            suppliers(&store).is_empty(),
+            "a fresh till has no suppliers"
+        );
+
+        let mut acme_fields = supplier_fields("  Acme  ");
+        acme_fields.contact_name = "Amina";
+        acme_fields.phone = "+256 700 000";
+        acme_fields.email = "orders@acme.test";
+        acme_fields.address = "Kampala";
+        acme_fields.notes = "Delivers on Tuesdays";
+        let acme = insert_supplier(&store, &acme_fields).expect("insert");
+        assert_eq!(acme.name, "Acme", "the name is trimmed before it is stored");
+        assert_eq!(acme.phone.as_deref(), Some("+256 700 000"));
+        assert!(!acme.archived);
+
+        insert_supplier(&store, &supplier_fields("Zebra")).expect("insert");
+        let names: Vec<String> = suppliers(&store)
+            .into_iter()
+            .map(|supplier| supplier.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["Acme", "Zebra"],
+            "the list is by name, not by insertion order"
+        );
+        let zebra = suppliers(&store)
+            .into_iter()
+            .find(|supplier| supplier.name == "Zebra")
+            .expect("the supplier was written");
+        assert_eq!(
+            zebra.phone, None,
+            "a blank optional field is stored as NULL"
+        );
+        assert_eq!(zebra.notes, None);
+
+        let mut updated_fields = supplier_fields("Acme Ltd");
+        updated_fields.contact_name = "Amina";
+        updated_fields.email = "orders@acme.test";
+        update_supplier(&store, &acme.id, &updated_fields).expect("update");
+        let updated = suppliers(&store)
+            .into_iter()
+            .find(|supplier| supplier.id == acme.id)
+            .expect("the supplier survived the update");
+        assert_eq!(updated.name, "Acme Ltd");
+        assert_eq!(updated.phone, None, "clearing a field clears it");
+
+        set_supplier_archived(&store, &acme.id, true).expect("archive");
+        assert!(
+            suppliers(&store)
+                .iter()
+                .find(|supplier| supplier.id == acme.id)
+                .expect("archived rows stay readable")
+                .archived
+        );
+        set_supplier_archived(&store, &acme.id, false).expect("restore");
+        assert!(!suppliers(&store)[0].archived);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_supplier_name_belongs_to_one_supplier() {
+        let (store, path) = store("supplier-names");
+        let acme = insert_supplier(&store, &supplier_fields("Acme")).expect("insert");
+
+        assert!(supplier_name_taken(&store, "acme", None), "case is ignored");
+        assert!(
+            !supplier_name_taken(&store, "ACME", Some(&acme.id)),
+            "a supplier keeps its own name when it is edited"
+        );
+        assert!(!supplier_name_taken(&store, "Other", None));
+        assert!(
+            insert_supplier(&store, &supplier_fields("ACME")).is_err(),
+            "the unique index is the real guard, not the pre-check"
+        );
+
+        assert!(
+            insert_supplier(&store, &supplier_fields("   ")).is_err(),
+            "a supplier with no name is not a supplier"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn editing_a_missing_supplier_fails() {
+        let (store, path) = store("missing-supplier");
+
+        assert!(
+            update_supplier(&store, "missing", &supplier_fields("Name")).is_err(),
+            "'Saved' over a row that is gone is a lie"
+        );
+        assert!(set_supplier_archived(&store, "missing", true).is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The bug that sent us here: migration 6 was recorded as applied while a
+    /// previous build's `suppliers` table was still in place, so every write
+    /// failed on the missing `contact_name`. The repair must keep the rows and
+    /// leave a table the new code can use.
+    #[test]
+    fn an_intermediate_supplier_table_is_repaired_without_losing_rows() {
+        let (store, path) = store("supplier-repair");
+
+        // The shape the unfinished build left behind: integer ids, one
+        // `contact` column, and no unique index.
+        store
+            .conn()
+            .execute_batch(
+                "DROP TABLE suppliers;
+                 CREATE TABLE suppliers (
+                     id      INTEGER PRIMARY KEY,
+                     name    TEXT NOT NULL CHECK (length(name) > 0),
+                     contact TEXT,
+                     phone   TEXT,
+                     email   TEXT
+                 );
+                 INSERT INTO suppliers (id, name, contact, phone, email)
+                     VALUES (7, 'Acme', 'Jane', '0700', 'jane@acme.test'),
+                            (8, 'acme', 'John', '0800', NULL);",
+            )
+            .expect("intermediate schema");
+
+        repair_suppliers(&store).expect("repair");
+
+        let repaired = suppliers(&store);
+        assert_eq!(repaired.len(), 2, "rows are kept");
+        assert_eq!(
+            repaired[0].id, "7",
+            "an integer id becomes the string the schema uses"
+        );
+        assert_eq!(repaired[0].contact_name.as_deref(), Some("Jane"));
+        assert_eq!(repaired[0].phone.as_deref(), Some("0700"));
+        assert_eq!(repaired[0].email.as_deref(), Some("jane@acme.test"));
+        assert_eq!(
+            repaired[1].name, "acme (2)",
+            "a duplicate name is made unique"
+        );
+        assert!(supplier_name_taken(&store, "ACME", None));
+
+        // Running it again changes nothing: boot calls it every time.
+        repair_suppliers(&store).expect("second repair");
+        assert_eq!(suppliers(&store).len(), 2);
+        insert_supplier(&store, &supplier_fields("Beta"))
+            .expect("the repaired table accepts writes");
 
         let _ = std::fs::remove_file(path);
     }
