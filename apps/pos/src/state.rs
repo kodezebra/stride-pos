@@ -281,6 +281,10 @@ pub struct State {
     // Per-module view state. Kept here rather than in the module structs for the
     // reason in the module doc: switching away and back should not reset them.
     pub search: String,
+    /// Set when the selling screen opens, so the next frame can put the cursor in
+    /// the scan field. A scanner types into whatever has focus; a till that needs
+    /// one click before the first barcode is a till that "doesn't scan".
+    pub scan_focus: bool,
     /// The category both Sell and Products filter by. `None` is "All"; the value
     /// is a category name, because the categories are the shop's, not an index
     /// into a list the app invented.
@@ -388,6 +392,7 @@ impl State {
             sidebar_open,
             prefs_dirty: false,
             search: String::new(),
+            scan_focus: true,
             category: None,
             range: 0,
             settings_section: 0,
@@ -471,6 +476,11 @@ impl State {
             self.module = module;
             self.prefs_dirty = true;
             self.notice = None;
+            // Opening the selling screen returns the cursor to the scan field, so
+            // the next barcode lands in the cart without a click.
+            if module == crate::modules::SELL {
+                self.scan_focus = true;
+            }
         }
     }
 
