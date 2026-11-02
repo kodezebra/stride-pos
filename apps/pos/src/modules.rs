@@ -13,6 +13,8 @@
 //! F6–F8 are reserved for Inventory, Suppliers and Purchase orders. They are
 //! documented here and nowhere else so the reservation cannot drift.
 
+use std::path::Path;
+
 use ui_kit::components;
 use ui_kit::icons::Icon;
 use ui_kit::theme;
@@ -21,6 +23,7 @@ use ui_shell::egui;
 use ui_shell::regions;
 
 use crate::db::Product;
+use crate::picker::ExportKind;
 use crate::state::{self, State};
 
 // Indices into `all()`. Order is the activity-bar order and the persisted value,
@@ -1423,35 +1426,23 @@ impl Module for Products {
             state.start_product();
         }
         if import {
-            state.start_import();
+            state.start_import_picker();
+        }
+        if export_visible {
+            state.start_export(ExportKind::Products);
+        }
+        if export_all {
+            state.start_export(ExportKind::AllProducts);
         }
 
         let needle = state.search.trim().to_lowercase();
         let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
-        // "Export CSV" is what is on screen; "Export all" is the whole catalog.
-        // The names of the files carry the difference, because a folder with
-        // both in it must not make the operator open them to find out which
-        // one they got.
-        if export_visible {
-            let rows: Vec<Product> = visible
-                .iter()
-                .map(|&index| state.products[index].clone())
-                .collect();
-            export_products(state, &rows, "products");
-        }
-        if export_all {
-            let rows = state.products.clone();
-            export_products(state, &rows, "products-all");
-        }
-
         components::caption(
             ui,
             "Barcodes that start with 0 may need a text column in Excel.",
         );
-        if let Some(notice) = state.file_notice.as_deref() {
-            components::caption(ui, notice);
-        }
+        file_feedback(ui, state);
 
         if state.products.is_empty() {
             components::empty_state_card(
@@ -1524,49 +1515,110 @@ fn categories_sidebar(ui: &mut egui::Ui, state: &mut State) {
     }
 }
 
+/// Write one of the exports into the folder the picker chose.
+///
+/// The rows are rebuilt from the screen's current filters at the moment the
+/// folder is confirmed. The modal blocks the screen while it is open, so the
+/// file still matches what the operator was looking at.
+pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
+    // "Export CSV" is what is on screen; "Export all" is the whole catalog.
+    // The names of the files carry the difference, because a folder with both
+    // in it must not make the operator open them to find out which one they
+    // got.
+    match kind {
+        ExportKind::Products => {
+            let needle = state.search.trim().to_lowercase();
+            let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+            let rows: Vec<Product> = visible
+                .iter()
+                .map(|&index| state.products[index].clone())
+                .collect();
+            export_products(state, &rows, "products", dir);
+        }
+        ExportKind::AllProducts => {
+            let rows = state.products.clone();
+            export_products(state, &rows, "products-all", dir);
+        }
+        ExportKind::Sales => export_sales(state, dir),
+    }
+}
+
+/// The line under a screen that just wrote a file, with its path one press
+/// away.
+///
+/// A path printed in a sentence is hard to retype, and a till's exports often
+/// end up in an email to the accountant, so the copy is the point.
+fn file_feedback(ui: &mut egui::Ui, state: &State) {
+    let Some(notice) = state.file_notice.as_deref() else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        components::caption(ui, notice);
+        if let Some(path) = state.file_path.as_deref()
+            && ui.small_button("Copy path").clicked()
+        {
+            ui.ctx().copy_text(path.display().to_string());
+        }
+    });
+}
+
 /// Write a product export and say where it went.
 ///
 /// The path is the point: an operator who does not know where the file is has
 /// not been helped. A failure lands in the same line a success would have, so a
 /// missing export cannot look like a button that did nothing.
-fn export_products(state: &mut State, rows: &[Product], name: &str) {
+fn export_products(state: &mut State, rows: &[Product], name: &str, dir: &Path) {
     let body = crate::export::products_csv(rows, state.currency);
-    save_export(state, name, &body, rows.len(), ("product", "products"));
+    save_export(state, name, &body, rows.len(), ("product", "products"), dir);
 }
 
 /// Write the sales export for the range the screen is showing.
-fn export_sales(state: &mut State) {
+fn export_sales(state: &mut State, dir: &Path) {
     let rows = match crate::db::export_sales(&state.store, state.range) {
         Ok(rows) => rows,
         Err(err) => {
+            state.file_path = None;
             state.file_notice = Some(format!("Export failed: {err:#}"));
             return;
         }
     };
     let body = crate::export::sales_csv(&rows, state.currency);
-    save_export(state, "sales", &body, rows.len(), ("sale", "sales"));
+    save_export(state, "sales", &body, rows.len(), ("sale", "sales"), dir);
 }
 
 /// Name a file after the second it was written and report it in `file_notice`.
 ///
 /// The stamp comes from SQLite, the same clock that dates the sales inside the
 /// file, so two exports cannot disagree about when the books were taken.
-fn save_export(state: &mut State, name: &str, body: &str, count: usize, nouns: (&str, &str)) {
+fn save_export(
+    state: &mut State,
+    name: &str,
+    body: &str,
+    count: usize,
+    nouns: (&str, &str),
+    dir: &Path,
+) {
     let stamp = match crate::db::stamp(&state.store) {
         Ok(stamp) => stamp,
         Err(err) => {
+            state.file_path = None;
             state.file_notice = Some(format!("Export failed: {err:#}"));
             return;
         }
     };
 
     let noun = if count == 1 { nouns.0 } else { nouns.1 };
-    let dir = state.paths.data.join("exports");
     let file = format!("{name}-{stamp}.csv");
-    state.file_notice = Some(match crate::export::write(&dir, &file, body) {
-        Ok(path) => format!("Exported {count} {noun} to {}", path.display()),
-        Err(err) => format!("Export failed: {err:#}"),
-    });
+    match crate::export::write(dir, &file, body) {
+        Ok(path) => {
+            state.file_path = Some(path.clone());
+            state.file_notice = Some(format!("Exported {count} {noun} to {}", path.display()));
+        }
+        Err(err) => {
+            state.file_path = None;
+            state.file_notice = Some(format!("Export failed: {err:#}"));
+        }
+    }
 }
 
 /// Whether a product passes the category and search filters.
@@ -2117,11 +2169,9 @@ impl Module for Sales {
             });
         });
         if export {
-            export_sales(state);
+            state.start_export(ExportKind::Sales);
         }
-        if let Some(notice) = state.file_notice.as_deref() {
-            components::caption(ui, notice);
-        }
+        file_feedback(ui, state);
 
         let sales = crate::db::sales(&state.store, state.range, 100);
         if sales.is_empty() {
@@ -2396,17 +2446,23 @@ fn backup_card(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.md);
 
         if components::primary_button(ui, "Back up now").clicked() {
-            state.file_notice = Some(match crate::db::backup(&state.store, &folder) {
-                Ok(path) => format!("Backed up to {}", path.display()),
-                Err(err) => format!("Backup failed: {err:#}"),
-            });
+            match crate::db::backup(&state.store, &folder) {
+                Ok(path) => {
+                    state.file_path = Some(path.clone());
+                    state.file_notice = Some(format!("Backed up to {}", path.display()));
+                }
+                Err(err) => {
+                    state.file_path = None;
+                    state.file_notice = Some(format!("Backup failed: {err:#}"));
+                }
+            }
         }
 
         ui.add_space(SPACING.xs);
         components::caption(ui, &format!("Folder: {}", folder.display()));
-        if let Some(notice) = state.file_notice.as_deref() {
+        if state.file_notice.is_some() {
             ui.add_space(SPACING.xs);
-            components::caption(ui, notice);
+            file_feedback(ui, state);
         }
     });
 }
