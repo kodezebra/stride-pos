@@ -2726,9 +2726,58 @@ fn stock_header(ui: &mut egui::Ui) {
 
 /// One tracked product: name and category on the left, count and actions right.
 ///
+/// The name wraps rather than truncates, and on a narrow row the controls drop
+/// below it. Neither side is allowed to hide the other.
+///
 /// The row returns what was clicked instead of mutating the state, because the
 /// caller is iterating `state.stock` and cannot borrow it mutably yet.
 fn stock_row(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
+    let mut action = None;
+
+    // Below this width the controls would leave the name a sliver. Stacking
+    // keeps the name readable instead of letting the two sides fight.
+    if ui.available_width() < 440.0 {
+        ui.vertical(|ui| {
+            stock_identity(ui, item);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                action = stock_controls(ui, item, can_manage);
+            });
+        });
+    } else {
+        let (_, controls) = egui::containers::Sides::new()
+            .height(52.0)
+            .shrink_left()
+            .wrap()
+            .show(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| stock_identity(ui, item));
+                },
+                |ui| stock_controls(ui, item, can_manage),
+            );
+        action = controls;
+    }
+    components::divider(ui);
+
+    action
+}
+
+/// The product's identity: name over category, with the low-stock threshold.
+fn stock_identity(ui: &mut egui::Ui, item: &StockItem) {
+    ui.label(components::semibold(&item.name).size(TYPE.body));
+    let mut detail = if item.category.is_empty() {
+        "Uncategorised".to_owned()
+    } else {
+        item.category.clone()
+    };
+    detail.push_str(&format!(" · warns at {}", item.low_stock));
+    components::caption(ui, &detail);
+}
+
+/// The row's right-hand cluster, added right-to-left: count, then the action,
+/// then history. The button sits beside the number so the name keeps the rest
+/// of the line.
+fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
     let palette = theme::current(ui.ctx());
     let mut action = None;
 
@@ -2747,61 +2796,39 @@ fn stock_row(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<St
         palette.text
     };
 
-    egui::containers::Sides::new()
-        .height(52.0)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.label(components::semibold(&item.name).size(TYPE.body));
-                    let mut detail = if item.category.is_empty() {
-                        "Uncategorised".to_owned()
-                    } else {
-                        item.category.clone()
-                    };
-                    detail.push_str(&format!(" · warns at {}", item.low_stock));
-                    components::caption(ui, &detail);
-                });
-            },
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            components::numeric(item.on_hand.to_string())
-                                .size(TYPE.body)
-                                .color(egui::Color32::from(count_color)),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        components::badge(ui, status, status_color);
-                    });
-                });
-                if components::icon_button(ui, history_icon(), 32.0)
-                    .on_hover_text("History")
-                    .clicked()
-                {
-                    action = Some(StockAction::History {
-                        id: item.product_id,
-                        name: item.name.clone(),
-                    });
-                }
-                if can_manage
-                    && ui
-                        .button("Move stock")
-                        .on_hover_text("Receive, return, waste or adjust this product")
-                        .clicked()
-                {
-                    action = Some(StockAction::Move {
-                        id: item.product_id,
-                        name: item.name.clone(),
-                        on_hand: item.on_hand,
-                    });
-                }
-            },
-        );
-    components::divider(ui);
+    ui.vertical(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                components::numeric(item.on_hand.to_string())
+                    .size(TYPE.body)
+                    .color(egui::Color32::from(count_color)),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            components::badge(ui, status, status_color);
+        });
+    });
+    if can_manage
+        && ui
+            .button("Move stock")
+            .on_hover_text("Receive, return, waste or adjust this product")
+            .clicked()
+    {
+        action = Some(StockAction::Move {
+            id: item.product_id,
+            name: item.name.clone(),
+            on_hand: item.on_hand,
+        });
+    }
+    if components::icon_button(ui, history_icon(), 32.0)
+        .on_hover_text("History")
+        .clicked()
+    {
+        action = Some(StockAction::History {
+            id: item.product_id,
+            name: item.name.clone(),
+        });
+    }
 
     action
 }
