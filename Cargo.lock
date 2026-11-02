@@ -2248,6 +2248,7 @@ dependencies = [
  "app-boot",
  "argon2",
  "config",
+ "directories",
  "getrandom 0.3.4",
  "money",
  "serde",

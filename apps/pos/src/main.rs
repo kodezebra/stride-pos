@@ -9,6 +9,7 @@
 //! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
 //! | `modules.rs`  | the five modules and their sidebar/workspace       |
+//! | `picker.rs`   | choosing a file to import, or a folder to export into |
 //! | `auth.rs`     | staff, PINs, the lock screen, approvals            |
 //! | `checkout.rs` | the payment modal: cash in, change out             |
 //! | `commands.rs` | the command palette's contents                     |
@@ -25,6 +26,7 @@ mod db;
 mod export;
 mod import;
 mod modules;
+mod picker;
 mod prefs;
 mod receipt;
 mod settings;

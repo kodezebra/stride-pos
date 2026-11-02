@@ -116,6 +116,10 @@ impl PosShell {
         // the rest of the foreground: a modal inside a module's workspace would
         // be clipped to that panel and could not dim the list behind it.
         crate::modules::product_editor_modal(ui.ctx(), &mut self.state);
+        // Choosing the file to read or the folder to write into. Drawn before
+        // the typed import form so that "Type the path instead" can hand the
+        // screen over in the same frame, without a flash of both.
+        crate::picker::picker_modal(ui.ctx(), &mut self.state);
         // The bulk sibling of the product editor: a CSV import is one owner's
         // setup job, but it still owns the screen while it reads its file.
         crate::modules::import_modal(ui.ctx(), &mut self.state);

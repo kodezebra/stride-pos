@@ -311,8 +311,17 @@ pub struct State {
     pub categories: Vec<String>,
     /// The product form, when it is open.
     pub product_editor: Option<ProductDraft>,
-    /// The CSV import modal, when it is open.
+    /// The CSV import modal, when it is open. The typed-path fallback for a
+    /// file whose location is already known.
     pub import: Option<ImportDraft>,
+    /// The file chooser, when an import or an export is choosing a location.
+    /// Only one picker exists: closing it returns to whichever screen asked.
+    pub picker: Option<crate::picker::Picker>,
+    /// The folder the last import came from, so the next one starts there for
+    /// the rest of this session.
+    pub import_dir: Option<PathBuf>,
+    /// The folder the last export went to, for the same reason.
+    pub export_dir: Option<PathBuf>,
     /// A product the operator asked to delete, waiting for confirmation. Inline
     /// in the row rather than a modal: the row is where the mistake would be.
     pub product_delete: Option<i64>,
@@ -332,6 +341,9 @@ pub struct State {
     /// Settings or a modal would otherwise be invisible. Each screen that sets
     /// it also renders it; navigation clears it.
     pub file_notice: Option<String>,
+    /// The file the last [`State::file_notice`] is about, so the screen can
+    /// offer the path for copying without parsing it back out of a sentence.
+    pub file_path: Option<PathBuf>,
 
     /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
     /// so a half-typed name is never written to disk.
@@ -422,11 +434,15 @@ impl State {
             categories,
             product_editor: None,
             import: None,
+            picker: None,
+            import_dir: None,
+            export_dir: None,
             product_delete: None,
             payment: None,
             sale_open: None,
             notice: None,
             file_notice: None,
+            file_path: None,
             shop_draft,
             settings,
             paths,
@@ -516,6 +532,7 @@ impl State {
             self.prefs_dirty = true;
             self.notice = None;
             self.file_notice = None;
+            self.file_path = None;
             // Opening the selling screen returns the cursor to the scan field, so
             // the next barcode lands in the cart without a click.
             if module == crate::modules::SELL {
@@ -1299,12 +1316,39 @@ impl State {
         }
     }
 
-    /// Open the CSV import modal with a fresh draft.
+    /// Open the typed-path fallback for the CSV import.
+    ///
+    /// The normal route is [`State::start_import_picker`]; this stays for a
+    /// path pasted from an email, and is what the picker offers when a folder
+    /// cannot be read.
     pub fn start_import(&mut self) {
         self.import = Some(ImportDraft {
             path: String::new(),
             error: None,
         });
+    }
+
+    /// Open the file chooser on the last folder an import came from.
+    pub fn start_import_picker(&mut self) {
+        let start = crate::picker::start_dir(self.import_dir.as_deref(), &self.paths.data);
+        self.picker = Some(crate::picker::Picker::open(
+            crate::picker::Purpose::Import,
+            start,
+            &self.paths.data,
+        ));
+    }
+
+    /// Open the folder chooser for one of the exports.
+    ///
+    /// Nothing is written until the operator confirms a folder, so a mis-click
+    /// on "Export CSV" can no longer leave a file somewhere unexpected.
+    pub fn start_export(&mut self, kind: crate::picker::ExportKind) {
+        let start = crate::picker::start_dir(self.export_dir.as_deref(), &self.paths.data);
+        self.picker = Some(crate::picker::Picker::open(
+            crate::picker::Purpose::Export(kind),
+            start,
+            &self.paths.data,
+        ));
     }
 
     /// Read one sale's full record for the detail modal.
