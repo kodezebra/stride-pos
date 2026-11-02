@@ -188,7 +188,18 @@ impl Sell {
     fn grid(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::field_label(ui, "Scan or search");
         ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.search, "Name or barcode");
+        let response = components::search_field(ui, &mut state.search, "Name or barcode");
+        // The cursor belongs here whenever the selling screen opens: nothing else
+        // on Sell takes text, and a scanner types into whatever has focus.
+        if std::mem::take(&mut state.scan_focus) {
+            response.request_focus();
+        }
+        // A barcode scanner is a keyboard that types and then presses Enter. The
+        // field already filtered the grid, but a cashier with a scanner in their
+        // hand expects the item in the cart — asking them to click a tile they
+        // just scanned is the whole bug. `lost_focus` alone would also fire on a
+        // click elsewhere, so the Enter press is what confirms the scan.
+        let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(SPACING.md);
 
         // A till with an empty catalog is not a bug in the grid: it is a shop
@@ -214,13 +225,37 @@ impl Sell {
         }
 
         let needle = state.search.trim().to_lowercase();
-        let visible: Vec<usize> = state
-            .products
-            .iter()
-            .enumerate()
-            .filter(|(_, product)| matches(product, state.category.as_deref(), &needle))
-            .map(|(index, _)| index)
-            .collect();
+        let mut visible = visible_products(&state.products, state.category.as_deref(), &needle);
+
+        if submitted {
+            let scanned = state.search.trim().to_owned();
+            match scan_target(&state.products, &scanned, &visible) {
+                Scan::One(index) => {
+                    // Cloned because the grid holds `state.products` borrowed and
+                    // `add_to_cart` needs the whole state.
+                    let product = state.products[index].clone();
+                    state.add_to_cart(&product);
+                    // Clear the field so the next scan starts clean, and keep the
+                    // focus so it lands here without a mouse.
+                    state.search.clear();
+                    response.request_focus();
+                    // The grid is drawn this frame from `visible`: recompute it,
+                    // otherwise a successful scan leaves the grid showing only the
+                    // product it just moved to the cart until the next repaint.
+                    visible = visible_products(&state.products, state.category.as_deref(), "");
+                }
+                // Say what happened in words the cashier can act on. `add_to_cart`
+                // clears `notice`, so these are set after it, never before.
+                Scan::Ambiguous(count) => {
+                    state.notice = Some(format!(
+                        "{count} products match {scanned} — scan a barcode or type more."
+                    ));
+                }
+                Scan::None => {
+                    state.notice = Some(format!("No product matches {scanned}."));
+                }
+            }
+        }
 
         if visible.is_empty() {
             components::empty_state_card(
@@ -1321,13 +1356,7 @@ impl Module for Products {
         }
 
         let needle = state.search.trim().to_lowercase();
-        let visible: Vec<usize> = state
-            .products
-            .iter()
-            .enumerate()
-            .filter(|(_, product)| matches(product, state.category.as_deref(), &needle))
-            .map(|(index, _)| index)
-            .collect();
+        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
         if visible.is_empty() {
             components::empty_state_card(
@@ -1400,6 +1429,72 @@ fn matches(product: &Product, category: Option<&str>, needle: &str) -> bool {
             .as_deref()
             .is_some_and(|barcode| barcode.to_lowercase().contains(needle));
     in_category && in_search
+}
+
+/// Indices of the products the grid shows, in catalog order.
+///
+/// Its own function because the scan path needs the same answer the grid drew:
+/// if the two ever disagreed, a scan could add a product that is not on screen.
+fn visible_products(products: &[Product], category: Option<&str>, needle: &str) -> Vec<usize> {
+    products
+        .iter()
+        .enumerate()
+        .filter(|(_, product)| matches(product, category, needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// What a scanned code or a typed name resolved to.
+#[derive(Debug, PartialEq, Eq)]
+enum Scan {
+    One(usize),
+    Ambiguous(usize),
+    None,
+}
+
+/// Resolve a scan (or a typed name) to exactly one product, or say why not.
+///
+/// The order is the contract:
+/// 1. an exact barcode wins outright, **ignoring the category filter** — a scan
+///    is an explicit instruction, so a sidebar the cashier forgot about must not
+///    turn it into "no product matches";
+/// 2. an exact name within what the cashier can see;
+/// 3. the only product the current filter shows;
+/// 4. nothing, or a count so the message can say how many.
+fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return Scan::None;
+    }
+
+    // Barcodes are unique when present, so `position` is enough here.
+    if let Some(index) = products.iter().position(|product| {
+        product
+            .barcode
+            .as_deref()
+            .is_some_and(|barcode| barcode.trim().to_lowercase() == needle)
+    }) {
+        return Scan::One(index);
+    }
+
+    let named: Vec<usize> = visible
+        .iter()
+        .copied()
+        .filter(|&index| products[index].name.trim().to_lowercase() == needle)
+        .collect();
+
+    if named.len() > 1 {
+        return Scan::Ambiguous(named.len());
+    }
+    if let Some(&index) = named.first() {
+        return Scan::One(index);
+    }
+
+    match visible {
+        [] => Scan::None,
+        [index] => Scan::One(*index),
+        _ => Scan::Ambiguous(visible.len()),
+    }
 }
 
 /// The edit glyph for a catalogue row.
@@ -2162,5 +2257,77 @@ mod tests {
     #[test]
     fn a_day_is_said_with_its_weekday() {
         assert_eq!(long_date(&day("01/11", 0, 0)), "Sun 1 Nov");
+    }
+
+    fn product(id: i64, name: &str, barcode: Option<&str>) -> Product {
+        Product {
+            id,
+            name: name.to_owned(),
+            price_minor: 1_000,
+            category: "Drinks".to_owned(),
+            barcode: barcode.map(str::to_owned),
+        }
+    }
+
+    /// A barcode is what the scanner sends, and a product *name* can contain the
+    /// same digits. If the name won, the wrong item would land in the cart and the
+    /// till would be off by the difference — silently.
+    #[test]
+    fn a_scanned_barcode_beats_a_name_that_contains_it() {
+        let products = [
+            product(1, "Cola 6001234 crate", None),
+            product(2, "Cola", Some("6001234")),
+        ];
+        let visible = visible_products(&products, None, "6001234");
+
+        assert_eq!(visible.len(), 2, "both read as matches before resolution");
+        assert_eq!(scan_target(&products, "6001234", &visible), Scan::One(1));
+    }
+
+    #[test]
+    fn the_only_product_in_view_is_the_one_a_scan_takes() {
+        let products = [product(1, "Cola", None), product(2, "Fanta", None)];
+        let visible = visible_products(&products, None, "fan");
+
+        assert_eq!(scan_target(&products, "fan", &visible), Scan::One(1));
+    }
+
+    /// Two tiles are a choice the cashier has to make. Picking the first would
+    /// put the wrong product in the cart with no way to tell it had happened.
+    #[test]
+    fn two_matches_are_a_question_not_a_choice() {
+        let products = [product(1, "Cola 500", None), product(2, "Cola 1L", None)];
+        let visible = visible_products(&products, None, "cola");
+
+        assert_eq!(scan_target(&products, "cola", &visible), Scan::Ambiguous(2));
+    }
+
+    /// The sidebar is a browse tool, not a restriction. A cashier who left a
+    /// category selected must still be able to scan anything on the shelf.
+    #[test]
+    fn a_scan_ignores_the_category_sidebar() {
+        let products = [product(1, "Cola", Some("6001234"))];
+        let visible = visible_products(&products, Some("Food"), "");
+
+        assert!(visible.is_empty(), "the sidebar hides the product");
+        assert_eq!(scan_target(&products, "6001234", &visible), Scan::One(0));
+    }
+
+    /// An exact name is the cashier confirming which of the matches they meant.
+    #[test]
+    fn an_exact_name_beats_a_looser_match() {
+        let products = [product(1, "Cola 500", None), product(2, "Cola", None)];
+        let visible = visible_products(&products, None, "cola");
+
+        assert_eq!(scan_target(&products, "Cola", &visible), Scan::One(1));
+    }
+
+    #[test]
+    fn an_unknown_code_takes_nothing() {
+        let products = [product(1, "Cola", Some("6001234"))];
+        let visible = visible_products(&products, None, "999");
+
+        assert_eq!(scan_target(&products, "999", &visible), Scan::None);
+        assert_eq!(scan_target(&products, "   ", &visible), Scan::None);
     }
 }
