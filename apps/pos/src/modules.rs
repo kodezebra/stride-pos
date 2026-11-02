@@ -2726,37 +2726,23 @@ fn stock_header(ui: &mut egui::Ui) {
 
 /// One tracked product: name and category on the left, count and actions right.
 ///
-/// The name wraps rather than truncates, and on a narrow row the controls drop
-/// below it. Neither side is allowed to hide the other.
+/// The name wraps rather than truncates, and the stock count stays on the
+/// right so the column lines up down the list.
 ///
 /// The row returns what was clicked instead of mutating the state, because the
 /// caller is iterating `state.stock` and cannot borrow it mutably yet.
 fn stock_row(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
-    let mut action = None;
-
-    // Below this width the controls would leave the name a sliver. Stacking
-    // keeps the name readable instead of letting the two sides fight.
-    if ui.available_width() < 440.0 {
-        ui.vertical(|ui| {
-            stock_identity(ui, item);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                action = stock_controls(ui, item, can_manage);
-            });
-        });
-    } else {
-        let (_, controls) = egui::containers::Sides::new()
-            .height(52.0)
-            .shrink_left()
-            .wrap()
-            .show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| stock_identity(ui, item));
-                },
-                |ui| stock_controls(ui, item, can_manage),
-            );
-        action = controls;
-    }
+    let (_, action) = egui::containers::Sides::new()
+        .height(52.0)
+        .shrink_left()
+        .wrap()
+        .show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| stock_identity(ui, item));
+            },
+            |ui| stock_controls(ui, item, can_manage),
+        );
     components::divider(ui);
 
     action
@@ -2774,9 +2760,12 @@ fn stock_identity(ui: &mut egui::Ui, item: &StockItem) {
     components::caption(ui, &detail);
 }
 
-/// The row's right-hand cluster, added right-to-left: count, then the action,
-/// then history. The button sits beside the number so the name keeps the rest
-/// of the line.
+/// The row's right-hand cluster, added right-to-left: the count first, then the
+/// button, then the status and history. The button therefore sits immediately
+/// before the count, and the name keeps the rest of the line.
+///
+/// Every part is a direct child. A nested vertical inside this right-to-left
+/// layout claims the whole row and leaves the name no width.
 fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
     let palette = theme::current(ui.ctx());
     let mut action = None;
@@ -2796,18 +2785,11 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
         palette.text
     };
 
-    ui.vertical(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                components::numeric(item.on_hand.to_string())
-                    .size(TYPE.body)
-                    .color(egui::Color32::from(count_color)),
-            );
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            components::badge(ui, status, status_color);
-        });
-    });
+    ui.label(
+        components::numeric(item.on_hand.to_string())
+            .size(TYPE.body)
+            .color(egui::Color32::from(count_color)),
+    );
     if can_manage
         && ui
             .button("Move stock")
@@ -2820,6 +2802,7 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
             on_hand: item.on_hand,
         });
     }
+    components::badge(ui, status, status_color);
     if components::icon_button(ui, history_icon(), 32.0)
         .on_hover_text("History")
         .clicked()
