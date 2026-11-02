@@ -6,6 +6,7 @@
 //! | file          | role                                              |
 //! |---------------|---------------------------------------------------|
 //! | `db.rs`       | schema and the few reads the shell needs           |
+//! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
 //! | `modules.rs`  | the five modules and their sidebar/workspace       |
 //! | `auth.rs`     | staff, PINs, the lock screen, approvals            |
@@ -21,6 +22,7 @@ mod checkout;
 mod commands;
 mod currencies;
 mod db;
+mod export;
 mod import;
 mod modules;
 mod prefs;

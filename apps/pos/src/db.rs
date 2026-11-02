@@ -25,6 +25,28 @@ pub struct Sale {
     pub cashier: Option<String>,
 }
 
+/// One sale as the CSV export writes it.
+///
+/// Separate from [`Sale`] because the two read different things: the table caps
+/// at a hundred rows and trims the timestamp to fit a column, while a file is
+/// meant to be complete and re-readable. Sharing one query would mean exporting
+/// whatever the screen happened to show.
+pub struct ExportSale {
+    pub id: i64,
+    /// Local time, whole seconds: a file is compared against another system's
+    /// books, so the minute the screen shows is not precise enough.
+    pub created_at: String,
+    pub cashier: Option<String>,
+    /// The exact sum of the lines.
+    pub total_minor: i64,
+    /// The cash adjustment, signed.
+    pub rounding_minor: i64,
+    /// `total_minor + rounding_minor`: what the customer paid.
+    pub paid_minor: i64,
+    /// One method, or several joined with `+` once a sale can be split.
+    pub method: String,
+}
+
 /// One line of a sale, on its way into the database.
 ///
 /// The name and the unit price are the ones on the receipt, not a lookup: a
@@ -754,6 +776,73 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
             Vec::new()
         }
     }
+}
+
+/// Every sale in the range, for the CSV export.
+///
+/// No `LIMIT`: the screen shows the newest hundred, but a file that silently
+/// stops at a hundred is a file somebody reconciles against and finds short.
+/// Errors are returned rather than logged: writing a header-only file and
+/// calling it a successful export would hide a broken query.
+///
+/// `GROUP BY s.id` keeps one row per sale when a sale is paid in parts. The
+/// method string is sorted in Rust so two orders of the same split cannot
+/// produce two different books.
+pub fn export_sales(store: &storage::Store, range: usize) -> anyhow::Result<Vec<ExportSale>> {
+    let sql = match range_clause(range, "s.created_at") {
+        Some(clause) => format!(
+            "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
+                    s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
+                    COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
+             FROM sales s
+             LEFT JOIN users u ON u.id = s.user_id
+             LEFT JOIN payments p ON p.sale_id = s.id
+             WHERE {clause}
+             GROUP BY s.id ORDER BY s.id"
+        ),
+        None => "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
+                    s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
+                    COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
+             FROM sales s
+             LEFT JOIN users u ON u.id = s.user_id
+             LEFT JOIN payments p ON p.sale_id = s.id
+             GROUP BY s.id ORDER BY s.id"
+            .to_owned(),
+    };
+
+    let mut statement = store
+        .conn()
+        .prepare(&sql)
+        .context("preparing the sales export")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ExportSale {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                cashier: row.get(2)?,
+                total_minor: row.get(3)?,
+                rounding_minor: row.get(4)?,
+                paid_minor: row.get(5)?,
+                method: row.get(6)?,
+            })
+        })
+        .context("reading the sales export")?;
+    let mut sales: Vec<ExportSale> = rows.collect::<Result<_, _>>().context("reading a sale")?;
+
+    for sale in &mut sales {
+        let method = {
+            let mut methods: Vec<&str> = sale
+                .method
+                .split(',')
+                .filter(|method| !method.is_empty())
+                .collect();
+            methods.sort_unstable();
+            methods.join("+")
+        };
+        sale.method = method;
+    }
+
+    Ok(sales)
 }
 
 /// One line of a sale, as recorded at the time.
@@ -2043,6 +2132,47 @@ mod tests {
         let (store, path) = store("by-method-empty");
 
         assert!(by_method(&store, 0).is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A sale paid in two parts is one line in the books, not two: an ungrouped
+    /// join would double every split sale and nobody would notice until a
+    /// reconciliation came up short.
+    #[test]
+    fn a_split_sale_exports_as_one_row_with_both_methods() {
+        let (store, path) = store("export-split");
+
+        store
+            .conn()
+            .execute(
+                "INSERT INTO sales (total_minor, rounding_minor) VALUES (1000, 0)",
+                [],
+            )
+            .expect("insert sale");
+        let id = store.conn().last_insert_rowid();
+        for (method, amount) in [("mobile", 400_i64), ("cash", 600)] {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO payments
+                        (sale_id, method, amount_minor, tendered_minor, change_minor)
+                     VALUES (?1, ?2, ?3, ?3, 0)",
+                    (id, method, amount),
+                )
+                .expect("insert payment");
+        }
+
+        let rows = export_sales(&store, 3).expect("export");
+        assert_eq!(rows.len(), 1, "a split sale is one sale");
+        assert_eq!(
+            rows[0].method, "cash+mobile",
+            "sorted, so the file does not depend on insert order"
+        );
+        assert_eq!(rows[0].total_minor, 1_000);
+        assert_eq!(rows[0].rounding_minor, 0);
+        assert_eq!(rows[0].paid_minor, 1_000);
+        assert!(rows[0].cashier.is_none());
 
         let _ = std::fs::remove_file(path);
     }
