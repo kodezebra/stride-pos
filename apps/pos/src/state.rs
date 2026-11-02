@@ -316,6 +316,14 @@ pub struct State {
     /// One-line feedback for an action that has no flow behind it yet. Cleared
     /// by the next action, so it never turns into a permanent lie in the UI.
     pub notice: Option<String>,
+    /// Feedback that has no home in the cart footer: a saved setting, or a
+    /// copied receipt. `notice` only renders under the cart, so a message set
+    /// while a modal or Settings is open would otherwise be invisible.
+    pub file_notice: Option<String>,
+
+    /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
+    /// so a half-typed name is never written to disk.
+    pub shop_draft: String,
 
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
@@ -382,6 +390,7 @@ impl State {
         needs_currency: bool,
     ) -> Self {
         let theme = settings.theme();
+        let shop_draft = settings.shop_name.trim().to_owned();
         let products = crate::db::products(&store);
         let categories = crate::db::categories(&store);
         let users = crate::db::users(&store);
@@ -404,6 +413,8 @@ impl State {
             payment: None,
             sale_open: None,
             notice: None,
+            file_notice: None,
+            shop_draft,
             settings,
             settings_path,
             theme,
@@ -471,11 +482,28 @@ impl State {
         self.set_theme(self.theme.flipped());
     }
 
+    /// Commit the shop name typed in Settings.
+    ///
+    /// Deliberately not bound straight to `settings.shop_name`: the shell writes
+    /// the file whenever the flag is set, so a field wired to the settings would
+    /// rewrite `settings.json` on every keystroke, and a crash mid-word would
+    /// leave half a shop name as the letterhead of every receipt.
+    pub fn save_shop_name(&mut self) {
+        let name = self.shop_draft.trim().to_owned();
+        self.shop_draft.clone_from(&name);
+        if self.settings.shop_name != name {
+            self.settings.shop_name = name;
+            self.settings_dirty = true;
+        }
+        self.file_notice = Some("Shop name saved.".to_owned());
+    }
+
     pub fn select(&mut self, module: usize) {
         if self.module != module {
             self.module = module;
             self.prefs_dirty = true;
             self.notice = None;
+            self.file_notice = None;
             // Opening the selling screen returns the cursor to the scan field, so
             // the next barcode lands in the cart without a click.
             if module == crate::modules::SELL {

@@ -1811,8 +1811,11 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
         return;
     };
     let currency = state.currency;
+    let shop = state.settings.shop_name().to_owned();
+    let copy_text = crate::receipt::plain(detail, &shop, currency);
 
     let mut close = false;
+    let mut copied = false;
 
     modal(ctx, egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -1822,14 +1825,29 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
         // reading paper, not a summary of paper.
         egui::ScrollArea::vertical()
             .max_height(420.0)
-            .show(ui, |ui| crate::receipt::body(ui, detail, currency, true));
+            .show(ui, |ui| {
+                crate::receipt::body(ui, detail, &shop, currency, true)
+            });
 
         ui.add_space(SPACING.md);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if components::primary_button(ui, "Close").clicked() {
                 close = true;
             }
+            // Same slip, as text: this is the screen an owner opens when a
+            // customer is asking about a figure, and the answer has to travel.
+            if ui
+                .button("Copy receipt")
+                .on_hover_text("Copy this slip as text")
+                .clicked()
+            {
+                ui.ctx().copy_text(copy_text.clone());
+                copied = true;
+            }
         });
+        if copied {
+            components::caption(ui, "Copied to the clipboard.");
+        }
     });
 
     // Escape, because an owner checking sale after sale keeps one hand on the
@@ -2059,7 +2077,11 @@ impl Module for Settings {
 
         match section {
             "Receipt" => receipt_preview(ui, state),
-            "Terminal" => terminal_card(ui, state),
+            "Terminal" => {
+                shop_card(ui, state);
+                ui.add_space(SPACING.lg);
+                terminal_card(ui, state);
+            }
             "Staff" => {
                 if state.permits(crate::auth::Permission::ManageUsers) {
                     crate::auth::staff_card(ui, state);
@@ -2098,6 +2120,46 @@ fn locked_card(ui: &mut egui::Ui, permission: crate::auth::Permission) {
         ),
         220.0,
     );
+}
+
+/// The shop's name, as it prints at the top of every receipt.
+///
+/// The field edits a draft and an explicit Save commits it. Binding it straight
+/// to `settings` would rewrite `settings.json` on every keystroke, because the
+/// shell persists whenever the flag is set: a crash mid-word would leave half a
+/// shop name as the letterhead of every receipt.
+fn shop_card(ui: &mut egui::Ui, state: &mut State) {
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Prints at the top of every receipt. The sample under Receipt updates as you type.",
+        );
+        ui.add_space(SPACING.md);
+
+        components::field_label(ui, "Shop name");
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            let field = text_field(ui, &mut state.shop_draft, crate::APP_NAME, 320.0);
+            // A name that changed after the last save is not the saved name, so
+            // the confirmation has to go rather than sit there contradicting
+            // the field.
+            if field.changed() {
+                state.file_notice = None;
+            }
+            if components::primary_button(ui, "Save").clicked() {
+                state.save_shop_name();
+            }
+        });
+
+        ui.add_space(SPACING.xs);
+        if let Some(notice) = state.file_notice.as_deref() {
+            components::caption(ui, notice);
+        } else {
+            components::caption(ui, "Leave it blank to print the app name.");
+        }
+    });
 }
 
 /// The terminal's identity, in the same card language as the rest of the app.
@@ -2156,12 +2218,29 @@ fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 /// A sample receipt: the one place the receipt face and its 13 px column width
 /// can be judged before a printer exists.
+///
+/// Reads the draft, not the saved name: the point of the preview is to answer
+/// "what will this look like?" for the name currently being typed, before Save
+/// makes it real.
 fn receipt_preview(ui: &mut egui::Ui, state: &State) {
+    let typed = state.shop_draft.trim();
+    let shop = if typed.is_empty() {
+        crate::APP_NAME
+    } else {
+        typed
+    };
+    // A preview of a name that has not been saved is still a preview, but it
+    // must not pass for the letterhead: the till prints what was saved.
+    let unsaved = typed != state.settings.shop_name.trim();
+
     components::card(ui, |ui| {
         ui.set_width(300.0);
         ui.vertical_centered(|ui| {
-            ui.label(components::semibold(crate::APP_NAME).size(TYPE.body));
+            ui.label(components::semibold(shop).size(TYPE.body));
             components::caption(ui, "Sample receipt");
+            if unsaved {
+                components::caption(ui, "Not saved yet: save it under Terminal.");
+            }
         });
         ui.add_space(SPACING.sm);
         components::divider(ui);

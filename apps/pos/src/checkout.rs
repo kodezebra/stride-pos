@@ -33,6 +33,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     // Read the amounts before borrowing the payment: they come from the cart,
     // which the payment does not own, and `Money::format` is the one rendering.
     let currency = state.currency;
+    let shop = state.settings.shop_name().to_owned();
     let subtotal_minor = state.cart_total_minor();
     let rounding_minor = state.cart_rounding_minor();
     let due_minor = state.due_minor();
@@ -52,7 +53,14 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         let receipt = payment.detail.clone();
 
         let change = state.money(sale.change_minor);
+        // Built before the closure: the clipboard text is the whole slip, and
+        // assembling it while the button row is being drawn would have to borrow
+        // `receipt` again for no gain.
+        let copy_text = receipt
+            .as_ref()
+            .map(|detail| crate::receipt::plain(detail, &shop, currency));
         let mut close = false;
+        let mut copied = false;
 
         crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
             ui.set_width(420.0);
@@ -79,7 +87,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 egui::ScrollArea::vertical()
                     .max_height(420.0)
                     .show(ui, |ui| {
-                        crate::receipt::body(ui, detail, currency, false);
+                        crate::receipt::body(ui, detail, &shop, currency, false);
                     });
             } else {
                 // The row was just written, so this should not happen; but a
@@ -105,6 +113,22 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 if components::primary_button(ui, "New sale").clicked() {
                     close = true;
                 }
+                // The slip as text, because a customer who wants the receipt
+                // usually wants it in a message, not read aloud across the
+                // counter.
+                if let Some(text) = &copy_text {
+                    let copy = ui
+                        .button("Copy receipt")
+                        .on_hover_text("Copy this slip as text");
+                    if copy.clicked() {
+                        ui.ctx().copy_text(text.clone());
+                        // Hand the keyboard back: Space means "next sale" in
+                        // this modal, and a button left focused would copy
+                        // again and dismiss the receipt on the same press.
+                        copy.surrender_focus();
+                        copied = true;
+                    }
+                }
                 // The receipt is already written, so this cannot undo the sale;
                 // it dismisses the screen. It exists because "New sale" is a
                 // commitment, and the cashier may only want the receipt gone.
@@ -117,7 +141,11 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 }
             });
             ui.add_space(SPACING.xs);
-            components::caption(ui, "Enter or Space starts the next sale. Escape closes.");
+            if copied {
+                components::caption(ui, "Copied to the clipboard.");
+            } else {
+                components::caption(ui, "Enter or Space starts the next sale. Escape closes.");
+            }
         });
 
         if close

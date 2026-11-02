@@ -28,13 +28,21 @@ use crate::db::{DetailLine, SaleDetail};
 /// Draw the receipt for one recorded sale.
 ///
 /// Takes the currency rather than the whole [`crate::state::State`] so both
-/// callers can hold their own borrow while the modal is open.
+/// callers can hold their own borrow while the modal is open, and the shop name
+/// rather than reading settings, so the preview can show a name that has not
+/// been saved yet.
 ///
 /// `with_change` is false on the till's confirmation, which prints the change
 /// as its own callout above the slip: the same figure twice on one screen reads
 /// as two different amounts, and the cashier needs it where the eye lands, not
 /// at the end of a scroll.
-pub fn body(ui: &mut egui::Ui, detail: &SaleDetail, currency: Currency, with_change: bool) {
+pub fn body(
+    ui: &mut egui::Ui,
+    detail: &SaleDetail,
+    shop: &str,
+    currency: Currency,
+    with_change: bool,
+) {
     let palette = theme::current(ui.ctx());
     let text = egui::Color32::from(palette.text);
     let muted = egui::Color32::from(palette.text_muted);
@@ -43,11 +51,7 @@ pub fn body(ui: &mut egui::Ui, detail: &SaleDetail, currency: Currency, with_cha
     // letterhead, and it is what makes the slip identifiable in a drawer full
     // of them.
     ui.vertical_centered(|ui| {
-        ui.label(
-            components::semibold(crate::APP_NAME)
-                .size(TYPE.body)
-                .color(text),
-        );
+        ui.label(components::semibold(shop).size(TYPE.body).color(text));
         ui.label(
             components::numeric(format!("Sale #{}", detail.id))
                 .size(TYPE.receipt)
@@ -122,6 +126,83 @@ pub fn body(ui: &mut egui::Ui, detail: &SaleDetail, currency: Currency, with_cha
 
     ui.add_space(SPACING.sm);
     ui.vertical_centered(|ui| components::caption(ui, "Thank you."));
+}
+
+/// The same slip as plain text, for the clipboard.
+///
+/// It is the receipt a customer can be sent rather than shown: a messaging app
+/// is where a disputed total actually gets discussed, and "look at my screen"
+/// does not travel. The order matches [`body`] so the two cannot tell different
+/// stories — the difference is only that text must carry the change itself,
+/// because there is no big green figure above it to do that job.
+pub fn plain(detail: &SaleDetail, shop: &str, currency: Currency) -> String {
+    let mut out = String::new();
+
+    out.push_str(shop);
+    out.push('\n');
+    out.push_str(&format!("Sale #{}\n", detail.id));
+    out.push_str(&format!("{}\n", detail.created_at));
+    out.push_str(&format!("{}\n\n", cashier(detail)));
+
+    if detail.lines.is_empty() {
+        out.push_str("No line items were recorded on this sale.\n");
+    }
+    for line in &detail.lines {
+        out.push_str(&text_row(&line.name, &money(line.total_minor, currency)));
+        out.push('\n');
+        // A count and unit price only when there was more than one: repeating
+        // "1 ×" under every name is noise on paper.
+        if line.qty > 1 {
+            out.push_str(&format!(
+                "  {} × {}\n",
+                line.qty,
+                money(line.unit_minor, currency)
+            ));
+        }
+    }
+
+    out.push('\n');
+    if detail.rounding_minor != 0 {
+        out.push_str(&text_row("Subtotal", &money(detail.total_minor, currency)));
+        out.push('\n');
+        let direction = if detail.rounding_minor < 0 {
+            "Rounded down"
+        } else {
+            "Rounded up"
+        };
+        out.push_str(&text_row(
+            direction,
+            &money(detail.rounding_minor, currency),
+        ));
+        out.push('\n');
+    }
+    out.push_str(&text_row("Total", &money(detail.paid_minor, currency)));
+    out.push('\n');
+    if detail.tendered_minor != 0 {
+        out.push_str(&text_row(
+            &format!("Paid by {}", detail.method),
+            &money(detail.tendered_minor, currency),
+        ));
+        out.push('\n');
+    }
+    if detail.change_minor != 0 {
+        out.push_str(&text_row("Change", &money(detail.change_minor, currency)));
+        out.push('\n');
+    }
+
+    out.push_str("\nThank you.\n");
+    out
+}
+
+/// A label on the left and a figure on the right, in a fixed text column.
+///
+/// Padding rather than tabs: a tab stops at whatever the reader's editor decides
+/// is 4 or 8 columns, and a receipt that misaligns in the customer's messaging
+/// app is a receipt that looks wrong.
+fn text_row(label: &str, value: &str) -> String {
+    const COLUMN: usize = 30;
+    let pad = COLUMN.saturating_sub(label.chars().count()).max(1);
+    format!("{label}{}{value}", " ".repeat(pad))
 }
 
 /// One line item: the name, the line total on the right, and — when more than
@@ -229,4 +310,106 @@ fn cashier(detail: &SaleDetail) -> String {
 
 fn money(minor: i64, currency: Currency) -> String {
     Money::new(minor, currency).format()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One sale with everything on it: two units of one thing, one of another,
+    /// small rounding, and change coming back. The shape a real slip has.
+    fn sale() -> SaleDetail {
+        SaleDetail {
+            id: 12,
+            cashier: Some("Amina".to_owned()),
+            created_at: "2026-11-02 14:03".to_owned(),
+            total_minor: 12_400,
+            rounding_minor: 100,
+            paid_minor: 12_500,
+            method: "cash".to_owned(),
+            tendered_minor: 20_000,
+            change_minor: 7_500,
+            lines: vec![
+                DetailLine {
+                    name: "Flat white".to_owned(),
+                    qty: 2,
+                    unit_minor: 3_500,
+                    total_minor: 7_000,
+                },
+                DetailLine {
+                    name: "Cinnamon roll".to_owned(),
+                    qty: 1,
+                    unit_minor: 5_400,
+                    total_minor: 5_400,
+                },
+            ],
+        }
+    }
+
+    /// The clipboard slip has to be able to answer a customer on its own: who
+    /// sold it, when, what it held, what it came to, and what went back. Any of
+    /// those missing turns the copy into a list of numbers with no seller.
+    #[test]
+    fn the_text_receipt_carries_the_whole_slip() {
+        let text = plain(&sale(), "Nakawa Grocers", Currency::UGX);
+
+        assert!(text.starts_with("Nakawa Grocers\n"), "{text}");
+        assert!(text.contains("Sale #12"), "{text}");
+        assert!(text.contains("2026-11-02 14:03"), "{text}");
+        assert!(text.contains("Cashier: Amina"), "{text}");
+        assert!(text.contains("Flat white"), "{text}");
+        assert!(text.contains("Cinnamon roll"), "{text}");
+        assert!(
+            text.contains(&Money::new(12_500, Currency::UGX).format()),
+            "{text}"
+        );
+        assert!(
+            text.contains(&Money::new(7_500, Currency::UGX).format()),
+            "{text}"
+        );
+        assert!(text.contains("Paid by cash"), "{text}");
+        assert!(text.trim_end().ends_with("Thank you."), "{text}");
+    }
+
+    /// The order of the money block is the order on paper: the subtotal and the
+    /// rounding explain the total, and the change comes after the total is read.
+    #[test]
+    fn the_text_receipt_explains_the_total_before_it_prints_the_change() {
+        let text = plain(&sale(), "Nakawa Grocers", Currency::UGX);
+
+        let subtotal = text.find("Subtotal").expect("subtotal line");
+        let rounding = text.find("Rounded up").expect("rounding line");
+        let total = text.find("Total").expect("total line");
+        let change = text.find("Change").expect("change line");
+
+        assert!(subtotal < rounding, "{text}");
+        assert!(rounding < total, "{text}");
+        assert!(total < change, "{text}");
+    }
+
+    /// A count and unit price under the name only when more than one went out.
+    /// Repeating "1 ×" is a line the cashier has to read for nothing.
+    #[test]
+    fn only_a_multi_unit_line_prints_its_count_and_unit_price() {
+        let text = plain(&sale(), "Nakawa Grocers", Currency::UGX);
+        let unit = Money::new(3_500, Currency::UGX).format();
+
+        assert!(text.contains(&format!("  2 × {unit}")), "{text}");
+        assert!(
+            !text.contains("1 ×"),
+            "no one-unit line should show a count: {text}"
+        );
+    }
+
+    /// Labels pad to a column so the figures line up in any monospace reader,
+    /// but a name longer than the column must still keep its figure — one space
+    /// is enough, and eating the amount is not.
+    #[test]
+    fn a_long_label_keeps_one_space_before_its_figure() {
+        let long = "a".repeat(40);
+        let row = text_row(&long, "9,000");
+
+        assert_eq!(row, format!("{long} 9,000"));
+        assert_eq!(text_row("Total", "9,000").len(), 30 + "9,000".len());
+    }
 }
