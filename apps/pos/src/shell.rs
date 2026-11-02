@@ -317,7 +317,7 @@ impl PosShell {
         }
 
         if self.state.settings_dirty {
-            let path = self.state.settings_path.clone();
+            let path = self.state.paths.settings.clone();
             match config::save(&path, &self.state.settings) {
                 Ok(()) => self.state.settings_dirty = false,
                 Err(err) => {

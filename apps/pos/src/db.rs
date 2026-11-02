@@ -4,6 +4,7 @@
 //! has shipped, because some till somewhere already applied it.
 
 use anyhow::Context as _;
+use std::path::{Path, PathBuf};
 use storage::Migration;
 
 /// A completed sale, as the history table shows it.
@@ -1076,6 +1077,193 @@ pub fn top_items(store: &storage::Store, range: usize, limit: i64) -> Vec<ItemTo
     }
 }
 
+// ---------------------------------------------------------------------------
+// Payments taken
+// ---------------------------------------------------------------------------
+
+/// What one payment method brought in over a range.
+pub struct MethodTotal {
+    /// `cash` today; the column exists so card and mobile money need no change
+    /// here when they arrive.
+    pub method: String,
+    /// Sales that used the method, not payments: one sale may be split across
+    /// two methods, and counting payment rows would report it twice.
+    pub sales: i64,
+    /// What stayed in the drawer, rounding included. Summing `tendered_minor`
+    /// would count the change that went back out.
+    pub amount_minor: i64,
+}
+
+/// Money in, grouped by how it was paid, in the same range the dashboard shows.
+///
+/// This is *taken*, not *expected in the drawer*: without an opening float and a
+/// counted close there is nothing to be expected against. The word stays out of
+/// the query and out of the screen copy.
+pub fn by_method(store: &storage::Store, range: usize) -> Vec<MethodTotal> {
+    let sql = match range_clause(range, "s.created_at") {
+        Some(clause) => format!(
+            "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
+             FROM payments p JOIN sales s ON s.id = p.sale_id
+             WHERE {clause}
+             GROUP BY p.method ORDER BY 3 DESC"
+        ),
+        None => "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
+             FROM payments p JOIN sales s ON s.id = p.sale_id
+             GROUP BY p.method ORDER BY 3 DESC"
+            .to_owned(),
+    };
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "payments by method prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(MethodTotal {
+            method: row.get(0)?,
+            sales: row.get(1)?,
+            amount_minor: row.get(2)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "payments by method query failed");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backup
+// ---------------------------------------------------------------------------
+
+/// How many backups are kept before the oldest is deleted.
+const BACKUP_KEEP: usize = 10;
+
+/// The prefix every backup name carries. Also what tells a backup apart from
+/// the live `pos.db` should the two ever share a directory.
+const BACKUP_PREFIX: &str = "pos-";
+
+/// A filename-safe local timestamp, e.g. `20261101-184212`.
+///
+/// Asked of SQLite rather than the OS so a backup is named by the same clock
+/// that stamps sales: two clocks an hour apart would make a file look newer or
+/// older than the rows inside it, which is the one thing a restore cannot
+/// afford.
+pub fn stamp(store: &storage::Store) -> anyhow::Result<String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT strftime('%Y%m%d-%H%M%S', 'now', 'localtime')",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .context("reading the clock")
+}
+
+/// A consistent copy of the live database, pruned to the newest ten.
+///
+/// `VACUUM INTO` rather than a file copy: the till runs in WAL mode, and a plain
+/// copy of the main file can miss committed pages still sitting in the log. The
+/// snapshot it writes is a complete database on its own and is taken without
+/// stopping the till.
+///
+/// Returns the file it wrote. Errors are returned rather than logged because the
+/// operator pressed a button and is owed an answer.
+pub fn backup(store: &storage::Store, dir: &Path) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating backup directory {}", dir.display()))?;
+
+    let target = next_backup_path(store, dir)?;
+    store
+        .conn()
+        .execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
+        .with_context(|| format!("writing backup {}", target.display()))?;
+
+    prune(dir);
+    Ok(target)
+}
+
+/// The next name in this second's run.
+///
+/// The stamp has second resolution, so two backups in one second would otherwise
+/// collide and `VACUUM INTO` refuses an existing file. A zero-padded sequence is
+/// always present — not only on collision — because it is also what makes the
+/// names sort: `…-0002` after `…-0001`, and every file of a later second after
+/// every file of an earlier one. Pruning can then trust the name alone; a file
+/// system's modification time is not precise enough to separate two backups
+/// taken a moment apart.
+///
+/// The sequence continues past the highest number already used rather than
+/// taking the first free one. Pruning leaves gaps at the start of the run, and
+/// filling a gap would file the newest backup where the name sort expects the
+/// oldest — exactly the file the next prune would delete.
+fn next_backup_path(store: &storage::Store, dir: &Path) -> anyhow::Result<PathBuf> {
+    let stem = format!("{BACKUP_PREFIX}{}", stamp(store)?);
+    let next = highest_sequence(dir, &stem)?.map_or(1, |highest| highest.saturating_add(1));
+    if next > 9999 {
+        anyhow::bail!("more than 9999 backups in one second; the clock or directory is wrong");
+    }
+    Ok(dir.join(format!("{stem}-{next:04}.db")))
+}
+
+/// The highest sequence already used by files named `<stem>-NNNN.db`.
+fn highest_sequence(dir: &Path, stem: &str) -> anyhow::Result<Option<u32>> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let rest = name.to_str()?.strip_prefix(stem)?.strip_prefix('-')?;
+            rest.strip_suffix(".db")?.parse().ok()
+        })
+        .max())
+}
+
+/// Delete everything past the newest [`BACKUP_KEEP`].
+///
+/// Ordered by name, which is chronological by construction (see
+/// [`next_backup_path`]). Deletion failures are logged, not returned: the backup
+/// succeeded, and reporting it as failed because an old file would not go away
+/// would send the operator looking for a file that is there.
+fn prune(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(error = %err, dir = %dir.display(), "could not list backups");
+            return;
+        }
+    };
+
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_backup(path))
+        .collect();
+
+    // Newest first: the last entry of a name sort is the most recent backup.
+    files.sort();
+    files.reverse();
+
+    for path in files.into_iter().skip(BACKUP_KEEP) {
+        if let Err(err) = std::fs::remove_file(&path) {
+            tracing::warn!(error = %err, path = %path.display(), "could not delete an old backup");
+        }
+    }
+}
+
+fn is_backup(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.strip_prefix(BACKUP_PREFIX).is_some() && path.extension().is_some_and(|ext| ext == "db")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1802,6 +1990,149 @@ mod tests {
         assert_eq!(people[0].sales, 1);
         assert_eq!(people[0].revenue, 500);
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Cash, two sales, one of them rounded. The method total is what the drawer
+    /// kept, so the rounded amount counts — not the pre-rounding total the
+    /// customer's items added up to, and not the note that was handed over.
+    #[test]
+    fn payments_taken_are_the_amounts_that_stayed() {
+        let (store, path) = store("by-method");
+
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Bread".to_owned(),
+                qty: 1,
+                unit_minor: 340,
+            }],
+            60,
+            1_000,
+            None,
+        )
+        .expect("record a rounded sale");
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Milk".to_owned(),
+                qty: 1,
+                unit_minor: 500,
+            }],
+            0,
+            500,
+            None,
+        )
+        .expect("record an exact sale");
+
+        let methods = by_method(&store, 3);
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].method, "cash");
+        assert_eq!(methods[0].sales, 2);
+        assert_eq!(methods[0].amount_minor, 900, "400 rounded + 500 exact");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A range nobody sold in is an empty list, not a row of zeros: the card
+    /// draws "no money taken" from emptiness, and a zero row would draw a table.
+    #[test]
+    fn a_range_with_no_sales_reports_no_methods() {
+        let (store, path) = store("by-method-empty");
+
+        assert!(by_method(&store, 0).is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A backup is only a backup if it opens: the file has to be a complete
+    /// database with this binary's schema, not a copy of whatever pages
+    /// happened to be flushed.
+    #[test]
+    fn a_backup_is_a_database_that_opens() {
+        let (store, path) = store("backup");
+        let dir = std::env::temp_dir().join(format!("pos-backup-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let file = backup(&store, &dir).expect("backup");
+
+        assert!(file.starts_with(&dir), "{}", file.display());
+        assert!(
+            file.metadata().expect("metadata").len() > 0,
+            "an empty file is not a backup"
+        );
+        let copy = storage::Store::open(&file).expect("a backup opens");
+        assert_eq!(
+            copy.user_version().expect("a version"),
+            store.user_version().expect("a version")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Twelve presses do not mean twelve files: exactly the newest ten remain,
+    /// and the newest — the one somebody would actually restore — stays.
+    ///
+    /// The expected set is derived from the same names the backup chose rather
+    /// than from "the first two went", because the run can cross a second
+    /// boundary — and then the eleventh file is older than the first of the new
+    /// second, which is the ordering the prune has to get right anyway.
+    #[test]
+    fn only_the_newest_ten_backups_are_kept() {
+        let (store, path) = store("backup-prune");
+        let dir = std::env::temp_dir().join(format!("pos-backup-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let written: Vec<PathBuf> = (0..12)
+            .map(|_| backup(&store, &dir).expect("backup"))
+            .collect();
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("list backups")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+
+        let mut expected = written.clone();
+        expected.sort();
+        expected.drain(..written.len() - BACKUP_KEEP);
+
+        files.sort();
+        assert_eq!(files, expected);
+        assert!(files.contains(&written[11]), "the newest survives");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A sequence that has been pruned is still used up: filling the gap would
+    /// hand the newest backup a name the sort reads as the oldest, and the next
+    /// prune would delete it. Planted files make this independent of how fast
+    /// twelve real backups run.
+    #[test]
+    fn a_pruned_sequence_is_not_reused() {
+        let (store, path) = store("backup-gap");
+        let dir = std::env::temp_dir().join(format!("pos-backup-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("make directory");
+
+        let stem = format!("{BACKUP_PREFIX}{}", stamp(&store).expect("clock"));
+        for sequence in [3, 12] {
+            std::fs::write(dir.join(format!("{stem}-{sequence:04}.db")), b"")
+                .expect("planted backup");
+        }
+
+        let next = next_backup_path(&store, &dir).expect("next name");
+        assert_eq!(
+            next.file_name().and_then(|name| name.to_str()),
+            Some(format!("{stem}-0013.db").as_str()),
+            "the first free number is a gap that must stay empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(path);
     }
 }
