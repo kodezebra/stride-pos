@@ -1411,13 +1411,25 @@ impl Module for Products {
                 if components::primary_button(ui, "New product").clicked() {
                     new = true;
                 }
-                if ui.button("Import CSV").clicked() {
+                if ui
+                    .button("Import CSV")
+                    .on_hover_text("Read name, category, price and barcode from a CSV file")
+                    .clicked()
+                {
                     import = true;
                 }
-                if ui.button("Export all").clicked() {
+                if ui
+                    .button("Export all")
+                    .on_hover_text("Save every product with the columns the import reads")
+                    .clicked()
+                {
                     export_all = true;
                 }
-                if ui.button("Export CSV").clicked() {
+                if ui
+                    .button("Export CSV")
+                    .on_hover_text("Save the products on screen with the columns the import reads")
+                    .clicked()
+                {
                     export_visible = true;
                 }
             });
@@ -1440,7 +1452,9 @@ impl Module for Products {
 
         components::caption(
             ui,
-            "Barcodes that start with 0 may need a text column in Excel.",
+            "Exports use the same columns the import reads, so a file that went out \
+             can come back in. Barcodes that start with 0 may need a text column in \
+             Excel.",
         );
         file_feedback(ui, state);
 
@@ -1519,7 +1533,9 @@ fn categories_sidebar(ui: &mut egui::Ui, state: &mut State) {
 ///
 /// The rows are rebuilt from the screen's current filters at the moment the
 /// folder is confirmed. The modal blocks the screen while it is open, so the
-/// file still matches what the operator was looking at.
+/// file still matches what the operator was looking at. The template is the
+/// exception: it is not a snapshot of anything, only a blank catalog to fill
+/// in.
 pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
     // "Export CSV" is what is on screen; "Export all" is the whole catalog.
     // The names of the files carry the difference, because a folder with both
@@ -1540,6 +1556,7 @@ pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
             export_products(state, &rows, "products-all", dir);
         }
         ExportKind::Sales => export_sales(state, dir),
+        ExportKind::Template => save_template(state, dir),
     }
 }
 
@@ -1584,6 +1601,31 @@ fn export_sales(state: &mut State, dir: &Path) {
     };
     let body = crate::export::sales_csv(&rows, state.currency);
     save_export(state, "sales", &body, rows.len(), ("sale", "sales"), dir);
+}
+
+/// Write the blank catalog with two example rows, and point the next import at
+/// the folder it went into.
+///
+/// The fixed name is deliberate: saving twice replaces the template instead of
+/// filling the folder with copies, which is also why it carries no stamp.
+fn save_template(state: &mut State, dir: &Path) {
+    let body = crate::export::template_csv(state.currency);
+    match crate::export::write(dir, "products-template.csv", &body) {
+        Ok(path) => {
+            // The next step after saving a template is editing it somewhere
+            // else and picking it back up, so start the import where it landed.
+            state.import_dir = path.parent().map(Path::to_path_buf);
+            state.file_path = Some(path.clone());
+            state.file_notice = Some(format!(
+                "Saved a template with two example rows to {}",
+                path.display()
+            ));
+        }
+        Err(err) => {
+            state.file_path = None;
+            state.file_notice = Some(format!("Export failed: {err:#}"));
+        }
+    }
 }
 
 /// Name a file after the second it was written and report it in `file_notice`.
@@ -1932,9 +1974,9 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
 
 /// The CSV import, drawn with the other foreground layers in `shell.rs`.
 ///
-/// The path is typed rather than picked from a dialog: importing is a one-time
-/// setup job for the owner, not a daily flow, and a file-dialog dependency is
-/// not worth what it costs a till this small. The modal closes on a successful
+/// The normal route is the picker in [`crate::picker`]; the path field here is
+/// the fallback for one pasted from an email, and the place an owner with no
+/// file to start from can save a template. The modal closes on a successful
 /// import and stays open on anything the till could not read, with the reason
 /// it could not.
 pub fn import_modal(ctx: &egui::Context, state: &mut State) {
@@ -1944,6 +1986,7 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
 
     let mut import = false;
     let mut cancel = false;
+    let mut template = false;
 
     modal(ctx, egui::Id::new("pos_import")).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -1983,7 +2026,27 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
                 cancel = true;
             }
         });
+
+        ui.add_space(SPACING.sm);
+        ui.horizontal(|ui| {
+            if ui.button("Save a template").clicked() {
+                template = true;
+            }
+            components::caption(
+                ui,
+                "A CSV with these columns and two example rows to replace.",
+            );
+        });
     });
+
+    // Saving a template is not an import: close this modal and open the folder
+    // chooser instead. Only one modal is drawn per frame, so this one has to
+    // come down before the picker goes up.
+    if template {
+        state.import = None;
+        state.start_export(ExportKind::Template);
+        return;
+    }
 
     // Keyboard, matching the product form: Enter runs the import and Escape
     // leaves without touching the catalog.
@@ -2163,7 +2226,13 @@ impl Module for Sales {
         ui.horizontal(|ui| {
             components::section_title(ui, "Transactions");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Export CSV").clicked() {
+                if ui
+                    .button("Export CSV")
+                    .on_hover_text(
+                        "Export sales as sale_id, when, cashier, total, rounding, paid, method",
+                    )
+                    .clicked()
+                {
                     export = true;
                 }
             });
@@ -2431,9 +2500,12 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
 /// The owner's copy of the books.
 ///
 /// A button, not a dialog: a backup is the thing an owner postpones, so the
-/// distance from "I should do that" to "done" has to be one press and one line
-/// saying where the file went. Failures are shown in the same line, because a
-/// backup that quietly did not happen is worse than none.
+/// distance from "I should do that" to "done" has to be a press and a line
+/// saying where the file went. The one extra press is a confirmation inline in
+/// the card — the same two-step the product rows use — because a backup is the
+/// one action on this screen that writes a second copy of everything.
+/// Failures are shown in the same line, because a backup that quietly did not
+/// happen is worse than none.
 fn backup_card(ui: &mut egui::Ui, state: &mut State) {
     let folder = state.paths.data.join("backups");
 
@@ -2445,17 +2517,29 @@ fn backup_card(ui: &mut egui::Ui, state: &mut State) {
         );
         ui.add_space(SPACING.md);
 
-        if components::primary_button(ui, "Back up now").clicked() {
-            match crate::db::backup(&state.store, &folder) {
-                Ok(path) => {
-                    state.file_path = Some(path.clone());
-                    state.file_notice = Some(format!("Backed up to {}", path.display()));
+        if state.backup_confirm {
+            components::caption(ui, "Write a copy of the database now?");
+            ui.add_space(SPACING.xs);
+            ui.horizontal(|ui| {
+                if components::primary_button(ui, "Back up").clicked() {
+                    state.backup_confirm = false;
+                    match crate::db::backup(&state.store, &folder) {
+                        Ok(path) => {
+                            state.file_path = Some(path.clone());
+                            state.file_notice = Some(format!("Backed up to {}", path.display()));
+                        }
+                        Err(err) => {
+                            state.file_path = None;
+                            state.file_notice = Some(format!("Backup failed: {err:#}"));
+                        }
+                    }
                 }
-                Err(err) => {
-                    state.file_path = None;
-                    state.file_notice = Some(format!("Backup failed: {err:#}"));
+                if ui.button("Cancel").clicked() {
+                    state.backup_confirm = false;
                 }
-            }
+            });
+        } else if components::primary_button(ui, "Back up now").clicked() {
+            state.backup_confirm = true;
         }
 
         ui.add_space(SPACING.xs);
