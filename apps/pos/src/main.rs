@@ -70,7 +70,10 @@ fn main() -> ExitCode {
             module,
             prefs.sidebar,
             settings,
-            settings_path,
+            state::Paths {
+                data: ctx.dirs.data.clone(),
+                settings: settings_path,
+            },
             currency,
             needs_currency,
         );

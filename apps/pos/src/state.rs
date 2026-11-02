@@ -264,6 +264,17 @@ impl PasswordDraft {
 /// it, short enough that it cannot be handed to the next person.
 const ELEVATION: Duration = Duration::from_secs(60);
 
+/// The two places the till keeps its own files.
+///
+/// Grouped because they are only ever known together, at boot: the database
+/// lives in `data` and `settings.json` in `config`, and both come from
+/// `app_boot`'s directories. `Store` deliberately does not remember where it was
+/// opened from, so backups and exports ask the state for this.
+pub struct Paths {
+    pub data: PathBuf,
+    pub settings: PathBuf,
+}
+
 pub struct State {
     pub store: storage::Store,
 
@@ -316,9 +327,10 @@ pub struct State {
     /// One-line feedback for an action that has no flow behind it yet. Cleared
     /// by the next action, so it never turns into a permanent lie in the UI.
     pub notice: Option<String>,
-    /// Feedback that has no home in the cart footer: a saved setting, or a
-    /// copied receipt. `notice` only renders under the cart, so a message set
-    /// while a modal or Settings is open would otherwise be invisible.
+    /// Feedback from an action that produced a file: a backup, an export. Kept
+    /// apart from `notice`, which only renders under the cart, so a message from
+    /// Settings or a modal would otherwise be invisible. Each screen that sets
+    /// it also renders it; navigation clears it.
     pub file_notice: Option<String>,
 
     /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
@@ -328,9 +340,10 @@ pub struct State {
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
     pub settings: Settings,
-    /// Where `settings.json` lives, so the shell can persist a change without
-    /// the screens knowing about paths.
-    pub settings_path: PathBuf,
+    /// Where `settings.json` and the database live, so the shell can persist a
+    /// change and the owner screens can write backups without knowing about
+    /// paths.
+    pub paths: Paths,
     /// The theme currently installed on the context.
     pub theme: Theme,
     /// Set when the theme changed and the context still needs reinstalling.
@@ -385,7 +398,7 @@ impl State {
         module: usize,
         sidebar_open: Vec<bool>,
         settings: Settings,
-        settings_path: PathBuf,
+        paths: Paths,
         currency: Currency,
         needs_currency: bool,
     ) -> Self {
@@ -416,7 +429,7 @@ impl State {
             file_notice: None,
             shop_draft,
             settings,
-            settings_path,
+            paths,
             theme,
             theme_dirty: false,
             settings_dirty: false,
@@ -495,7 +508,6 @@ impl State {
             self.settings.shop_name = name;
             self.settings_dirty = true;
         }
-        self.file_notice = Some("Shop name saved.".to_owned());
     }
 
     pub fn select(&mut self, module: usize) {
@@ -1505,7 +1517,10 @@ mod tests {
             0,
             Vec::new(),
             Settings::default(),
-            PathBuf::from("settings.json"),
+            Paths {
+                data: std::env::temp_dir(),
+                settings: PathBuf::from("settings.json"),
+            },
             currency,
             false,
         );

@@ -594,6 +594,50 @@ impl Module for Dashboard {
             ],
         );
 
+        // What was taken, by method. Deliberately not a cash-up: with no opening
+        // float and no counted close, "expected in the drawer" would be a figure
+        // the till cannot know. What the payments add up to, it does.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "Payments taken");
+        let methods = crate::db::by_method(&state.store, state.range);
+        if methods.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No money taken yet in this range",
+                "Each method totals up here as soon as a sale is paid.",
+                140.0,
+            );
+        } else {
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                components::caption(ui, taken_caption(state.range));
+
+                // One method is one figure, not a table with a single row and a
+                // total that repeats it.
+                if let [only] = methods.as_slice() {
+                    ui.add_space(SPACING.sm);
+                    amount_row(
+                        ui,
+                        &method_label(&only.method, only.sales),
+                        &state.money(only.amount_minor),
+                        true,
+                    );
+                } else {
+                    for method in &methods {
+                        amount_row(
+                            ui,
+                            &method_label(&method.method, method.sales),
+                            &state.money(method.amount_minor),
+                            false,
+                        );
+                    }
+                    let taken: i64 = methods.iter().map(|method| method.amount_minor).sum();
+                    components::divider(ui);
+                    amount_row(ui, "Total", &state.money(taken), true);
+                }
+            });
+        }
+
         // The shape of the range, as a chart: one bar per selling day, oldest
         // on the left so the range reads like a calendar, and a round axis
         // above the busiest day.
@@ -744,6 +788,35 @@ fn kpi(ui: &mut egui::Ui, width: f32, label: &str, value: &str) {
         ui.add_space(SPACING.xs);
         ui.label(components::numeric(value).size(TYPE.kpi));
     });
+}
+
+/// The range, as the payments card states it.
+///
+/// Repeated inside the card because the range is chosen in the sidebar: a
+/// screenshot of the card has to answer "taken when?" without it.
+fn taken_caption(range: usize) -> &'static str {
+    match range {
+        0 => "Taken today",
+        1 => "Taken in the last 7 days",
+        2 => "Taken in the last 30 days",
+        _ => "Taken over all time",
+    }
+}
+
+/// `cash` as `Cash · 2 sales`: the column stores what the payment code writes,
+/// and the card prints it the way a person would, with the count that makes the
+/// figure mean something.
+fn method_label(method: &str, sales: i64) -> String {
+    let mut chars = method.chars();
+    let name: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    if sales == 1 {
+        format!("{name} · 1 sale")
+    } else {
+        format!("{name} · {sales} sales")
+    }
 }
 
 /// One row of a money table: identifier, when, amount.
@@ -2081,6 +2154,8 @@ impl Module for Settings {
                 shop_card(ui, state);
                 ui.add_space(SPACING.lg);
                 terminal_card(ui, state);
+                ui.add_space(SPACING.lg);
+                backup_card(ui, state);
             }
             "Staff" => {
                 if state.permits(crate::auth::Permission::ManageUsers) {
@@ -2141,25 +2216,31 @@ fn shop_card(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.xs);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
-            let field = text_field(ui, &mut state.shop_draft, crate::APP_NAME, 320.0);
-            // A name that changed after the last save is not the saved name, so
-            // the confirmation has to go rather than sit there contradicting
-            // the field.
-            if field.changed() {
-                state.file_notice = None;
-            }
+            text_field(ui, &mut state.shop_draft, crate::APP_NAME, 320.0);
             if components::primary_button(ui, "Save").clicked() {
                 state.save_shop_name();
             }
         });
 
         ui.add_space(SPACING.xs);
-        if let Some(notice) = state.file_notice.as_deref() {
-            components::caption(ui, notice);
-        } else {
-            components::caption(ui, "Leave it blank to print the app name.");
-        }
+        components::caption(ui, shop_caption(state));
     });
+}
+
+/// What the card says under the field.
+///
+/// Derived from the field rather than remembered in a flag: a "Saved."
+/// confirmation held in state can outlive the text it described — the operator
+/// types on, and the card keeps congratulating a name that is no longer there.
+fn shop_caption(state: &State) -> &'static str {
+    let saved = state.settings.shop_name.trim();
+    if state.shop_draft.trim() != saved {
+        "Not saved yet."
+    } else if saved.is_empty() {
+        "Leave it blank to print the app name."
+    } else {
+        "Saved."
+    }
 }
 
 /// The terminal's identity, in the same card language as the rest of the app.
@@ -2202,6 +2283,39 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
             } else {
                 components::caption(ui, "Only the owner can change it.");
             }
+        }
+    });
+}
+
+/// The owner's copy of the books.
+///
+/// A button, not a dialog: a backup is the thing an owner postpones, so the
+/// distance from "I should do that" to "done" has to be one press and one line
+/// saying where the file went. Failures are shown in the same line, because a
+/// backup that quietly did not happen is worse than none.
+fn backup_card(ui: &mut egui::Ui, state: &mut State) {
+    let folder = state.paths.data.join("backups");
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "A copy of the database, written beside it. The newest 10 are kept.",
+        );
+        ui.add_space(SPACING.md);
+
+        if components::primary_button(ui, "Back up now").clicked() {
+            state.file_notice = Some(match crate::db::backup(&state.store, &folder) {
+                Ok(path) => format!("Backed up to {}", path.display()),
+                Err(err) => format!("Backup failed: {err:#}"),
+            });
+        }
+
+        ui.add_space(SPACING.xs);
+        components::caption(ui, &format!("Folder: {}", folder.display()));
+        if let Some(notice) = state.file_notice.as_deref() {
+            ui.add_space(SPACING.xs);
+            components::caption(ui, notice);
         }
     });
 }
