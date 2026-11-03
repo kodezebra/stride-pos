@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Stride Scan</string>
+    <string name="tagline">Scan a barcode. The till takes it from there.</string>
+    <string name="pair_title">Connect to a till</string>
+    <string name="pair_hint">Open Settings → Scanner on the till, then scan the QR code it shows. Or type the details.</string>
+    <string name="host">Till address</string>
+    <string name="host_hint">192.168.1.20</string>
+    <string name="port">Port</string>
+    <string name="token">Pairing token</string>
+    <string name="token_hint">32 letters and numbers</string>
+    <string name="scan_qr">Scan pairing code</string>
+    <string name="connect">Connect</string>
+    <string name="cancel">Cancel</string>
+    <string name="pair_again">Pair again</string>
+    <string name="mode_question">A scan should</string>
+    <string name="sell">Sell — add to cart</string>
+    <string name="add">Add — open product form</string>
+    <string name="pair_scan_hint">Point the camera at the QR code in Settings → Scanner on the till.</string>
+    <string name="connecting">Connecting to the till…</string>
+    <string name="camera_needed">Camera permission is required to scan.</string>
+    <string name="ready">Ready. Point the camera at a barcode.</string>
+    <string name="sending">Sending %1$s…</string>
+    <string name="sent_sell">Added %1$s to the cart.</string>
+    <string name="sent_add">Add requested for %1$s.</string>
+    <string name="footer">The phone and the till must be on the same Wi-Fi. Scans stay on your network.</string>
+    <string name="not_paired">Pair this phone with a till first.</string>
+    <string name="pair_bad_qr">That QR code is not a Stride pairing code. Try again.</string>
+    <string name="error_host">Enter the till\'s address, for example 192.168.1.20.</string>
+    <string name="error_port">The port must be a number between 1 and 65535.</string>
+    <string name="error_token">The token is the 32-character code shown on the till.</string>
+    <string name="error_connect">Could not reach the till.</string>
+    <string name="error_send">Could not send the scan.</string>
+    <string name="error_camera">Could not open the camera.</string>
+</resources>

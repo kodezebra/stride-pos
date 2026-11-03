@@ -41,6 +41,9 @@ pub struct PosShell {
     commands: Vec<Command<State>>,
     palette: Palette,
     prefs_path: PathBuf,
+    /// The phone scanner's worker. Owned by the frame, not by Settings: the
+    /// listener must keep running while the operator is on any other screen.
+    scan: crate::scan::Service,
 }
 
 impl PosShell {
@@ -62,6 +65,7 @@ impl PosShell {
             commands: crate::commands::all(),
             palette: Palette::default(),
             prefs_path,
+            scan: crate::scan::Service::new(),
         }
     }
 
@@ -78,6 +82,16 @@ impl PosShell {
         // Time passes even when nobody touches anything: the idle clock is what
         // puts the till on the lock screen.
         self.state.tick(ui.ctx());
+
+        // The phone scanner lives for the process, not for the screen that
+        // enabled it. Sync first so a switch flipped on the Settings page takes
+        // effect on the next frame, then hand every scan to the same routing a
+        // keyboard scan uses.
+        self.scan.sync(&self.state.settings.scanner);
+        for event in self.scan.drain() {
+            self.state.receive_scan(event);
+        }
+        self.state.scanner_status = self.scan.status().clone();
 
         // Locked is a whole screen, not a modal over the workspace: the takings
         // behind it are the reason for the lock, and a modal leaves them legible

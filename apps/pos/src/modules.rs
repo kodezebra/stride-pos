@@ -205,8 +205,11 @@ impl Sell {
         // field already filtered the grid, but a cashier with a scanner in their
         // hand expects the item in the cart — asking them to click a tile they
         // just scanned is the whole bug. `lost_focus` alone would also fire on a
-        // click elsewhere, so the Enter press is what confirms the scan.
-        let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // click elsewhere, so the Enter press is what confirms the scan. A phone
+        // scan has no keyboard to press Enter, so it sets `scan_submit` and the
+        // grid consumes it here, through the same path.
+        let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            || std::mem::take(&mut state.scan_submit);
         ui.add_space(SPACING.md);
 
         // A till with an empty catalog is not a bug in the grid: it is a shop
@@ -3556,6 +3559,7 @@ impl Module for Settings {
                 ui.add_space(SPACING.lg);
                 backup_card(ui, state);
             }
+            "Scanner" => scanner_card(ui, state),
             "Staff" => {
                 if state.permits(crate::auth::Permission::ManageUsers) {
                     crate::auth::staff_card(ui, state);
@@ -3575,6 +3579,151 @@ impl Module for Settings {
                 "This till runs alone. A hub or cloud endpoint can be configured once sync exists.",
                 160.0,
             ),
+        }
+    }
+}
+
+/// The phone scanner: one switch, the address to type, and a QR code that
+/// carries all of it.
+///
+/// The listener is off by default. Turning it on is the whole opt-in: nothing
+/// binds a port until this card says so, and turning it off stops the worker in
+/// the same frame the shell next syncs.
+fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
+    let config = state.settings.scanner.clone();
+    let status = state.scanner_status.clone();
+    let palette = theme::current(ui.ctx());
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Scan barcodes with an Android phone on the same Wi-Fi. Scans land in the \
+             scan field exactly as a USB scanner's would.",
+        );
+        ui.add_space(SPACING.md);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            if config.enabled {
+                if ui.button("Turn off").clicked() {
+                    state.settings.scanner.enabled = false;
+                    state.settings_dirty = true;
+                }
+            } else if components::primary_button(ui, "Turn on").clicked() {
+                state.settings.scanner.enabled = true;
+                state.settings_dirty = true;
+            }
+
+            let (text, color) = match &status {
+                crate::scan::ScanStatus::Off => {
+                    ("Off. Nothing is listening.".to_owned(), palette.text_muted)
+                }
+                crate::scan::ScanStatus::Listening { port } => {
+                    (format!("Listening on port {port}."), palette.success)
+                }
+                crate::scan::ScanStatus::Error(error) => (error.clone(), palette.danger),
+            };
+            ui.label(egui::RichText::new(text).size(TYPE.small).color(color));
+        });
+
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            "Only devices with this till's pairing code can send a scan. Keep the till on \
+             the shop network; this listener is not for the internet.",
+        );
+    });
+
+    if !config.enabled {
+        return;
+    }
+
+    ui.add_space(SPACING.lg);
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Open Stride Scan on the phone and point it at this code. One till can take \
+             scans from as many phones as the shop pairs.",
+        );
+        ui.add_space(SPACING.md);
+
+        let Some(address) = crate::scan::local_ip() else {
+            components::empty_state_card(
+                ui,
+                "No network address",
+                "Connect this till to the shop Wi-Fi, then open Settings again.",
+                140.0,
+            );
+            return;
+        };
+        let host = address.to_string();
+        let endpoint = config.endpoint(&host);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.lg;
+            pairing_qr(ui, &config.pair_uri(&host));
+            ui.vertical(|ui| {
+                info_row(ui, "Address", &endpoint);
+                info_row(ui, "Port", &config.port.to_string());
+                info_row(ui, "Token", &config.token);
+                ui.add_space(SPACING.sm);
+                if ui.button("Copy token").clicked() {
+                    ui.ctx().copy_text(config.token.clone());
+                }
+                ui.add_space(SPACING.xs);
+                components::caption(
+                    ui,
+                    "If the camera cannot read the code, type the address, port and token \
+                     into the app.",
+                );
+            });
+        });
+    });
+}
+
+/// Draw the pairing URI as a QR code.
+///
+/// Painted by hand instead of behind an image feature: `qrcode`'s default
+/// features pull in encoders this app never uses, and a QR code is a grid of
+/// squares either way. Two modules of quiet zone so a phone camera has a
+/// margin, and fixed black on white so it scans in either theme.
+fn pairing_qr(ui: &mut egui::Ui, data: &str) {
+    let Ok(code) = qrcode::QrCode::new(data.as_bytes()) else {
+        components::caption(
+            ui,
+            "Could not draw the pairing code. Type the details instead.",
+        );
+        return;
+    };
+
+    const SIDE: f32 = 176.0;
+    const QUIET: usize = 2;
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(RADII.sm as u8),
+        egui::Color32::WHITE,
+    );
+
+    let width = code.width();
+    let modules = (width + QUIET * 2) as f32;
+    let cell = SIDE / modules;
+    let colors = code.to_colors();
+    for y in 0..width {
+        for x in 0..width {
+            if colors[y * width + x] != qrcode::Color::Dark {
+                continue;
+            }
+            let min = rect.min + egui::vec2((x + QUIET) as f32 * cell, (y + QUIET) as f32 * cell);
+            painter.rect_filled(
+                egui::Rect::from_min_size(min, egui::vec2(cell, cell)),
+                egui::CornerRadius::ZERO,
+                egui::Color32::BLACK,
+            );
         }
     }
 }

@@ -19,6 +19,13 @@ currency (UGX and KES round to 100, TZS to 5000), the cash due is rounded to the
 nearest coin and the difference is stored on the sale, so the books add up to
 what the drawer actually holds.
 
+**Phone scanner** — when the till and an Android phone are on the same Wi-Fi,
+the phone can scan a barcode straight into the till. Open **Settings → Scanner**,
+turn the listener on, and scan the pairing code with the companion app. A scan
+marked **Sell** puts the item in the cart; **Add** opens a new product with the
+barcode already filled in. The listener is off until you turn it on, and it
+never leaves the shop's network.
+
 **Dashboard** — takings, number of sales, and the latest transactions for today,
 the last 7 days, the last 30 days, or all time.
 
@@ -41,8 +48,8 @@ movement.
 **Sales** — every completed sale in the chosen range, newest first.
 
 **Settings** — light or dark appearance, a preview of the receipt layout, the
-staff list, and places for tax rules and terminal sync that are not filled in
-yet.
+staff list, the Android phone scanner, and places for tax rules and terminal
+sync that are not filled in yet.
 
 ## Who can do what
 
@@ -112,6 +119,11 @@ with the name of whoever took it, on the Dashboard and in Sales.
 - void, refund and discount have permissions but no screen yet
 - inventory tracks counts, not cost: purchase orders and valuation come later
 - each till runs alone; there is no sync between terminals yet
+- the phone scanner is a companion Android app, not a mobile till of its own;
+  it needs the till and the phone on the same Wi-Fi
+
+For the people running the till — setup, day-to-day selling, common scenarios,
+and how to read the dashboard — see [USER_GUIDE.md](USER_GUIDE.md).
 
 ## Running it
 
@@ -121,5 +133,7 @@ Today it is started from a terminal, on a Linux desktop:
 cargo run -p pos
 ```
 
-There is no installer yet. If you are working on the code, see
+There is no installer yet. A release build is published as a Linux tarball on
+the GitHub releases page, with the companion phone app beside it as
+`stride-scan-*.apk`. If you are working on the code, see
 [DEVELOPMENT.md](DEVELOPMENT.md).

@@ -34,10 +34,16 @@ apps/pos/src/
   auth.rs       roles, credentials, lockout, lock screen, approvals, staff card
   commands.rs   the Ctrl+P palette
   prefs.rs      active module + sidebar visibility
-  settings.rs   terminal settings (appearance; tax and printer later)
+  scan.rs       phone-scanner service: config, token, pairing URI, lifecycle
+  scan/         protocol validation and the LAN HTTP listener
+  settings.rs   terminal + scanner settings (tax and printer later)
   shell.rs      rail, sidebar, workspace, status bar, the modals
 crates/         reserved for product-internal crates
 ```
+
+`apps/scanner/` is the Android companion: Kotlin, CameraX for the preview, and
+ML Kit for on-device barcode decoding. It has its own Gradle build and no Rust
+dependency.
 
 ## Data
 
@@ -45,7 +51,7 @@ crates/         reserved for product-internal crates
 |---|---|
 | `~/.local/share/pos/pos.db` | SQLite, WAL, forward-only migrations |
 | `~/.local/share/pos/logs/pos.log` | log, also mirrored to stderr |
-| `~/.config/pos/settings.json` | appearance / terminal settings |
+| `~/.config/pos/settings.json` | appearance, receipt, scanner settings |
 | `~/.config/pos/prefs.json` | active module, sidebar visibility |
 
 Delete `pos.db` to start from an empty till; migrations re-run on next launch.
@@ -83,6 +89,90 @@ price list. The cash step per currency is in `currencies.rs` (`cash_step`), and
 
 `sales.user_id` names who took the money (`LEFT JOIN users`, so sales from before
 staff existed read `NULL` and show `-`).
+
+## Phone scanner
+
+The till side lives in `apps/pos/src/scan.rs` (config, token, pairing URI,
+service lifecycle), `scan/protocol.rs` (request validation), and `scan/server.rs`
+(the LAN listener). `shell.rs` owns one `Service` for the life of the process;
+`modules.rs` draws the Settings card, and `state.rs` routes a delivered scan
+through `receive_scan()` into the same path a USB keyboard scanner uses.
+
+The listener binds `0.0.0.0:<port>` only while **Settings → Scanner** says it is
+on. The default port is `47831`. The worker stays up across screens and scans;
+starting a thread per barcode would add latency to the one action a queue cannot
+afford to make slow.
+
+The protocol is deliberately small:
+
+```
+POST /v1/scan
+X-Till-Token: <32 lowercase hex characters>
+{"barcode":"6001234567890","action":"sell"}
+```
+
+`action` is `sell` (the default) or `add`. `add` opens the product editor with
+the barcode prefilled and needs `Permission::ChangePrice`. `POST /v1/ping` with
+the same header checks reachability. The body is capped at 512 bytes, a barcode
+at 128 characters, and unknown JSON fields are rejected.
+
+`State::receive_scan()` drops a scan while the till is locked, in first-run
+currency setup, during payment or approval, or with any editor/modal open: a
+phone must not put an item in a cart the cashier cannot see. The Android app
+suppresses duplicate reads of the same barcode for 1.5 seconds.
+
+Pairing is the QR code in Settings, painted from
+`stridepos://pair?host=<host>&port=<port>&token=<token>`, with the address, port
+and token shown underneath for manual entry. The token is generated on first
+launch as 128 bits of OS randomness and kept in `settings.json`; the QR is fixed
+black-on-white so it scans in either theme.
+
+This is a LAN feature, not a cloud service. It binds to the local network,
+requires the token on every request, validates the payload before it reaches the
+cart, and uses cleartext HTTP because the traffic never leaves the shop. Do not
+port-forward it or put the till on a network the shop does not trust. The token
+is visible on the Settings screen and in the QR code, so anyone who can see that
+screen can pair a phone.
+
+## Android companion
+
+`apps/scanner/` is a Kotlin app built with CameraX and ML Kit. The camera preview
+and barcode decoding stay on the phone; ML Kit's model is bundled in the APK, so
+scanning needs no network. The app scans pairing QR codes in setup mode and
+product barcodes in scan mode. It posts to the till over HTTP and shows `Sell`
+and `Add` actions.
+
+Build it with JDK 17+ (the system JRE alone is not enough) and Android SDK 36:
+
+```bash
+cd apps/scanner
+./gradlew :app:assembleDebug
+```
+
+The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. A release build
+uses the debug signing key unless all four of these are set:
+
+| Variable | Meaning |
+|---|---|
+| `STRIDE_SCAN_KEYSTORE` | path to the keystore |
+| `STRIDE_SCAN_STORE_PASSWORD` | keystore password |
+| `STRIDE_SCAN_KEY_ALIAS` | key alias |
+| `STRIDE_SCAN_KEY_PASSWORD` | key password |
+
+`STRIDE_SCAN_VERSION` and `STRIDE_SCAN_VERSION_CODE` set the APK's version; the
+release workflow derives them from the `pos-v*` tag. See
+[apps/scanner/README.md](apps/scanner/README.md) for phone setup and
+troubleshooting.
+
+CI (`.github/workflows/ci.yml`) runs Rust formatting, clippy and tests, then an
+Android lint and debug build. The release workflow
+(`.github/workflows/release.yml`) runs on a `pos-v*` tag, refuses a tag that is
+not an ancestor of `main`, builds the Linux desktop tarball and the release APK,
+checks the APK signature, and attaches both plus `SHA256SUMS.txt` to the GitHub
+release. Optional signing secrets are
+`STRIDE_SCAN_KEYSTORE_BASE64`, `STRIDE_SCAN_STORE_PASSWORD`,
+`STRIDE_SCAN_KEY_ALIAS`, and `STRIDE_SCAN_KEY_PASSWORD`; without them the APK is
+signed with the debug key and is still installable by sideloading.
 
 ## Staff
 
@@ -131,4 +221,5 @@ The first launch creates the owner and shows a one-time recovery code (128 bits,
 Crockford base32, grouped by five). Its hash lives in `meta` under
 `auth::RECOVERY_KEY` and rotates when used; there is no other way back in.
 
-Settings sections: Terminal, Receipt, Staff and Sync are real; Tax is a stub.
+Settings sections: Terminal, Receipt, Scanner, Staff and Sync are real; Tax is a
+stub.

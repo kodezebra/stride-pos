@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="stride_bg">#F7F8FA</color>
+    <color name="stride_ink">#1B1F26</color>
+    <color name="stride_muted">#5D6675</color>
+    <color name="stride_accent">#2563EB</color>
+    <color name="stride_ok">#3DDC84</color>
+    <color name="stride_bad">#D92D20</color>
+    <color name="stride_bad_light">#FF8A80</color>
+    <color name="scrim">#B3000000</color>
+    <color name="white">#FFFFFF</color>
+</resources>

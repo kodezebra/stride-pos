@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use ui_kit::theme::Theme;
 
+use crate::scan::ScanConfig;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -18,6 +20,9 @@ pub struct Settings {
     /// falls back to the app name, so a fresh till still prints something rather
     /// than a blank letterhead.
     pub shop_name: String,
+    /// The phone scanner. Off until the shop turns it on; the token is generated
+    /// on first launch so pairing never waits for a "generate" button.
+    pub scanner: ScanConfig,
 }
 
 impl Settings {

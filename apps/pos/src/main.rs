@@ -15,6 +15,7 @@
 //! | `commands.rs` | the command palette's contents                     |
 //! | `prefs.rs`    | window/UI habits, persisted across restarts        |
 //! | `receipt.rs`  | the receipt, shared by the confirmation and Sales  |
+//! | `scan.rs`     | the phone scanner: pairing, token, LAN listener    |
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
@@ -29,6 +30,7 @@ mod modules;
 mod picker;
 mod prefs;
 mod receipt;
+mod scan;
 mod settings;
 mod shell;
 mod state;

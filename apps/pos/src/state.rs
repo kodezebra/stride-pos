@@ -14,6 +14,7 @@ use ui_kit::theme::Theme;
 use ui_shell::egui;
 
 use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
+use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::Settings;
 
 /// One line on the till. Money is integer minor units, always.
@@ -433,6 +434,13 @@ pub struct State {
     /// the scan field. A scanner types into whatever has focus; a till that needs
     /// one click before the first barcode is a till that "doesn't scan".
     pub scan_focus: bool,
+    /// A phone scan asked the grid to submit the next frame. The search field is
+    /// already filled with the barcode; this is the Enter key the phone cannot
+    /// press, and it is consumed by the grid that draws Sell.
+    pub scan_submit: bool,
+    /// What the LAN listener is doing, mirrored from the shell so Settings can
+    /// show it without the screen owning the worker thread.
+    pub scanner_status: ScanStatus,
     /// The category both Sell and Products filter by. `None` is "All"; the value
     /// is a category name, because the categories are the shop's, not an index
     /// into a list the app invented.
@@ -579,13 +587,17 @@ impl State {
         store: storage::Store,
         module: usize,
         sidebar_open: Vec<bool>,
-        settings: Settings,
+        mut settings: Settings,
         paths: Paths,
         currency: Currency,
         needs_currency: bool,
     ) -> Self {
         let theme = settings.theme();
         let shop_draft = settings.shop_name.trim().to_owned();
+        // A till upgraded from a build without the scanner has no token yet. A
+        // token is not a pairing decision, so generate it on boot and let the
+        // settings write below persist it; enabling the listener stays manual.
+        let scanner_token_created = settings.scanner.ensure_token();
         let products = crate::db::products(&store);
         let categories = crate::db::categories(&store);
         let suppliers = crate::db::suppliers(&store);
@@ -599,6 +611,8 @@ impl State {
             prefs_dirty: false,
             search: String::new(),
             scan_focus: true,
+            scan_submit: false,
+            scanner_status: ScanStatus::Off,
             category: None,
             range: 0,
             settings_section: 0,
@@ -632,7 +646,7 @@ impl State {
             paths,
             theme,
             theme_dirty: false,
-            settings_dirty: false,
+            settings_dirty: scanner_token_created,
             currency,
             needs_currency,
             currency_picker: false,
@@ -1331,6 +1345,55 @@ impl State {
         self.product_editor = Some(ProductDraft::new(category));
         self.product_delete = None;
         self.notice = None;
+    }
+
+    /// Route a scan that arrived from the phone through the same paths a
+    /// keyboard scanner uses.
+    ///
+    /// Phone scans are accepted only while the till is usable and no modal owns
+    /// the screen. Silently filling a hidden form, or adding to a cart behind a
+    /// payment sheet, would make the phone feel haunted; a scan that arrives at
+    /// a busy till is dropped instead of changing state nobody can see.
+    pub fn receive_scan(&mut self, event: ScanEvent) {
+        if self.locked()
+            || self.needs_currency
+            || self.payment.is_some()
+            || self.override_request.is_some()
+            || self.product_editor.is_some()
+            || self.supplier_editor.is_some()
+            || self.stock_editor.is_some()
+            || self.stock_move.is_some()
+            || self.stock_history.is_some()
+            || self.sale_open.is_some()
+            || self.import.is_some()
+            || self.picker.is_some()
+        {
+            return;
+        }
+
+        match event.action {
+            ScanAction::Sell => {
+                self.select(crate::modules::SELL);
+                self.search = event.barcode;
+                self.scan_focus = true;
+                // The grid consumes this the next time it draws, exactly as if
+                // the scanner had pressed Enter.
+                self.scan_submit = true;
+                self.notice = None;
+            }
+            ScanAction::Add => {
+                if !self.permits(crate::auth::Permission::ChangePrice) {
+                    self.select(crate::modules::SELL);
+                    self.notice = Some("A manager must add products from a phone scan.".to_owned());
+                    return;
+                }
+                self.select(crate::modules::PRODUCTS);
+                self.start_product();
+                if let Some(draft) = &mut self.product_editor {
+                    draft.barcode = event.barcode;
+                }
+            }
+        }
     }
 
     /// Open the form on an existing product.
@@ -2059,7 +2122,7 @@ pub fn range_caption(range: usize) -> &'static str {
 
 /// Settings sections. Each one is a page that does not exist yet; the list is
 /// real so the sidebar has the right shape from the start.
-pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Tax", "Staff", "Sync"];
+pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Scanner", "Tax", "Staff", "Sync"];
 
 #[cfg(test)]
 mod tests {
@@ -2568,6 +2631,66 @@ mod tests {
             Some("That matches what the till already has.")
         );
         assert_eq!(state.stock[0].on_hand, 5);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A phone sell is a keyboard scan without the keyboard: it fills the same
+    /// search field and asks the grid to submit it. If the routing skipped that,
+    /// the phone would leave a barcode on the screen and nothing in the cart.
+    #[test]
+    fn a_phone_sell_fills_the_scan_field_and_asks_it_to_submit() {
+        let (mut state, path) = state("phone-sell", Currency::UGX);
+
+        state.receive_scan(ScanEvent {
+            barcode: "4006381333931".to_owned(),
+            action: ScanAction::Sell,
+        });
+
+        assert_eq!(state.module, crate::modules::SELL);
+        assert_eq!(state.search, "4006381333931");
+        assert!(state.scan_focus);
+        assert!(state.scan_submit);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `Add` opens the same form the Products screen opens, with the barcode
+    /// already in it, so the operator only has to name and price the item.
+    #[test]
+    fn a_manager_add_scan_opens_the_product_form_with_the_barcode() {
+        let (mut state, path) = state("phone-add", Currency::UGX);
+        state.session.as_mut().expect("signed in").role = crate::auth::Role::Manager;
+
+        state.receive_scan(ScanEvent {
+            barcode: " ABC-123 ".to_owned(),
+            action: ScanAction::Add,
+        });
+
+        assert_eq!(state.module, crate::modules::PRODUCTS);
+        let draft = state.product_editor.as_ref().expect("the form opens");
+        assert_eq!(draft.barcode, " ABC-123 ");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A cashier cannot change the catalog, so an add scan must say who can
+    /// rather than opening a form whose Save would be refused later.
+    #[test]
+    fn a_cashier_add_scan_is_refused_with_an_explanation() {
+        let (mut state, path) = state("phone-add-refused", Currency::UGX);
+
+        state.receive_scan(ScanEvent {
+            barcode: "4006381333931".to_owned(),
+            action: ScanAction::Add,
+        });
+
+        assert_eq!(state.module, crate::modules::SELL);
+        assert!(state.product_editor.is_none());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("A manager must add products from a phone scan.")
+        );
 
         let _ = std::fs::remove_file(path);
     }
