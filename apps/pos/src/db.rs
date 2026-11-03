@@ -1370,22 +1370,90 @@ fn range_clause(range: usize, column: &str) -> Option<String> {
     }
 }
 
+/// The window immediately before a range, for the change on the KPI cards.
+///
+/// Whole windows, not "the same distance back from this minute": comparing
+/// today with yesterday means yesterday, and a boundary that only moves at
+/// midnight is one a shopkeeper can predict. All time has nothing before it and
+/// returns `None`, so the cards can say so instead of inventing a zero.
+fn previous_clause(range: usize, column: &str) -> Option<String> {
+    match range {
+        0 => Some(format!(
+            "date({column}, 'localtime') = date('now', 'localtime', '-1 day')"
+        )),
+        // Seven days ending the day before the current week opens.
+        1 => Some(format!(
+            "{column} >= datetime(date('now', 'localtime', '-13 days'), 'utc')
+             AND {column} < datetime(date('now', 'localtime', '-6 days'), 'utc')"
+        )),
+        // Thirty days ending the day before the current month opens.
+        2 => Some(format!(
+            "{column} >= datetime(date('now', 'localtime', '-59 days'), 'utc')
+             AND {column} < datetime(date('now', 'localtime', '-29 days'), 'utc')"
+        )),
+        _ => None,
+    }
+}
+
+/// The range's `WHERE` fragment, narrowed to one cashier when `user` is set.
+///
+/// Every report shares this: the dashboard and the transaction list must never
+/// disagree about where the window starts, or about whose sales it contains.
+/// The cashier is bound as `?1` on every query, `NULL` meaning the whole shop.
+/// Binding the value even when it is `NULL` keeps one placeholder shape
+/// throughout; `?1 IS NULL` is a constant true that SQLite folds away.
+fn window_clause(range: usize, column: &str) -> String {
+    match range_clause(range, column) {
+        Some(clause) => format!("({clause}) AND (?1 IS NULL OR s.user_id = ?1)"),
+        None => "(?1 IS NULL OR s.user_id = ?1)".to_owned(),
+    }
+}
+
+/// [`window_clause`] for the period before the range, or `None` for all time.
+fn previous_window_clause(range: usize, column: &str) -> Option<String> {
+    previous_clause(range, column)
+        .map(|clause| format!("({clause}) AND (?1 IS NULL OR s.user_id = ?1)"))
+}
+
+/// How many days back the zero-filled calendar opens, as a SQLite modifier.
+///
+/// Ranges with a fixed length get a calendar so a day that sold nothing is a
+/// zero bar, not a missing one. All time has no fixed calendar — it is every
+/// day that sold, capped for display — and returns `None`.
+fn calendar_start(range: usize) -> Option<&'static str> {
+    match range {
+        0 => Some("0"),
+        1 => Some("-6"),
+        2 => Some("-29"),
+        _ => None,
+    }
+}
+
 /// Revenue and sale count for a range.
 ///
 /// A failed query yields zeros and a logged warning rather than an error the
 /// shell has to render — the dashboard is a summary, not the source of truth.
-pub fn totals(store: &storage::Store, range: usize) -> (i64, i64) {
-    let sql = match range_clause(range, "created_at") {
-        Some(clause) => format!(
-            "SELECT COUNT(*), COALESCE(SUM(total_minor + rounding_minor), 0)
-             FROM sales WHERE {clause}"
-        ),
-        None => {
-            "SELECT COUNT(*), COALESCE(SUM(total_minor + rounding_minor), 0) FROM sales".to_owned()
-        }
-    };
+pub fn totals(store: &storage::Store, range: usize, user: Option<&str>) -> (i64, i64) {
+    totals_in(store, &window_clause(range, "s.created_at"), user)
+}
 
-    let result = store.conn().query_row(&sql, [], |row| {
+/// [`totals`] for the window before the range: what the cards compare against.
+pub fn previous_totals(
+    store: &storage::Store,
+    range: usize,
+    user: Option<&str>,
+) -> Option<(i64, i64)> {
+    let clause = previous_window_clause(range, "s.created_at")?;
+    Some(totals_in(store, &clause, user))
+}
+
+fn totals_in(store: &storage::Store, clause: &str, user: Option<&str>) -> (i64, i64) {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+         FROM sales s WHERE {clause}"
+    );
+
+    let result = store.conn().query_row(&sql, [user], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
     });
 
@@ -1398,19 +1466,100 @@ pub fn totals(store: &storage::Store, range: usize) -> (i64, i64) {
     }
 }
 
-/// Most recent sales in a range, newest first.
-pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
-             FROM sales s LEFT JOIN users u ON u.id = s.user_id
-             WHERE {clause} ORDER BY s.id DESC LIMIT ?1"
-        ),
-        None => "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
-             FROM sales s LEFT JOIN users u ON u.id = s.user_id
-             ORDER BY s.id DESC LIMIT ?1"
-            .to_owned(),
+/// Units sold in a range: the `qty` on every line, not the number of sales.
+pub fn items_sold(store: &storage::Store, range: usize, user: Option<&str>) -> i64 {
+    items_sold_in(store, &window_clause(range, "s.created_at"), user)
+}
+
+/// [`items_sold`] for the window before the range.
+pub fn previous_items_sold(
+    store: &storage::Store,
+    range: usize,
+    user: Option<&str>,
+) -> Option<i64> {
+    let clause = previous_window_clause(range, "s.created_at")?;
+    Some(items_sold_in(store, &clause, user))
+}
+
+fn items_sold_in(store: &storage::Store, clause: &str, user: Option<&str>) -> i64 {
+    let sql = format!(
+        "SELECT COALESCE(SUM(l.qty), 0)
+         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+         WHERE {clause}"
+    );
+
+    match store
+        .conn()
+        .query_row(&sql, [user], |row| row.get::<_, i64>(0))
+    {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::warn!(error = %err, "items sold query failed");
+            0
+        }
+    }
+}
+
+/// The hour that rang the most sales, and how many.
+///
+/// Ranked by sale count, because "busiest" on a till means the queue, not the
+/// takings; revenue breaks a tie so the answer is stable when two hours drew
+/// the same number of customers.
+pub struct PeakHour {
+    /// `0`–`23`, terminal clock.
+    pub hour: u8,
+    pub sales: i64,
+}
+
+pub fn peak_hour(store: &storage::Store, range: usize, user: Option<&str>) -> Option<PeakHour> {
+    let sql = format!(
+        "SELECT CAST(strftime('%H', s.created_at, 'localtime') AS INTEGER) AS hour,
+                COUNT(*) AS sales,
+                COALESCE(SUM(s.total_minor + s.rounding_minor), 0) AS revenue
+         FROM sales s
+         WHERE {}
+         GROUP BY hour
+         ORDER BY sales DESC, revenue DESC
+         LIMIT 1",
+        window_clause(range, "s.created_at")
+    );
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "peak hour prepare failed");
+            return None;
+        }
     };
+
+    match statement.query_map([user], |row| {
+        Ok(PeakHour {
+            hour: row.get(0)?,
+            sales: row.get(1)?,
+        })
+    }) {
+        // An empty range has no busiest hour; that is an answer, not an error.
+        Ok(mut rows) => rows.next().and_then(Result::ok),
+        Err(err) => {
+            tracing::warn!(error = %err, "peak hour query failed");
+            None
+        }
+    }
+}
+
+/// Most recent sales in a range, newest first.
+///
+/// `user` narrows the list to one cashier; `None` is the shop. The same window
+/// and the same scope as the dashboard totals, so the list cannot show a sale
+/// the cards above it did not count.
+pub fn sales(store: &storage::Store, range: usize, limit: i64, user: Option<&str>) -> Vec<Sale> {
+    let sql = format!(
+        "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
+         FROM sales s LEFT JOIN users u ON u.id = s.user_id
+         WHERE {}
+         ORDER BY s.id DESC LIMIT ?2",
+        window_clause(range, "s.created_at")
+    );
 
     let mut statement = match store.conn().prepare(&sql) {
         Ok(statement) => statement,
@@ -1420,7 +1569,7 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
         }
     };
 
-    let rows = statement.query_map([limit], |row| {
+    let rows = statement.query_map((user, limit), |row| {
         Ok(Sale {
             id: row.get(0)?,
             paid_minor: row.get(1)?,
@@ -1448,34 +1597,32 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64) -> Vec<Sale> {
 /// `GROUP BY s.id` keeps one row per sale when a sale is paid in parts. The
 /// method string is sorted in Rust so two orders of the same split cannot
 /// produce two different books.
-pub fn export_sales(store: &storage::Store, range: usize) -> anyhow::Result<Vec<ExportSale>> {
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
-                    s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
-                    COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
-             FROM sales s
-             LEFT JOIN users u ON u.id = s.user_id
-             LEFT JOIN payments p ON p.sale_id = s.id
-             WHERE {clause}
-             GROUP BY s.id ORDER BY s.id"
-        ),
-        None => "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
-                    s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
-                    COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
-             FROM sales s
-             LEFT JOIN users u ON u.id = s.user_id
-             LEFT JOIN payments p ON p.sale_id = s.id
-             GROUP BY s.id ORDER BY s.id"
-            .to_owned(),
-    };
+///
+/// `user` narrows the file to one cashier, so an export cannot become a way
+/// around the scope the screen enforces. `None` is the shop.
+pub fn export_sales(
+    store: &storage::Store,
+    range: usize,
+    user: Option<&str>,
+) -> anyhow::Result<Vec<ExportSale>> {
+    let sql = format!(
+        "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
+                s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
+                COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
+         FROM sales s
+         LEFT JOIN users u ON u.id = s.user_id
+         LEFT JOIN payments p ON p.sale_id = s.id
+         WHERE {}
+         GROUP BY s.id ORDER BY s.id",
+        window_clause(range, "s.created_at")
+    );
 
     let mut statement = store
         .conn()
         .prepare(&sql)
         .context("preparing the sales export")?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([user], |row| {
             Ok(ExportSale {
                 id: row.get(0)?,
                 created_at: row.get(1)?,
@@ -1662,21 +1809,15 @@ pub struct PersonTotal {
     pub revenue: i64,
 }
 
-pub fn by_person(store: &storage::Store, range: usize) -> Vec<PersonTotal> {
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
-             FROM sales s LEFT JOIN users u ON u.id = s.user_id
-             WHERE {clause}
-             GROUP BY s.user_id
-             ORDER BY 3 DESC"
-        ),
-        None => "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
-             FROM sales s LEFT JOIN users u ON u.id = s.user_id
-             GROUP BY s.user_id
-             ORDER BY 3 DESC"
-            .to_owned(),
-    };
+pub fn by_person(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<PersonTotal> {
+    let sql = format!(
+        "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
+         FROM sales s LEFT JOIN users u ON u.id = s.user_id
+         WHERE {}
+         GROUP BY s.user_id
+         ORDER BY 3 DESC",
+        window_clause(range, "s.created_at")
+    );
 
     let mut statement = match store.conn().prepare(&sql) {
         Ok(statement) => statement,
@@ -1686,7 +1827,7 @@ pub fn by_person(store: &storage::Store, range: usize) -> Vec<PersonTotal> {
         }
     };
 
-    let rows = statement.query_map([], |row| {
+    let rows = statement.query_map([user], |row| {
         Ok(PersonTotal {
             name: row.get(0)?,
             sales: row.get(1)?,
@@ -1706,9 +1847,9 @@ pub fn by_person(store: &storage::Store, range: usize) -> Vec<PersonTotal> {
 /// One local day's totals — the trend behind the range.
 ///
 /// Revenue is `total + rounding`, the drawer figure `totals` and the list
-/// already agree on. Days are newest first and capped at the most recent
-/// thirty, so "All time" cannot grow a list taller than the rest of the
-/// dashboard; the cap is on display, not on what the database keeps.
+/// already agree on. Days are newest first. Fixed ranges carry every day in the
+/// window, zero days included, so the bars are a calendar; all time carries the
+/// thirty most recent days that sold, because it has no calendar to draw.
 pub struct DayTotal {
     /// `dd/mm`, terminal clock — SQLite's `strftime` has no month names.
     /// Grouped on the full date, so two sales on the same day share one row.
@@ -1721,31 +1862,73 @@ pub struct DayTotal {
     pub revenue: i64,
 }
 
-pub fn by_day(store: &storage::Store, range: usize) -> Vec<DayTotal> {
+pub fn by_day(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<DayTotal> {
     const MAX_DAYS: i64 = 30;
 
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT strftime('%d/%m', s.created_at, 'localtime'),
-                    CAST(strftime('%w', s.created_at, 'localtime') AS INTEGER),
-                    COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
-             FROM sales s
-             WHERE {clause}
-             GROUP BY date(s.created_at, 'localtime')
-             ORDER BY date(s.created_at, 'localtime') DESC
-             LIMIT ?1"
-        ),
-        None => "SELECT strftime('%d/%m', s.created_at, 'localtime'),
-                    CAST(strftime('%w', s.created_at, 'localtime') AS INTEGER),
-                    COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
-             FROM sales s
-             GROUP BY date(s.created_at, 'localtime')
-             ORDER BY date(s.created_at, 'localtime') DESC
-             LIMIT ?1"
-            .to_owned(),
-    };
+    let conn = store.conn();
 
-    let mut statement = match store.conn().prepare(&sql) {
+    // Ranges with a fixed calendar get every day, including the ones that sold
+    // nothing. A missing bar is not a zero day, and a chart that closes the gap
+    // lies about the week.
+    if let Some(start) = calendar_start(range) {
+        let sql = "WITH RECURSIVE days(d) AS (
+                       SELECT date('now', 'localtime', ?2 || ' days')
+                       UNION ALL
+                       SELECT date(d, '+1 day') FROM days
+                       WHERE d < date('now', 'localtime')
+                   )
+                   SELECT strftime('%d/%m', days.d),
+                          CAST(strftime('%w', days.d) AS INTEGER),
+                          COUNT(s.id),
+                          COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+                   FROM days
+                   LEFT JOIN sales s
+                          ON date(s.created_at, 'localtime') = days.d
+                         AND (?1 IS NULL OR s.user_id = ?1)
+                   GROUP BY days.d
+                   ORDER BY days.d DESC";
+
+        let mut statement = match conn.prepare(sql) {
+            Ok(statement) => statement,
+            Err(err) => {
+                tracing::warn!(error = %err, "by day prepare failed");
+                return Vec::new();
+            }
+        };
+
+        let rows = statement.query_map((user, start), |row| {
+            Ok(DayTotal {
+                day: row.get(0)?,
+                weekday: row.get(1)?,
+                sales: row.get(2)?,
+                revenue: row.get(3)?,
+            })
+        });
+
+        return match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "by day query failed");
+                Vec::new()
+            }
+        };
+    }
+
+    // All time has no calendar: it is every day that sold, capped to the recent
+    // ones so the chart cannot outgrow the dashboard.
+    let sql = format!(
+        "SELECT strftime('%d/%m', s.created_at, 'localtime'),
+                CAST(strftime('%w', s.created_at, 'localtime') AS INTEGER),
+                COUNT(*), COALESCE(SUM(s.total_minor + s.rounding_minor), 0)
+         FROM sales s
+         WHERE {}
+         GROUP BY date(s.created_at, 'localtime')
+         ORDER BY date(s.created_at, 'localtime') DESC
+         LIMIT ?2",
+        window_clause(range, "s.created_at")
+    );
+
+    let mut statement = match conn.prepare(&sql) {
         Ok(statement) => statement,
         Err(err) => {
             tracing::warn!(error = %err, "by day prepare failed");
@@ -1753,7 +1936,7 @@ pub fn by_day(store: &storage::Store, range: usize) -> Vec<DayTotal> {
         }
     };
 
-    let rows = statement.query_map([MAX_DAYS], |row| {
+    let rows = statement.query_map((user, MAX_DAYS), |row| {
         Ok(DayTotal {
             day: row.get(0)?,
             weekday: row.get(1)?,
@@ -1783,23 +1966,21 @@ pub struct ItemTotal {
     pub revenue: i64,
 }
 
-pub fn top_items(store: &storage::Store, range: usize, limit: i64) -> Vec<ItemTotal> {
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT l.name, SUM(l.qty), SUM(l.total_minor)
-             FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-             WHERE {clause}
-             GROUP BY l.name
-             ORDER BY 3 DESC
-             LIMIT ?1"
-        ),
-        None => "SELECT l.name, SUM(l.qty), SUM(l.total_minor)
-             FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-             GROUP BY l.name
-             ORDER BY 3 DESC
-             LIMIT ?1"
-            .to_owned(),
-    };
+pub fn top_items(
+    store: &storage::Store,
+    range: usize,
+    limit: i64,
+    user: Option<&str>,
+) -> Vec<ItemTotal> {
+    let sql = format!(
+        "SELECT l.name, SUM(l.qty), SUM(l.total_minor)
+         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+         WHERE {}
+         GROUP BY l.name
+         ORDER BY 3 DESC
+         LIMIT ?2",
+        window_clause(range, "s.created_at")
+    );
 
     let mut statement = match store.conn().prepare(&sql) {
         Ok(statement) => statement,
@@ -1809,7 +1990,7 @@ pub fn top_items(store: &storage::Store, range: usize, limit: i64) -> Vec<ItemTo
         }
     };
 
-    let rows = statement.query_map([limit], |row| {
+    let rows = statement.query_map((user, limit), |row| {
         Ok(ItemTotal {
             name: row.get(0)?,
             qty: row.get(1)?,
@@ -1848,19 +2029,14 @@ pub struct MethodTotal {
 /// This is *taken*, not *expected in the drawer*: without an opening float and a
 /// counted close there is nothing to be expected against. The word stays out of
 /// the query and out of the screen copy.
-pub fn by_method(store: &storage::Store, range: usize) -> Vec<MethodTotal> {
-    let sql = match range_clause(range, "s.created_at") {
-        Some(clause) => format!(
-            "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
-             FROM payments p JOIN sales s ON s.id = p.sale_id
-             WHERE {clause}
-             GROUP BY p.method ORDER BY 3 DESC"
-        ),
-        None => "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
-             FROM payments p JOIN sales s ON s.id = p.sale_id
-             GROUP BY p.method ORDER BY 3 DESC"
-            .to_owned(),
-    };
+pub fn by_method(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<MethodTotal> {
+    let sql = format!(
+        "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
+         FROM payments p JOIN sales s ON s.id = p.sale_id
+         WHERE {}
+         GROUP BY p.method ORDER BY 3 DESC",
+        window_clause(range, "s.created_at")
+    );
 
     let mut statement = match store.conn().prepare(&sql) {
         Ok(statement) => statement,
@@ -1870,7 +2046,7 @@ pub fn by_method(store: &storage::Store, range: usize) -> Vec<MethodTotal> {
         }
     };
 
-    let rows = statement.query_map([], |row| {
+    let rows = statement.query_map([user], |row| {
         Ok(MethodTotal {
             method: row.get(0)?,
             sales: row.get(1)?,
@@ -2053,16 +2229,180 @@ mod tests {
         let (store, path) = store("ranges");
         seed(&store);
 
-        assert_eq!(totals(&store, 0), (1, 500), "Today");
-        assert_eq!(totals(&store, 1), (2, 1200), "7 days");
-        assert_eq!(totals(&store, 2), (3, 2300), "30 days");
-        assert_eq!(totals(&store, 3), (4, 4300), "All time");
+        assert_eq!(totals(&store, 0, None), (1, 500), "Today");
+        assert_eq!(totals(&store, 1, None), (2, 1200), "7 days");
+        assert_eq!(totals(&store, 2, None), (3, 2300), "30 days");
+        assert_eq!(totals(&store, 3, None), (4, 4300), "All time");
 
-        assert_eq!(sales(&store, 1, 10).len(), 2);
+        assert_eq!(sales(&store, 1, 10, None).len(), 2);
 
-        let two = sales(&store, 3, 2);
+        let two = sales(&store, 3, 2, None);
         assert_eq!(two.len(), 2, "the limit applies after the filter");
         assert!(two[0].id > two[1].id, "newest first");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_previous_window_is_whole_and_sits_before_the_range() {
+        let (store, path) = store("previous-window");
+        insert_sale(&store, "-0 days", &[("Tea", 1, 500)]);
+        insert_sale(&store, "-3 days", &[("Tea", 1, 700)]);
+        insert_sale(&store, "-10 days", &[("Tea", 2, 550)]);
+        insert_sale(&store, "-40 days", &[("Tea", 4, 500)]);
+
+        assert_eq!(
+            previous_totals(&store, 0, None),
+            Some((0, 0)),
+            "yesterday was quiet, not missing"
+        );
+        assert_eq!(
+            previous_totals(&store, 1, None),
+            Some((1, 1_100)),
+            "the whole week before this one"
+        );
+        assert_eq!(
+            previous_totals(&store, 2, None),
+            Some((1, 2_000)),
+            "the whole month before this one"
+        );
+        assert_eq!(
+            previous_totals(&store, 3, None),
+            None,
+            "nothing came before all time"
+        );
+
+        assert_eq!(previous_items_sold(&store, 1, None), Some(2));
+        assert_eq!(previous_items_sold(&store, 2, None), Some(4));
+        assert_eq!(previous_items_sold(&store, 3, None), None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A sale that knows whose it was — the scope tests need a cashier to
+    /// narrow to, and `insert_sale` deliberately leaves that column empty.
+    fn insert_sale_for(
+        store: &storage::Store,
+        offset: &str,
+        user: &str,
+        lines: &[(&str, i64, i64)],
+    ) -> i64 {
+        let conn = store.conn();
+        let total: i64 = lines.iter().map(|(_, qty, unit)| qty * unit).sum();
+        conn.execute(
+            "INSERT INTO sales (total_minor, created_at, user_id)
+             VALUES (?1, datetime('now', ?2), ?3)",
+            (total, offset, user),
+        )
+        .expect("insert sale");
+        let id = conn.last_insert_rowid();
+        for (name, qty, unit) in lines {
+            conn.execute(
+                "INSERT INTO sale_lines (sale_id, product_id, name, qty, unit_minor, total_minor)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                (id, name, *qty, *unit, qty * unit),
+            )
+            .expect("insert line");
+        }
+        id
+    }
+
+    #[test]
+    fn a_scope_narrows_every_report_to_one_person() {
+        let (store, path) = store("report-scope");
+        let alice = insert_user(
+            &store,
+            "Alice",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert alice");
+        let bob = insert_user(
+            &store,
+            "Bob",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert bob");
+
+        let alice_today = insert_sale_for(&store, "-0 days", &alice.id, &[("Tea", 2, 100)]);
+        let bob_today = insert_sale_for(&store, "-0 days", &bob.id, &[("Rice", 1, 500)]);
+        insert_sale_for(&store, "-3 days", &alice.id, &[("Tea", 3, 100)]);
+
+        // One payment each, so the method card has figures to scope.
+        for (sale, amount) in [(alice_today, 200), (bob_today, 500)] {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO payments (sale_id, method, amount_minor, tendered_minor, change_minor)
+                     VALUES (?1, 'cash', ?2, ?2, 0)",
+                    (sale, amount),
+                )
+                .expect("insert payment");
+        }
+
+        assert_eq!(totals(&store, 3, None), (3, 1_000));
+        assert_eq!(totals(&store, 3, Some(&alice.id)), (2, 500));
+        assert_eq!(totals(&store, 3, Some(&bob.id)), (1, 500));
+
+        assert_eq!(items_sold(&store, 3, None), 6);
+        assert_eq!(items_sold(&store, 3, Some(&alice.id)), 5);
+
+        assert_eq!(sales(&store, 3, 10, Some(&alice.id)).len(), 2);
+        assert!(
+            sales(&store, 3, 10, Some(&alice.id))
+                .iter()
+                .all(|sale| sale.cashier.as_deref() == Some("Alice"))
+        );
+
+        let people = by_person(&store, 3, None);
+        assert_eq!(people.len(), 2, "the shop view names both cashiers");
+        assert_eq!(by_person(&store, 3, Some(&alice.id)).len(), 1);
+
+        let items = top_items(&store, 3, 10, Some(&alice.id));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].qty, 5);
+
+        let methods = by_method(&store, 3, Some(&alice.id));
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].amount_minor, 200, "only Alice's payment");
+        assert_eq!(
+            by_method(&store, 3, None)
+                .iter()
+                .map(|method| method.amount_minor)
+                .sum::<i64>(),
+            700
+        );
+
+        let rows = export_sales(&store, 3, Some(&alice.id)).expect("export");
+        assert_eq!(rows.len(), 2, "an export cannot outrun the scope");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_busiest_hour_is_the_one_with_the_most_sales() {
+        let (store, path) = store("peak-hour");
+        insert_sale(&store, "-0 days", &[("Tea", 1, 100)]);
+        insert_sale(&store, "-0 days", &[("Tea", 1, 100)]);
+        // A third sale, well away from this hour so it cannot tie the peak.
+        store
+            .conn()
+            .execute(
+                "INSERT INTO sales (total_minor, created_at)
+                 VALUES (100, datetime('now', '-3 days', '-5 hours'))",
+                [],
+            )
+            .expect("insert sale");
+
+        let peak = peak_hour(&store, 1, None).expect("two sales share an hour");
+        assert_eq!(peak.sales, 2);
+        assert!(peak.hour <= 23);
+
+        // Narrowed to a window with no sales, there is no busiest hour.
+        assert!(peak_hour(&store, 0, Some("nobody")).is_none());
 
         let _ = std::fs::remove_file(path);
     }
@@ -2111,10 +2451,21 @@ mod tests {
     fn a_fresh_database_reports_zero_rather_than_failing() {
         let (store, path) = store("empty");
 
-        assert_eq!(totals(&store, 0), (0, 0));
-        assert!(sales(&store, 3, 5).is_empty());
-        assert!(by_day(&store, 3).is_empty());
-        assert!(top_items(&store, 3, 5).is_empty());
+        assert_eq!(totals(&store, 0, None), (0, 0));
+        assert_eq!(previous_totals(&store, 0, None), Some((0, 0)));
+        assert_eq!(items_sold(&store, 0, None), 0);
+        assert!(sales(&store, 3, 5, None).is_empty());
+        assert!(by_day(&store, 3, None).is_empty());
+        assert_eq!(
+            by_day(&store, 1, None).len(),
+            7,
+            "a quiet week is still seven bars"
+        );
+        assert_eq!(by_day(&store, 1, None)[0].revenue, 0);
+        assert!(peak_hour(&store, 0, None).is_none());
+        assert!(top_items(&store, 3, 5, None).is_empty());
+        assert!(by_person(&store, 3, None).is_empty());
+        assert!(by_method(&store, 3, None).is_empty());
 
         let _ = std::fs::remove_file(path);
     }
@@ -2149,14 +2500,18 @@ mod tests {
         insert_sale(&store, "-6 days", &[("Tea", 1, 100)]);
         insert_sale(&store, "-7 days", &[("Tea", 1, 100)]);
 
+        let week = by_day(&store, 1, None);
+        assert_eq!(week.len(), 7, "a week is seven bars, zero days included");
         assert_eq!(
-            by_day(&store, 1).len(),
+            week.iter().filter(|day| day.sales > 0).count(),
             2,
-            "today and six days back, so a week is seven bars"
+            "today and six days back"
         );
-        assert_eq!(totals(&store, 1), (2, 200));
+        assert_eq!(totals(&store, 1, None), (2, 200));
+        let month = by_day(&store, 2, None);
+        assert_eq!(month.len(), 30, "a month is its calendar, not its sales");
         assert_eq!(
-            by_day(&store, 2).len(),
+            month.iter().filter(|day| day.sales > 0).count(),
             3,
             "the seventh day is still inside the month"
         );
@@ -2174,18 +2529,22 @@ mod tests {
         insert_sale(&store, "-10 days", &[("Rice", 1, 5_000)]);
         insert_sale(&store, "-40 days", &[("Tea", 1, 500)]);
 
+        let today = by_day(&store, 0, None);
         assert_eq!(
-            by_day(&store, 0).len(),
+            today.len(),
             1,
-            "today is one row, however many sales it had"
+            "today is one bar, however many sales it had"
         );
+        assert_eq!(today[0].sales, 1, "two sales on one day share its row");
+        let month = by_day(&store, 2, None);
+        assert_eq!(month.len(), 30, "a month is its calendar");
         assert_eq!(
-            by_day(&store, 2).len(),
+            month.iter().filter(|day| day.sales > 0).count(),
             3,
             "the forty-day-old sale is outside a 30-day range"
         );
 
-        let days = by_day(&store, 3);
+        let days = by_day(&store, 3, None);
         assert_eq!(days.len(), 4);
         assert_eq!(
             days[0].revenue, 3_500,
@@ -2195,7 +2554,7 @@ mod tests {
         assert_eq!(days[1].revenue, 1_000);
         assert_eq!(days[3].revenue, 500);
 
-        let items = top_items(&store, 3, 5);
+        let items = top_items(&store, 3, 5, None);
         assert_eq!(
             items.len(),
             3,
@@ -2210,12 +2569,12 @@ mod tests {
         assert_eq!(items[2].qty, 1);
 
         assert_eq!(
-            top_items(&store, 0, 5)[0].name,
+            top_items(&store, 0, 5, None)[0].name,
             "Sugar",
             "the ranking follows the chosen range, not all history"
         );
         assert_eq!(
-            top_items(&store, 3, 2).len(),
+            top_items(&store, 3, 2, None).len(),
             2,
             "the limit ranks, not hides"
         );
@@ -2498,11 +2857,11 @@ mod tests {
         assert_eq!(sale.paid_minor(), 3_780);
         assert_eq!(sale.change_minor, 220, "4000 tendered against 3780 due");
 
-        let (count, revenue) = totals(&store, 3);
+        let (count, revenue) = totals(&store, 3, None);
         assert_eq!(count, 1);
         assert_eq!(revenue, 3_780, "revenue is what the drawer took");
 
-        let history = sales(&store, 3, 10);
+        let history = sales(&store, 3, 10, None);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].paid_minor, 3_780);
         assert_eq!(history[0].id, sale.id);
@@ -2756,7 +3115,7 @@ mod tests {
 
         // The sale row is inserted first, so this proves the transaction rolled
         // back rather than leaving a sale with no payment behind.
-        assert_eq!(totals(&store, 3), (0, 0));
+        assert_eq!(totals(&store, 3, None), (0, 0));
         let line_count: i64 = store
             .conn()
             .query_row("SELECT COUNT(*) FROM sale_lines", [], |row| row.get(0))
@@ -2771,7 +3130,7 @@ mod tests {
         let (store, path) = store("empty-cart");
 
         assert!(record_sale(&store, &[], 0, 0, None).is_err());
-        assert_eq!(totals(&store, 3), (0, 0));
+        assert_eq!(totals(&store, 3, None), (0, 0));
 
         let _ = std::fs::remove_file(path);
     }
@@ -2873,7 +3232,7 @@ mod tests {
         .expect("record");
 
         assert_eq!(sale.paid_minor(), 500);
-        let history = sales(&store, 3, 10);
+        let history = sales(&store, 3, 10, None);
         assert_eq!(history[0].cashier.as_deref(), Some("Brian"));
 
         // Switching somebody off keeps their name on their history: the money
@@ -2886,7 +3245,10 @@ mod tests {
                 .map(|user| user.active),
             Some(false)
         );
-        assert_eq!(sales(&store, 3, 10)[0].cashier.as_deref(), Some("Brian"));
+        assert_eq!(
+            sales(&store, 3, 10, None)[0].cashier.as_deref(),
+            Some("Brian")
+        );
 
         // Owner first, then managers, then cashiers.
         assert_eq!(users(&store).first().map(|user| &user.id), Some(&owner.id));
@@ -3071,7 +3433,7 @@ mod tests {
         )
         .expect("record");
 
-        let people = by_person(&store, 3);
+        let people = by_person(&store, 3, None);
         // Ordered by revenue, not by count: Amina takes fewer, bigger sales.
         assert_eq!(people.len(), 2);
         assert_eq!(people[0].name, "Amina");
@@ -3105,7 +3467,7 @@ mod tests {
         )
         .expect("record");
 
-        let people = by_person(&store, 3);
+        let people = by_person(&store, 3, None);
         assert_eq!(people.len(), 1);
         assert_eq!(people[0].name, "-");
         assert_eq!(people[0].sales, 1);
@@ -3148,7 +3510,7 @@ mod tests {
         )
         .expect("record an exact sale");
 
-        let methods = by_method(&store, 3);
+        let methods = by_method(&store, 3, None);
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].method, "cash");
         assert_eq!(methods[0].sales, 2);
@@ -3163,7 +3525,7 @@ mod tests {
     fn a_range_with_no_sales_reports_no_methods() {
         let (store, path) = store("by-method-empty");
 
-        assert!(by_method(&store, 0).is_empty());
+        assert!(by_method(&store, 0, None).is_empty());
 
         let _ = std::fs::remove_file(path);
     }
@@ -3195,7 +3557,7 @@ mod tests {
                 .expect("insert payment");
         }
 
-        let rows = export_sales(&store, 3).expect("export");
+        let rows = export_sales(&store, 3, None).expect("export");
         assert_eq!(rows.len(), 1, "a split sale is one sale");
         assert_eq!(
             rows[0].method, "cash+mobile",

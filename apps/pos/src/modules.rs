@@ -579,25 +579,68 @@ impl Module for Dashboard {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        let (count, revenue) = crate::db::totals(&state.store, state.range);
+        // The scope borrows the session, but the sections below borrow the state
+        // mutably to open a sale; take an owned copy of both halves up front.
+        let scope = state.report_scope();
+        let shop = scope.is_shop();
+        let user = scope.user().map(str::to_owned);
+        let user = user.as_deref();
+
+        let (count, revenue) = crate::db::totals(&state.store, state.range, user);
+        let previous = crate::db::previous_totals(&state.store, state.range, user);
+        let units = crate::db::items_sold(&state.store, state.range, user);
+        let previous_units = crate::db::previous_items_sold(&state.store, state.range, user);
+        let peak = crate::db::peak_hour(&state.store, state.range, user);
 
         components::section_title(ui, state::range_caption(state.range));
-        // Derived, not stored: revenue over sales, same range. A range with
-        // no sales shows "-", never a zero that could be read as "we made
-        // nothing today".
-        let average = if count > 0 {
-            state.money(revenue / count)
-        } else {
-            "-".to_owned()
+        // The comparison is stated once, under the title: a caption on every
+        // card would repeat it four times and squeeze the figures.
+        components::caption(ui, comparison_caption(state.range, shop));
+        ui.add_space(SPACING.sm);
+
+        let (revenue_sub, revenue_trend) =
+            change(revenue, previous.map(|(_, revenue)| revenue), true);
+        let (sales_sub, sales_trend) = change(count, previous.map(|(count, _)| count), false);
+        let (items_sub, items_trend) = change(units, previous_units, false);
+        let (peak_value, peak_sub) = match peak {
+            Some(peak) => (
+                format!("{:02}:00", peak.hour),
+                format!(
+                    "{} {}",
+                    peak.sales,
+                    if peak.sales == 1 { "sale" } else { "sales" }
+                ),
+            ),
+            None => ("—".to_owned(), "no sales".to_owned()),
         };
+
         kpi_row(
             ui,
             &[
-                ("Sales", count.to_string()),
-                ("Revenue", state.money(revenue)),
-                ("Average", average),
-                ("In cart", state.cart_count().to_string()),
-                ("Cart value", state.money(state.cart_total_minor())),
+                Kpi {
+                    label: "Revenue",
+                    value: state.money(revenue),
+                    sub: revenue_sub,
+                    trend: revenue_trend,
+                },
+                Kpi {
+                    label: "Sales",
+                    value: count.to_string(),
+                    sub: sales_sub,
+                    trend: sales_trend,
+                },
+                Kpi {
+                    label: "Items sold",
+                    value: units.to_string(),
+                    sub: items_sub,
+                    trend: items_trend,
+                },
+                Kpi {
+                    label: "Busiest hour",
+                    value: peak_value,
+                    sub: peak_sub,
+                    trend: Trend::Flat,
+                },
             ],
         );
 
@@ -605,8 +648,15 @@ impl Module for Dashboard {
         // float and no counted close, "expected in the drawer" would be a figure
         // the till cannot know. What the payments add up to, it does.
         ui.add_space(SPACING.lg);
-        components::section_title(ui, "Payments taken");
-        let methods = crate::db::by_method(&state.store, state.range);
+        components::section_title(
+            ui,
+            if shop {
+                "Payments taken"
+            } else {
+                "Your payments"
+            },
+        );
+        let methods = crate::db::by_method(&state.store, state.range, user);
         if methods.is_empty() {
             components::empty_state_card(
                 ui,
@@ -645,13 +695,19 @@ impl Module for Dashboard {
             });
         }
 
-        // The shape of the range, as a chart: one bar per selling day, oldest
-        // on the left so the range reads like a calendar, and a round axis
-        // above the busiest day.
+        // The shape of the range, as a chart: one bar per day, oldest on the
+        // left so the range reads like a calendar, and a round axis above the
+        // busiest day. A fixed range draws zero days too; all time draws only
+        // the days that sold, and says so.
         ui.add_space(SPACING.lg);
-        components::section_title(ui, "By day");
-        let days = crate::db::by_day(&state.store, state.range);
-        if days.is_empty() {
+        components::section_title(ui, if shop { "By day" } else { "Your sales by day" });
+        if let Some(caption) = chart_caption(state.range) {
+            components::caption(ui, caption);
+        }
+        // Keyed on the sale count, not on the bars: a zero-filled week is still
+        // seven bars, and "no sales" is a friendlier answer than seven empty
+        // ones.
+        if count == 0 {
             components::empty_state_card(
                 ui,
                 "No sales yet in this range",
@@ -659,6 +715,7 @@ impl Module for Dashboard {
                 160.0,
             );
         } else {
+            let days = crate::db::by_day(&state.store, state.range, user);
             components::card(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 day_chart(ui, state, &days);
@@ -666,8 +723,15 @@ impl Module for Dashboard {
         }
 
         ui.add_space(SPACING.lg);
-        components::section_title(ui, "Latest sales");
-        let sales = crate::db::sales(&state.store, state.range, 5);
+        components::section_title(
+            ui,
+            if shop {
+                "Latest sales"
+            } else {
+                "Your latest sales"
+            },
+        );
+        let sales = crate::db::sales(&state.store, state.range, 5, user);
         if sales.is_empty() {
             components::empty_state_card(
                 ui,
@@ -698,44 +762,46 @@ impl Module for Dashboard {
             }
         });
 
-        // End-of-shift is not about the shop: it is about who took what. The
-        // summary follows the range on the sidebar, so "today" already asks
-        // the question the owner came to answer.
-        ui.add_space(SPACING.lg);
-        components::section_title(ui, "By person");
-        let people = crate::db::by_person(&state.store, state.range);
-        if people.is_empty() {
-            components::empty_state_card(
-                ui,
-                "No sales yet in this range",
-                "Whoever takes the money shows up here, with their share.",
-                160.0,
-            );
-            return;
-        }
-
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            tally_row(ui, "Person", "Sales", "Total", true, false);
-            for (index, person) in people.iter().enumerate() {
-                tally_row(
+        // End-of-shift is not about the shop: it is about who took what. A
+        // cashier has no business reading a colleague's takings, and their own
+        // row would only repeat the cards above, so the block belongs to the
+        // shop view.
+        if shop {
+            ui.add_space(SPACING.lg);
+            components::section_title(ui, "By person");
+            let people = crate::db::by_person(&state.store, state.range, user);
+            if people.is_empty() {
+                components::empty_state_card(
                     ui,
-                    &person.name,
-                    &person.sales.to_string(),
-                    &state.money(person.revenue),
-                    false,
-                    index % 2 == 1,
+                    "No sales yet in this range",
+                    "Whoever takes the money shows up here, with their share.",
+                    160.0,
                 );
+            } else {
+                components::card(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    tally_row(ui, "Person", "Sales", "Total", true, false);
+                    for (index, person) in people.iter().enumerate() {
+                        tally_row(
+                            ui,
+                            &person.name,
+                            &person.sales.to_string(),
+                            &state.money(person.revenue),
+                            false,
+                            index % 2 == 1,
+                        );
+                    }
+                });
             }
-        });
+        }
 
         // What actually sells. Ranked by the money each name took, with the
         // units beside it — neither number alone is the story: many cheap
         // units can out-earn a few dear ones, and either way the owner wants
         // both.
         ui.add_space(SPACING.lg);
-        components::section_title(ui, "Top items");
-        let items = crate::db::top_items(&state.store, state.range, 5);
+        components::section_title(ui, if shop { "Top items" } else { "Your top items" });
+        let items = crate::db::top_items(&state.store, state.range, 5, user);
         if items.is_empty() {
             components::empty_state_card(
                 ui,
@@ -769,7 +835,24 @@ impl Module for Dashboard {
 /// the frame — the row spills past the window edge and drags every centred
 /// widget below it out of place. Columns here are a function of the panel width,
 /// so the row always sums to what is on screen.
-fn kpi_row(ui: &mut egui::Ui, cards: &[(&str, String)]) {
+/// How a figure moved against the window before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trend {
+    Up,
+    Down,
+    Flat,
+}
+
+/// One card at the top of the dashboard.
+struct Kpi {
+    label: &'static str,
+    value: String,
+    /// The change against the previous window, or what the busiest hour took.
+    sub: String,
+    trend: Trend,
+}
+
+fn kpi_row(ui: &mut egui::Ui, cards: &[Kpi]) {
     let gap = SPACING.sm;
     let available = ui.available_width();
     let columns = (((available + gap) / (140.0 + gap)).floor() as usize).clamp(1, 4);
@@ -778,23 +861,98 @@ fn kpi_row(ui: &mut egui::Ui, cards: &[(&str, String)]) {
     for chunk in cards.chunks(columns) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for (label, value) in chunk {
-                kpi(ui, card, label, value);
+            for kpi in chunk {
+                kpi_card(ui, card, kpi);
             }
         });
         ui.add_space(gap);
     }
 }
 
-fn kpi(ui: &mut egui::Ui, width: f32, label: &str, value: &str) {
+fn kpi_card(ui: &mut egui::Ui, width: f32, kpi: &Kpi) {
     components::card(ui, |ui| {
         // The frame adds its margin around this width, so the card lands on the
         // column width instead of one margin too wide.
         ui.set_width((width - 2.0 * SPACING.lg).max(60.0));
-        components::field_label(ui, label);
+        components::field_label(ui, kpi.label);
         ui.add_space(SPACING.xs);
-        ui.label(components::numeric(value).size(TYPE.kpi));
+        ui.label(components::numeric(&kpi.value).size(TYPE.kpi));
+        ui.add_space(SPACING.xs);
+        let palette = theme::current(ui.ctx());
+        let color = match kpi.trend {
+            Trend::Up => egui::Color32::from(palette.success),
+            Trend::Down => egui::Color32::from(palette.danger),
+            Trend::Flat => egui::Color32::from(palette.text_muted),
+        };
+        ui.label(egui::RichText::new(&kpi.sub).size(TYPE.small).color(color));
     });
+}
+
+/// A figure's change against the window before it, and the direction to paint.
+///
+/// Money moves as a percentage and counts as units: "+12%" is how a shopkeeper
+/// reads a week's takings, and "+3" is how they read three more sales. A window
+/// that took nothing cannot be a percentage, so the first sale in it is `new`;
+/// two empty windows have nothing to compare and show a dash. All time passes no
+/// previous window at all, and reads the same.
+fn change(now: i64, before: Option<i64>, money: bool) -> (String, Trend) {
+    let Some(before) = before else {
+        return ("—".to_owned(), Trend::Flat);
+    };
+    if before == 0 {
+        return if now == 0 {
+            ("—".to_owned(), Trend::Flat)
+        } else {
+            ("new".to_owned(), Trend::Up)
+        };
+    }
+
+    let delta = now - before;
+    if delta == 0 {
+        return ("—".to_owned(), Trend::Flat);
+    }
+    let trend = if delta > 0 { Trend::Up } else { Trend::Down };
+
+    if money {
+        let percent = (delta as f64 * 100.0 / before as f64).round() as i64;
+        if percent == 0 {
+            ("—".to_owned(), Trend::Flat)
+        } else {
+            (format!("{percent:+}%"), trend)
+        }
+    } else {
+        (format!("{delta:+}"), trend)
+    }
+}
+
+/// What the cards are being compared with, said once under the range title.
+///
+/// All time has no previous window, so its line says what the figures are
+/// instead of promising a comparison.
+fn comparison_caption(range: usize, shop: bool) -> &'static str {
+    if shop {
+        match range {
+            0 => "Compared with yesterday",
+            1 => "Compared with the previous 7 days",
+            2 => "Compared with the previous 30 days",
+            _ => "All recorded sales",
+        }
+    } else {
+        match range {
+            0 => "Only your sales · compared with yesterday",
+            1 => "Only your sales · compared with the previous 7 days",
+            2 => "Only your sales · compared with the previous 30 days",
+            _ => "Only your sales · all recorded",
+        }
+    }
+}
+
+/// All time has no calendar to draw, so its chart is capped and says so.
+fn chart_caption(range: usize) -> Option<&'static str> {
+    match range {
+        0..=2 => None,
+        _ => Some("The latest 30 selling days"),
+    }
 }
 
 /// The range, as the payments card states it.
@@ -1594,8 +1752,12 @@ fn export_products(state: &mut State, rows: &[Product], name: &str, dir: &Path) 
 }
 
 /// Write the sales export for the range the screen is showing.
+///
+/// The file reads the same scope as the list: a cashier who cannot see a
+/// colleague's takings on screen cannot export them either.
 fn export_sales(state: &mut State, dir: &Path) {
-    let rows = match crate::db::export_sales(&state.store, state.range) {
+    let scope = state.report_scope();
+    let rows = match crate::db::export_sales(&state.store, state.range, scope.user()) {
         Ok(rows) => rows,
         Err(err) => {
             state.file_path = None;
@@ -2298,6 +2460,8 @@ pub fn permission(index: usize) -> crate::auth::Permission {
     match index {
         // Selling and reading the books are the job. A cashier who cannot see
         // yesterday's takings cannot answer the customer holding a receipt.
+        // `ViewReports` is the scope, not the door: without it the screen still
+        // opens, showing only the cashier's own sales.
         SELL | DASHBOARD | SALES => Permission::Sell,
         PRODUCTS => Permission::ChangePrice,
         SUPPLIERS => Permission::ManageSuppliers,
@@ -3227,9 +3391,21 @@ impl Module for Sales {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let scope = state.report_scope();
+        let shop = scope.is_shop();
+        let user = scope.user().map(str::to_owned);
+        let user = user.as_deref();
+
         let mut export = false;
         ui.horizontal(|ui| {
-            components::section_title(ui, "Transactions");
+            components::section_title(
+                ui,
+                if shop {
+                    "Transactions"
+                } else {
+                    "Your transactions"
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Export CSV")
@@ -3242,12 +3418,17 @@ impl Module for Sales {
                 }
             });
         });
+        if !shop {
+            // The export reads the same scope as the list, so the caption
+            // promises the same thing about both.
+            components::caption(ui, "Only your sales · the export matches this list");
+        }
         if export {
             state.start_export(ExportKind::Sales);
         }
         file_feedback(ui, state);
 
-        let sales = crate::db::sales(&state.store, state.range, 100);
+        let sales = crate::db::sales(&state.store, state.range, 100, user);
         if sales.is_empty() {
             components::empty_state_card(
                 ui,
@@ -3690,6 +3871,47 @@ mod tests {
     #[test]
     fn a_day_is_said_with_its_weekday() {
         assert_eq!(long_date(&day("01/11", 0, 0)), "Sun 1 Nov");
+    }
+
+    #[test]
+    fn money_moves_as_a_percentage_and_counts_as_units() {
+        assert_eq!(
+            change(1_200, Some(1_000), true),
+            ("+20%".to_owned(), Trend::Up)
+        );
+        assert_eq!(
+            change(800, Some(1_000), true),
+            ("-20%".to_owned(), Trend::Down)
+        );
+        assert_eq!(change(3, Some(1), false), ("+2".to_owned(), Trend::Up));
+        assert_eq!(change(1, Some(3), false), ("-2".to_owned(), Trend::Down));
+        // A window that took nothing cannot be a percentage: the first sale in
+        // it is new, and two empty windows have nothing to say.
+        assert_eq!(change(5, Some(0), true), ("new".to_owned(), Trend::Up));
+        assert_eq!(change(0, Some(0), true), ("—".to_owned(), Trend::Flat));
+        // All time has no previous window at all.
+        assert_eq!(change(5, None, false), ("—".to_owned(), Trend::Flat));
+    }
+
+    #[test]
+    fn the_comparison_says_the_window_and_whether_it_is_the_shop() {
+        assert_eq!(comparison_caption(0, true), "Compared with yesterday");
+        assert_eq!(
+            comparison_caption(1, true),
+            "Compared with the previous 7 days"
+        );
+        assert_eq!(comparison_caption(3, true), "All recorded sales");
+        assert_eq!(
+            comparison_caption(1, false),
+            "Only your sales · compared with the previous 7 days"
+        );
+        assert_eq!(
+            comparison_caption(3, false),
+            "Only your sales · all recorded"
+        );
+        // Only all time needs to admit that its chart is capped.
+        assert_eq!(chart_caption(0), None);
+        assert_eq!(chart_caption(3), Some("The latest 30 selling days"));
     }
 
     fn product(id: i64, name: &str, barcode: Option<&str>) -> Product {

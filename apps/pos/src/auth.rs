@@ -89,7 +89,8 @@ impl Role {
             | Permission::OpenDrawer
             | Permission::EditSettings
             | Permission::ManageSuppliers
-            | Permission::ManageInventory => self >= Role::Manager,
+            | Permission::ManageInventory
+            | Permission::ViewReports => self >= Role::Manager,
             Permission::ManageUsers | Permission::ChangeCurrency => self == Role::Owner,
         }
     }
@@ -130,6 +131,13 @@ pub enum Permission {
     ManageSuppliers,
     ManageInventory,
     ChangeCurrency,
+    /// The shop's takings, rather than just your own.
+    ///
+    /// The dashboard and the transaction list are open to everyone — a cashier
+    /// has to answer the customer holding a receipt. This permission does not
+    /// open them; it widens what they show from one person's sales to all of
+    /// them.
+    ViewReports,
 }
 
 impl Permission {
@@ -149,6 +157,7 @@ impl Permission {
             Permission::ManageSuppliers => "manage suppliers",
             Permission::ManageInventory => "change stock",
             Permission::ChangeCurrency => "change the currency",
+            Permission::ViewReports => "see the shop's takings",
         }
     }
 
@@ -1206,12 +1215,21 @@ mod tests {
         // Cashiers must be able to see stock; only a manager may change it.
         assert!(!Role::Cashier.permits(Permission::ManageInventory));
         assert!(Role::Manager.permits(Permission::ManageInventory));
+        // The reports screen stays open to a cashier, scoped to their own
+        // sales; seeing the whole shop's takings is a manager's.
+        assert!(!Role::Cashier.permits(Permission::ViewReports));
+        assert!(Role::Manager.permits(Permission::ViewReports));
+        assert!(Role::Owner.permits(Permission::ViewReports));
         // Nothing above a manager's authority is ever lent out.
         assert!(!Permission::ManageUsers.approvable());
         assert!(!Permission::ChangeCurrency.approvable());
         assert!(Permission::ChangePrice.approvable());
         assert!(Permission::ManageSuppliers.approvable());
         assert!(Permission::ManageInventory.approvable());
+        assert!(
+            Permission::ViewReports.approvable(),
+            "a manager can lend the shop view for a minute"
+        );
     }
 
     #[test]

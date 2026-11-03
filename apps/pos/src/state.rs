@@ -260,6 +260,33 @@ pub struct Session {
     pub role: crate::auth::Role,
 }
 
+/// Whose takings a report screen shows.
+///
+/// The screen is not the permission: every role can open the dashboard, because
+/// a cashier has to answer "what did this receipt come to?". What the role
+/// decides is the *scope* — one person's sales, or the shop's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// The whole shop: a manager or an owner.
+    Shop,
+    /// One cashier's own sales, by account id.
+    Person(&'a str),
+}
+
+impl<'a> Scope<'a> {
+    /// The id a query narrows to, or `None` for every account's sales.
+    pub fn user(self) -> Option<&'a str> {
+        match self {
+            Scope::Shop => None,
+            Scope::Person(id) => Some(id),
+        }
+    }
+
+    pub fn is_shop(self) -> bool {
+        matches!(self, Scope::Shop)
+    }
+}
+
 /// The lock screen: the person picked, and the secret being typed.
 #[derive(Default)]
 pub struct SignIn {
@@ -961,6 +988,27 @@ impl State {
             .elevated_until
             .is_some_and(|until| until > Instant::now());
         elevated && permission.approvable() && crate::auth::Role::Manager.permits(permission)
+    }
+
+    /// Whose figures the report screens show.
+    ///
+    /// `ViewReports` is the scope, not the key: without it the dashboard and the
+    /// transaction list still open, and still answer a customer's question, but
+    /// only about the cashier's own sales. Approval lifts the scope with the
+    /// same minute-long window as any other manager override.
+    ///
+    /// The lock screen has no session, and gets an id that matches no sale
+    /// rather than a shop view: a report drawn while nobody is signed in must
+    /// not read the books.
+    pub fn report_scope(&self) -> Scope<'_> {
+        let Some(session) = &self.session else {
+            return Scope::Person("");
+        };
+        if self.permits(crate::auth::Permission::ViewReports) {
+            Scope::Shop
+        } else {
+            Scope::Person(session.user_id.as_str())
+        }
     }
 
     /// Switch module, asking for approval first when the person cannot open it.
@@ -2066,6 +2114,37 @@ mod tests {
         }
     }
 
+    /// The dashboard is open to everyone; the scope is what narrows. A cashier
+    /// reads their own sales, a manager reads the shop's, and an approval buys
+    /// a cashier the shop view for the same minute it buys anything else.
+    #[test]
+    fn a_report_is_scoped_to_the_person_unless_a_manager_is_here() {
+        let (mut state, path) = state("scope", Currency::UGX);
+        let cashier = state.session.as_ref().expect("signed in").user_id.clone();
+
+        assert_eq!(state.report_scope(), Scope::Person(cashier.as_str()));
+        assert_eq!(state.report_scope().user(), Some(cashier.as_str()));
+        assert!(!state.report_scope().is_shop());
+
+        // A manager sees the shop without asking anyone.
+        state.session.as_mut().expect("signed in").role = crate::auth::Role::Manager;
+        assert_eq!(state.report_scope(), Scope::Shop);
+        assert_eq!(state.report_scope().user(), None);
+
+        // A cashier with a manager's approval gets the same view for a minute.
+        state.session.as_mut().expect("signed in").role = crate::auth::Role::Cashier;
+        state.elevated_until = Some(Instant::now() + std::time::Duration::from_secs(60));
+        assert!(state.report_scope().is_shop());
+
+        // With nobody signed in there is no shop to report on.
+        state.elevated_until = None;
+        state.session = None;
+        assert_eq!(state.report_scope(), Scope::Person(""));
+        assert_eq!(state.report_scope().user(), Some(""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The edit field shows an amount without its symbol and the save path
     /// parses it back. If the two ever disagree, an operator opens a product,
     /// presses Save without touching anything, and the price changes.
@@ -2146,11 +2225,13 @@ mod tests {
         assert_eq!(detail.change_minor, 700);
 
         assert!(state.cart.is_empty(), "the till is ready for the next sale");
-        assert_eq!(crate::db::totals(&state.store, 3), (1, 1_300));
+        assert_eq!(crate::db::totals(&state.store, 3, None), (1, 1_300));
         // The sale carries the person, not the shop: a till with three cashiers
         // has to be able to say which of them took this money.
         assert_eq!(
-            crate::db::sales(&state.store, 3, 10)[0].cashier.as_deref(),
+            crate::db::sales(&state.store, 3, 10, None)[0]
+                .cashier
+                .as_deref(),
             Some("Test cashier")
         );
 
@@ -2191,7 +2272,7 @@ mod tests {
         assert!(payment.done.is_none(), "nothing was recorded");
         assert_eq!(payment.error.as_deref(), Some("That is USh 100 short."));
         assert_eq!(state.cart.len(), 1, "the basket is untouched");
-        assert_eq!(crate::db::totals(&state.store, 3), (0, 0));
+        assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
 
         // Correcting the field completes the sale.
         state.payment.as_mut().expect("open").tendered = "500".to_owned();
@@ -2212,7 +2293,7 @@ mod tests {
 
         assert!(state.payment.is_none());
         assert_eq!(state.cart.len(), 1);
-        assert_eq!(crate::db::totals(&state.store, 3), (0, 0));
+        assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
 
         let _ = std::fs::remove_file(path);
     }
@@ -2235,7 +2316,7 @@ mod tests {
         state.start_payment();
         state.confirm_payment();
 
-        let id = crate::db::sales(&state.store, 3, 10)[0].id;
+        let id = crate::db::sales(&state.store, 3, 10, None)[0].id;
         state.open_sale(id);
 
         let detail = state.sale_open.as_ref().expect("the receipt opened");
