@@ -104,8 +104,17 @@ and alias from `STRIDE_SCAN_STORE_PASSWORD`, `STRIDE_SCAN_KEY_ALIAS`, and
 
 **"Could not reach the till."** Check that the phone and till are on the same
 Wi-Fi, that the listener says *Listening* in Settings, and that the shop network
-does not isolate clients (guest Wi-Fi often does). A firewall on the till must
-allow the chosen port, default `47831`.
+does not isolate clients (guest Wi-Fi often does).
+
+A host firewall is the most common cause, because the till still answers on
+`127.0.0.1` while every other machine is dropped. Allow the port once, on the
+till:
+
+```sh
+sudo firewall-cmd --add-port=47831/tcp --permanent   # Fedora, RHEL, openSUSE
+sudo firewall-cmd --reload
+sudo ufw allow 47831/tcp                             # Ubuntu, Debian
+```
 
 **The QR code will not scan.** Type the address, port and code instead. The
 address is the till's LAN address, not `127.0.0.1`.

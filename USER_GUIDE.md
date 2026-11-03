@@ -704,6 +704,7 @@ internet, ever — do not port-forward it.
 | Receipt shows app name instead of shop | shop name not saved | Settings → Terminal → type → Save |
 | Backup failed | disk full, permissions, db in use | check space; enter backup after closing other instances |
 | Scanner won't pair | different Wi-Fi, or code seen on screen | same network; verify the code in Settings |
+| Phone says it cannot reach the till | the computer's firewall drops port 47831 | allow TCP 47831: `sudo firewall-cmd --add-port=47831/tcp` (Fedora) or `sudo ufw allow 47831/tcp` (Ubuntu) |
 
 ---
 

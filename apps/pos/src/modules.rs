@@ -3681,6 +3681,15 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
                 );
             });
         });
+
+        ui.add_space(SPACING.md);
+        let hint = format!(
+            "If the phone says it cannot reach the till, this computer's firewall is \
+             probably dropping port {port}. Allow it once: sudo firewall-cmd \
+             --add-port={port}/tcp on Fedora, or sudo ufw allow {port}/tcp on Ubuntu.",
+            port = config.port,
+        );
+        components::caption(ui, &hint);
     });
 }
 
