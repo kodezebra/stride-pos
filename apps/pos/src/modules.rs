@@ -2761,8 +2761,11 @@ fn stock_identity(ui: &mut egui::Ui, item: &StockItem) {
 }
 
 /// The row's right-hand cluster, added right-to-left: the count first, then the
-/// button, then the status and history. The button therefore sits immediately
-/// before the count, and the name keeps the rest of the line.
+/// button, then any warning label and history. The button therefore sits
+/// immediately before the count, and the name keeps the rest of the line.
+///
+/// "In stock" is the quiet default; only low and out rows carry a word, so the
+/// common row stays light and the exception is what stands out.
 ///
 /// Every part is a direct child. A nested vertical inside this right-to-left
 /// layout claims the whole row and leaves the name no width.
@@ -2770,12 +2773,12 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
     let palette = theme::current(ui.ctx());
     let mut action = None;
 
-    let (status, status_color) = if item.is_out() {
-        ("Out", palette.danger)
+    let status = if item.is_out() {
+        Some(("Out", palette.danger))
     } else if item.is_low() {
-        ("Low", palette.warning)
+        Some(("Low", palette.warning))
     } else {
-        ("In stock", palette.success)
+        None
     };
     let count_color = if item.is_out() {
         palette.danger
@@ -2802,7 +2805,13 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
             on_hand: item.on_hand,
         });
     }
-    components::badge(ui, status, status_color);
+    if let Some((label, color)) = status {
+        ui.label(
+            egui::RichText::new(label)
+                .size(TYPE.small)
+                .color(egui::Color32::from(color)),
+        );
+    }
     if components::icon_button(ui, history_icon(), 32.0)
         .on_hover_text("History")
         .clicked()
