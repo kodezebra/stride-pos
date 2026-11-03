@@ -199,8 +199,8 @@ pub const STARTER_CATEGORIES: &[&str] = &[
 /// Suggested names for the product form's category field: what the catalog
 /// already uses first, then the starter list. Case is ignored when
 /// de-duplicating, because "Drinks" and "drinks" are meant to be one category
-/// and must not advertise themselves as two. `current` is left out — a chip
-/// for the name already in the field is noise.
+/// and must not advertise themselves as two. `current` is left out — a
+/// suggestion for the name already in the field is noise.
 pub fn category_suggestions(categories: &[String], current: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let current = current.trim();

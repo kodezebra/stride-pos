@@ -1573,27 +1573,38 @@ impl Module for Products {
                 if components::primary_button(ui, "New product").clicked() {
                     new = true;
                 }
-                if ui
-                    .button("Import CSV")
-                    .on_hover_text("Read name, category, price and barcode from a CSV file")
-                    .clicked()
-                {
-                    import = true;
-                }
-                if ui
-                    .button("Export all")
-                    .on_hover_text("Save every product with the columns the import reads")
-                    .clicked()
-                {
-                    export_all = true;
-                }
-                if ui
-                    .button("Export CSV")
-                    .on_hover_text("Save the products on screen with the columns the import reads")
-                    .clicked()
-                {
-                    export_visible = true;
-                }
+                // Import and the two exports live behind one menu: they are
+                // occasional setup actions, and three buttons beside the
+                // catalog's only everyday action crowded the header.
+                ui.menu_button("More", |ui| {
+                    ui.set_min_width(190.0);
+                    if ui
+                        .button("Import CSV")
+                        .on_hover_text("Read name, category, price and barcode from a CSV file")
+                        .clicked()
+                    {
+                        import = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button("Export CSV")
+                        .on_hover_text(
+                            "Save the products on screen with the columns the import reads",
+                        )
+                        .clicked()
+                    {
+                        export_visible = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button("Export all")
+                        .on_hover_text("Save every product with the columns the import reads")
+                        .clicked()
+                    {
+                        export_all = true;
+                        ui.close();
+                    }
+                });
             });
         });
         if new {
@@ -2024,8 +2035,8 @@ pub(crate) fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
 pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
     // Suggested category names, computed before the form is borrowed for
-    // editing: the list comes from the catalog read-only, the chips are filled
-    // into the draft being edited.
+    // editing: the list comes from the catalog read-only and is offered from
+    // the dropdown into the draft being edited.
     let suggestions: Vec<String> = match state.product_editor.as_ref() {
         Some(draft) => crate::state::category_suggestions(&state.categories, &draft.category),
         None => Vec::new(),
@@ -2071,28 +2082,30 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             ui.vertical(|ui| {
                 components::field_label(ui, "Category");
                 ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.category, "General", 200.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACING.xs;
+                    text_field(ui, &mut draft.category, "General", 148.0);
+                    // Existing names in a dropdown instead of a wall of chips:
+                    // the suggestion list stays one click away without pushing
+                    // the barcode field off the modal. The field stays editable,
+                    // because a shop must still be able to name a new shelf.
+                    egui::ComboBox::from_id_salt("pos_product_category")
+                        .width(220.0)
+                        .selected_text("Pick…")
+                        .show_ui(ui, |ui| {
+                            if suggestions.is_empty() {
+                                components::caption(ui, "No other categories yet.");
+                            }
+                            for name in &suggestions {
+                                if ui.button(name).clicked() {
+                                    draft.category = name.clone();
+                                    ui.close();
+                                }
+                            }
+                        });
+                });
             });
         });
-
-        // Category names the till knows, tapped instead of typed: the
-        // catalog's own first, then a starter set for a shop that has not
-        // named its shelves yet. Typos are why this exists — "Drinks" and
-        // "drinks" must not become two filters because they were typed twice.
-        if !suggestions.is_empty() {
-            ui.add_space(SPACING.sm);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-                for name in &suggestions {
-                    if name.eq_ignore_ascii_case(draft.category.trim()) {
-                        continue;
-                    }
-                    if ui.add(egui::Button::new(name.clone()).small()).clicked() {
-                        draft.category = name.clone();
-                    }
-                }
-            });
-        }
 
         ui.add_space(SPACING.md);
         components::field_label(ui, "Barcode (optional)");
@@ -2925,11 +2938,11 @@ fn stock_identity(ui: &mut egui::Ui, item: &StockItem) {
 }
 
 /// The row's right-hand cluster, added right-to-left: the count first, then the
-/// button, then any warning label and history. The button therefore sits
-/// immediately before the count, and the name keeps the rest of the line.
+/// button, then the history. The button therefore sits immediately before the
+/// count, and the name keeps the rest of the line.
 ///
-/// "In stock" is the quiet default; only low and out rows carry a word, so the
-/// common row stays light and the exception is what stands out.
+/// The count is a badge, green while the shelf is healthy and red once it is
+/// low or empty, so the exception reads from the colour before the number.
 ///
 /// Every part is a direct child. A nested vertical inside this right-to-left
 /// layout claims the whole row and leaves the name no width.
@@ -2937,26 +2950,23 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
     let palette = theme::current(ui.ctx());
     let mut action = None;
 
-    let status = if item.is_out() {
-        Some(("Out", palette.danger))
+    let (color, hint) = if item.is_out() {
+        (palette.danger, "Out of stock")
     } else if item.is_low() {
-        Some(("Low", palette.warning))
+        (palette.danger, "Low stock")
     } else {
-        None
-    };
-    let count_color = if item.is_out() {
-        palette.danger
-    } else if item.is_low() {
-        palette.warning
-    } else {
-        palette.text
+        (palette.success, "In stock")
     };
 
-    ui.label(
-        components::numeric(item.on_hand.to_string())
-            .size(TYPE.body)
-            .color(egui::Color32::from(count_color)),
-    );
+    // Pin the scope to one control row: a badge frame in a right-to-left
+    // layout otherwise inherits the row's full height.
+    let badge = ui
+        .scope(|ui| {
+            ui.set_height(ui.spacing().interact_size.y);
+            components::badge(ui, &item.on_hand.to_string(), color)
+        })
+        .response;
+    badge.on_hover_text(hint);
     if can_manage
         && ui
             .button("Move stock")
@@ -2968,13 +2978,6 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
             name: item.name.clone(),
             on_hand: item.on_hand,
         });
-    }
-    if let Some((label, color)) = status {
-        ui.label(
-            egui::RichText::new(label)
-                .size(TYPE.small)
-                .color(egui::Color32::from(color)),
-        );
     }
     if components::icon_button(ui, history_icon(), 32.0)
         .on_hover_text("History")
