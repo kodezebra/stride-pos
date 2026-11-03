@@ -1,0 +1,11 @@
+category_code,category_name,product_name,unit_of_measure,cost_price_ugx,retail_price_ugx,is_weighted,barcode
+PAN-DRY-TEA,Tea & Coffee,Africa Tea Leaves 100g,PCS,2500,3000,false,6161101234567
+PAN-DRY-TEA,Tea & Coffee,Africa Tea Leaves 250g,PCS,6000,7000,false,6161101234574
+PAN-DRY-SPY,Spices & Seasonings,Royco Mchuzi Mix Beef 70g,PCS,1800,2200,false,6161109876543
+PAN-DRY-SPY,Spices & Seasonings,Pilau Masala Powder 50g,PCS,1500,2000,false,6161109876550
+PAN-DRY-SPY,Spices & Seasonings,Loose Curry Powder (Bulk),KG,12000,16000,true,0200101000008
+PAN-DRY-GRA,Grains & Flours,Unga Mill Maize Flour 1kg,PCS,3800,4500,false,6161104443322
+PAN-DRY-GRA,Grains & Flours,Super Rice (Kaiso) 1kg,PCS,4500,5500,false,6161104443339
+HH-CLN-SOAP,Laundry & Soaps,White Star Bar Soap 1kg,PCS,4200,5000,false,6161108889911
+HH-CLN-SOAP,Laundry & Soaps,Omo Multiaction Detergent 500g,PCS,6500,7500,false,6161108889928
+BEV-SFT-WTR,Soft Drinks & Water,Rwenzori Mineral Water 500ml,PCS,1200,1500,false,6161103332211

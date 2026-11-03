@@ -436,14 +436,15 @@ this — it is how the drawer physically balances.
 2. The phone and the till must be on the **same Wi-Fi**. Do not port-forward the
    listener or put the till on an untrusted network.
 3. On the phone, open the **Stride Scan** app; point its camera at the QR code in
-   Settings → Scanner. Or type the **Address**, **Port** and **Token** shown
-   underneath (32 lowercase hex characters).
+   Settings → Scanner. Or type the **Address**, **Port** and **Code** shown
+   underneath (ten characters, e.g. `7QK4M-2X9AB`; the dash is optional and
+   lower case is accepted).
 4. A scan arrives in Sell exactly like a USB scanner. In the phone app you can
    choose **Sell** (add to cart) or **Add** (open the new-product form with the
    barcode filled in — needs manager/owner).
 5. The listener is off until you turn it on, and scans are ignored while the till
    is locked or any dialog is open.
-6. The token is shown on that Settings screen — anyone who can see it can pair a
+6. The code is shown on that Settings screen — anyone who can see it can pair a
    phone. Treat the screen accordingly.
 
 ### 6.16 Manager approving something on the spot
@@ -679,7 +680,7 @@ in the till's currency. Blank/invalid rows skipped, never half-imported.
 ### 9.5 The scanner protocol (for the technically curious)
 
 LAN-only HTTP, off by default, token required on every request
-(`X-Till-Token: <32 lowercase hex>`), 512-byte body cap, barcode ≤ 128 printable
+(`X-Till-Token: <10-character pairing code>`), 512-byte body cap, barcode ≤ 128 printable
 chars, unknown JSON fields rejected. `POST /v1/scan` with
 `{"barcode":"…","action":"sell"|"add"}`; `POST /v1/ping` for reachability. No
 internet, ever — do not port-forward it.
@@ -702,7 +703,7 @@ internet, ever — do not port-forward it.
 | Export greyed / nothing to export | Sales range empty, or nothing visible | widen the range; check search/category filter |
 | Receipt shows app name instead of shop | shop name not saved | Settings → Terminal → type → Save |
 | Backup failed | disk full, permissions, db in use | check space; enter backup after closing other instances |
-| Scanner won't pair | different Wi-Fi, or token seen on screen | same network; verify token in Settings |
+| Scanner won't pair | different Wi-Fi, or code seen on screen | same network; verify the code in Settings |
 
 ---
 

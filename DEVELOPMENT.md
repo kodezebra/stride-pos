@@ -107,7 +107,7 @@ The protocol is deliberately small:
 
 ```
 POST /v1/scan
-X-Till-Token: <32 lowercase hex characters>
+X-Till-Token: <10-character pairing code>
 {"barcode":"6001234567890","action":"sell"}
 ```
 
@@ -123,9 +123,13 @@ suppresses duplicate reads of the same barcode for 1.5 seconds.
 
 Pairing is the QR code in Settings, painted from
 `stridepos://pair?host=<host>&port=<port>&token=<token>`, with the address, port
-and token shown underneath for manual entry. The token is generated on first
-launch as 128 bits of OS randomness and kept in `settings.json`; the QR is fixed
-black-on-white so it scans in either theme.
+and code shown underneath for manual entry. The code is ten characters from
+Crockford's base 32, drawn from the OS random source on first launch and kept in
+`settings.json`; the QR is fixed black-on-white so it scans in either theme.
+
+A pairing code is compared after normalising case, dashes and spaces, so
+`7qk4-m2x9ab` and `7QK4M2X9AB` are the same code; ten characters is 50 bits,
+which is enough that guessing one over the shop Wi-Fi is not the weak point.
 
 This is a LAN feature, not a cloud service. It binds to the local network,
 requires the token on every request, validates the payload before it reaches the
@@ -169,8 +173,10 @@ Android lint and debug build. The release workflow
 (`.github/workflows/release.yml`) runs on a `pos-v*` tag, refuses a tag that is
 not an ancestor of `main`, builds the Linux desktop tarball and the release APK,
 checks the APK signature, and attaches both plus `SHA256SUMS.txt` to the GitHub
-release. Optional signing secrets are
-`STRIDE_SCAN_KEYSTORE_BASE64`, `STRIDE_SCAN_STORE_PASSWORD`,
+release. Both workflows need `STRIDE_LIBS_TOKEN`, a read-only token for the
+private `stride-libs` repository that `Cargo.toml` pins; without it the build
+stops with a clear message instead of a confusing clone error. Optional signing
+secrets are `STRIDE_SCAN_KEYSTORE_BASE64`, `STRIDE_SCAN_STORE_PASSWORD`,
 `STRIDE_SCAN_KEY_ALIAS`, and `STRIDE_SCAN_KEY_PASSWORD`; without them the APK is
 signed with the debug key and is still installable by sideloading.
 

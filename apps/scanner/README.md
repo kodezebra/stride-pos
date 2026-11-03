@@ -11,7 +11,8 @@ The main till is in [`../pos`](../pos). Read the top-level
 1. Open **Settings → Scanner** on the till, turn the listener on, and leave the
    pairing card visible.
 2. On the phone, scan the QR code. If the camera cannot read it, type the
-   address, port and token shown under the code.
+   address, port and code shown under it (ten characters, e.g. `7QK4M-2X9AB`;
+   dashes, spaces and lower case are all accepted).
 3. Choose what a scan should do:
    - **Sell — add to cart** sends `action: "sell"`, and the item lands in the
      till's cart.
@@ -89,7 +90,7 @@ and alias from `STRIDE_SCAN_STORE_PASSWORD`, `STRIDE_SCAN_KEY_ALIAS`, and
   tool: there is no certificate authority on a shop network, and the traffic
   never leaves it.
 - Do not expose the till's port to the internet, and do not use the app over a
-  public Wi-Fi network. The token is visible on the till's Settings screen and in
+  public Wi-Fi network. The pairing code is visible on the till's Settings screen and in
   the QR code.
 - A scan is dropped if the till is locked, setting up its currency, taking a
   payment, asking for approval, or showing any editor or modal. The phone may
@@ -106,7 +107,7 @@ Wi-Fi, that the listener says *Listening* in Settings, and that the shop network
 does not isolate clients (guest Wi-Fi often does). A firewall on the till must
 allow the chosen port, default `47831`.
 
-**The QR code will not scan.** Type the address, port and token instead. The
+**The QR code will not scan.** Type the address, port and code instead. The
 address is the till's LAN address, not `127.0.0.1`.
 
 **The scan reaches the till but nothing happens.** Look at the till: it may be

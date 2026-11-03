@@ -28,9 +28,15 @@ pub use protocol::ScanAction;
 /// The port the companion app expects until the till is told otherwise.
 pub const DEFAULT_PORT: u16 = 47_831;
 
-/// 128 bits of OS randomness. A till is not a bank, but a token that can be
-/// guessed would let anyone on the café Wi-Fi put items in the basket.
-const TOKEN_BYTES: usize = 16;
+/// The characters a pairing code can contain: Crockford's base 32, which leaves
+/// out I, L, O and U. A code is read off a screen and typed on a phone, so the
+/// letters that look like 1 and 0 are simply not in it.
+const TOKEN_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Ten characters is 50 bits of OS randomness. That is far more than an attacker
+/// on the shop Wi-Fi can work through, and few enough to type without reading it
+/// out twice.
+const TOKEN_LEN: usize = 10;
 
 /// The terminal's side of the phone scanner, stored inside `settings.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +45,9 @@ pub struct ScanConfig {
     /// The listener does not bind anything until this is true.
     pub enabled: bool,
     pub port: u16,
-    /// Lowercase hex. Empty on a settings file written before this feature
-    /// existed; [`ScanConfig::ensure_token`] fills it on first launch.
+    /// Upper-case, canonical (see [`normalize_token`]). Empty on a settings file
+    /// written before this feature existed; [`ScanConfig::ensure_token`] fills it
+    /// on first launch.
     pub token: String,
 }
 
@@ -219,23 +226,57 @@ pub fn local_ip() -> Option<IpAddr> {
     })
 }
 
-/// A fresh pairing token: 32 lowercase hex characters.
+/// A fresh pairing token: ten characters from [`TOKEN_ALPHABET`].
 pub fn new_token() -> String {
-    let mut bytes = [0u8; TOKEN_BYTES];
+    let mut bytes = [0u8; TOKEN_LEN];
     if getrandom::fill(&mut bytes).is_err() {
         // `getrandom` failing means the OS has no entropy. Refusing to start the
         // listener is the safe response, so an empty token is invalid by design.
         return String::new();
     }
-    let mut token = String::with_capacity(TOKEN_BYTES * 2);
+    let mut token = String::with_capacity(TOKEN_LEN);
     for byte in bytes {
-        let _ = write!(token, "{byte:02x}");
+        // 256 is a multiple of 32, so the low five bits are uniform.
+        token.push(TOKEN_ALPHABET[(byte & 31) as usize] as char);
     }
     token
 }
 
+/// Read a pairing code the way a person types it, and return the canonical form.
+///
+/// Dashes and spaces are separators, not secrets: `7qk4-m2x9ab` and `7QK4M2X9AB`
+/// are the same code. `I`/`L` and `O` are folded into `1` and `0`, because those
+/// are the letters the alphabet deliberately omits.
+pub fn normalize_token(raw: &str) -> Option<String> {
+    let mut token = String::with_capacity(TOKEN_LEN);
+    for byte in raw.trim().bytes() {
+        if byte == b'-' || byte == b' ' {
+            continue;
+        }
+        let byte = match byte.to_ascii_uppercase() {
+            b'I' | b'L' => b'1',
+            b'O' => b'0',
+            other => other,
+        };
+        if !TOKEN_ALPHABET.contains(&byte) {
+            return None;
+        }
+        token.push(byte as char);
+    }
+    (token.len() == TOKEN_LEN).then_some(token)
+}
+
+/// The code as Settings shows it: two groups of five, which is what makes a
+/// ten-character code easy to read aloud and type.
+pub fn spaced_token(token: &str) -> String {
+    match token.split_at_checked(TOKEN_LEN / 2) {
+        Some((left, right)) => format!("{left}-{right}"),
+        None => token.to_owned(),
+    }
+}
+
 fn valid_token(token: &str) -> bool {
-    token.len() == TOKEN_BYTES * 2 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    normalize_token(token).is_some_and(|normal| normal == token)
 }
 
 fn display_host(host: &str) -> String {
@@ -263,11 +304,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_token_is_32_lowercase_hex_characters() {
+    fn a_new_token_is_ten_characters_that_are_hard_to_misread() {
         let token = new_token();
-        assert_eq!(token.len(), 32);
-        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(!token.bytes().any(|byte| byte.is_ascii_uppercase()));
+        assert_eq!(token.len(), TOKEN_LEN);
+        assert!(token.bytes().all(|byte| TOKEN_ALPHABET.contains(&byte)));
+        assert!(!token.bytes().any(|byte| b"ILOU".contains(&byte)));
+    }
+
+    #[test]
+    fn a_token_can_be_typed_with_dashes_or_in_lower_case() {
+        let canonical = "7QK4M2X9AB";
+        for typed in ["7QK4M2X9AB", "7qk4m2x9ab", "7qk4-m2x9ab", " 7QK4 M2X9AB "] {
+            assert_eq!(
+                normalize_token(typed).as_deref(),
+                Some(canonical),
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn letters_that_look_like_digits_are_folded_not_rejected() {
+        assert_eq!(normalize_token("7OK4M2X9AB").as_deref(), Some("70K4M2X9AB"));
+        assert_eq!(normalize_token("7IK4M2X9AB").as_deref(), Some("71K4M2X9AB"));
+    }
+
+    #[test]
+    fn a_token_that_is_the_wrong_length_or_has_stray_characters_is_refused() {
+        for typed in ["7QK4M2X9A", "7QK4M2X9ABC", "", "7QK4M2X9A!", "7QK4M2X9AU"] {
+            assert!(normalize_token(typed).is_none(), "{typed}");
+        }
+    }
+
+    #[test]
+    fn the_displayed_code_is_two_groups_of_five() {
+        assert_eq!(spaced_token("7QK4M2X9AB"), "7QK4M-2X9AB");
+        assert_eq!(spaced_token(""), "");
     }
 
     #[test]
@@ -287,11 +359,11 @@ mod tests {
         let config = ScanConfig {
             enabled: true,
             port: 47_831,
-            token: "0123456789abcdef0123456789abcdef".to_owned(),
+            token: "7QK4M2X9AB".to_owned(),
         };
         assert_eq!(
             config.pair_uri("192.168.1.20"),
-            "stridepos://pair?host=192.168.1.20&port=47831&token=0123456789abcdef0123456789abcdef"
+            "stridepos://pair?host=192.168.1.20&port=47831&token=7QK4M2X9AB"
         );
         assert_eq!(config.endpoint("192.168.1.20"), "http://192.168.1.20:47831");
     }

@@ -7,8 +7,8 @@
     <string name="host">Till address</string>
     <string name="host_hint">192.168.1.20</string>
     <string name="port">Port</string>
-    <string name="token">Pairing token</string>
-    <string name="token_hint">32 letters and numbers</string>
+    <string name="token">Pairing code</string>
+    <string name="token_hint">7QK4M-2X9AB</string>
     <string name="scan_qr">Scan pairing code</string>
     <string name="connect">Connect</string>
     <string name="cancel">Cancel</string>
@@ -28,7 +28,7 @@
     <string name="pair_bad_qr">That QR code is not a Stride pairing code. Try again.</string>
     <string name="error_host">Enter the till\'s address, for example 192.168.1.20.</string>
     <string name="error_port">The port must be a number between 1 and 65535.</string>
-    <string name="error_token">The token is the 32-character code shown on the till.</string>
+    <string name="error_token">Enter the ten-character code shown on the till. The dash is optional.</string>
     <string name="error_connect">Could not reach the till.</string>
     <string name="error_send">Could not send the scan.</string>
     <string name="error_camera">Could not open the camera.</string>

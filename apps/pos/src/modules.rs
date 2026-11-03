@@ -3667,16 +3667,17 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
             ui.vertical(|ui| {
                 info_row(ui, "Address", &endpoint);
                 info_row(ui, "Port", &config.port.to_string());
-                info_row(ui, "Token", &config.token);
+                let shown_token = crate::scan::spaced_token(&config.token);
+                info_row(ui, "Code", &shown_token);
                 ui.add_space(SPACING.sm);
-                if ui.button("Copy token").clicked() {
-                    ui.ctx().copy_text(config.token.clone());
+                if ui.button("Copy code").clicked() {
+                    ui.ctx().copy_text(shown_token);
                 }
                 ui.add_space(SPACING.xs);
                 components::caption(
                     ui,
-                    "If the camera cannot read the code, type the address, port and token \
-                     into the app.",
+                    "If the camera cannot read the code, type the address, port and this \
+                     ten-character code into the app.",
                 );
             });
         });

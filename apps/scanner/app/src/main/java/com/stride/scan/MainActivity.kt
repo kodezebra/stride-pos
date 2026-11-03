@@ -261,7 +261,6 @@ class MainActivity : ComponentActivity() {
             .removePrefix("https://")
             .trimEnd('/')
         val port = portInput.text.toString().trim().toIntOrNull()
-        val token = tokenInput.text.toString().trim().lowercase()
 
         when {
             host.isEmpty() || host.any { it.isWhitespace() } -> {
@@ -272,14 +271,16 @@ class MainActivity : ComponentActivity() {
                 setPairError(getString(R.string.error_port))
                 return
             }
-            !Pairing.validToken(token) -> {
-                setPairError(getString(R.string.error_token))
-                return
-            }
+        }
+
+        val token = Pairing.normalize(tokenInput.text.toString())
+        if (token == null) {
+            setPairError(getString(R.string.error_token))
+            return
         }
 
         hostInput.setText(host)
-        tokenInput.setText(token)
+        tokenInput.setText(Pairing.display(token))
         testAndSave(Pairing(host, port, token))
     }
 
@@ -414,7 +415,7 @@ class MainActivity : ComponentActivity() {
     private fun fillPairing(pairing: Pairing) {
         hostInput.setText(pairing.host)
         portInput.setText(pairing.port.toString())
-        tokenInput.setText(pairing.token)
+        tokenInput.setText(Pairing.display(pairing.token))
     }
 
     private fun setPairMessage(message: String, error: Boolean) {

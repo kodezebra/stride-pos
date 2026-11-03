@@ -245,7 +245,8 @@
                     android:layout_height="wrap_content"
                     android:fontFamily="monospace"
                     android:hint="@string/token_hint"
-                    android:inputType="textNoSuggestions"
+                    android:inputType="textCapCharacters|textNoSuggestions"
+                    android:maxLength="11"
                     android:maxLines="1"
                     android:textColor="@color/stride_ink"
                     android:textColorHint="@color/stride_muted" />

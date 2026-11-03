@@ -173,7 +173,16 @@ fn authorized(request: &Request, expected: &str) -> bool {
 
 /// Compare without returning early. The token never leaves the LAN, but a
 /// length-independent comparison costs nothing and removes the obvious oracle.
+///
+/// The header may carry the code the way a person would type it; the comparison
+/// is always between two canonical tokens.
 fn token_matches(expected: &str, supplied: &str) -> bool {
+    let (Some(expected), Some(supplied)) = (
+        super::normalize_token(expected),
+        super::normalize_token(supplied),
+    ) else {
+        return false;
+    };
     let expected = expected.as_bytes();
     let supplied = supplied.as_bytes();
     if expected.len() != supplied.len() {
@@ -209,7 +218,7 @@ mod tests {
     use crate::scan::ScanAction;
 
     fn start() -> (Listener, Receiver<ScanEvent>, u16, String) {
-        let token = "0123456789abcdef0123456789abcdef".to_owned();
+        let token = "7QK4M2X9AB".to_owned();
         let (tx, rx) = mpsc::channel();
         let listener = Listener::start(0, token.clone(), tx).unwrap();
         let port = listener.port();
@@ -269,10 +278,18 @@ mod tests {
             port,
             "POST",
             "/v1/scan",
-            Some("ffffffffffffffffffffffffffffffff"),
+            Some("7QK4M2X9ZZ"),
             r#"{"barcode":"4006381333931"}"#,
         );
         assert_eq!(status, 401);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_token_may_arrive_lower_case_or_with_the_display_dash() {
+        let (_listener, rx, port, _token) = start();
+        let (status, _) = request(port, "POST", "/v1/ping", Some("7qk4-m2x9ab"), "");
+        assert_eq!(status, 200);
         assert!(rx.try_recv().is_err());
     }
 
@@ -321,10 +338,11 @@ mod tests {
 
     #[test]
     fn token_comparison_needs_the_exact_value() {
-        assert!(token_matches("abcdef", "abcdef"));
-        assert!(!token_matches("abcdef", "abcdeg"));
-        assert!(!token_matches("abcdef", "abcde"));
-        assert!(!token_matches("abcdef", "abcdef "));
+        assert!(token_matches("7QK4M2X9AB", "7QK4M2X9AB"));
+        assert!(token_matches("7QK4M2X9AB", "7qk4-m2x9ab"));
+        assert!(!token_matches("7QK4M2X9AB", "7QK4M2X9AC"));
+        assert!(!token_matches("7QK4M2X9AB", "7QK4M2X9A"));
+        assert!(!token_matches("7QK4M2X9AB", ""));
     }
 
     #[test]
