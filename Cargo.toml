@@ -50,6 +50,12 @@ uuid = { version = "1.29.0", features = ["v7"] }
 # through `uuid`; named here because `auth` uses it directly, and a salt from
 # anywhere but the OS is not a salt.
 getrandom = "0.3.4"
+# The till's LAN barcode listener. `tiny_http` is deliberately small: one
+# thread, a handful of JSON requests, no async runtime in a desktop app.
+tiny_http = "0.12.0"
+# Pairing codes are drawn as QR codes in Settings. The default features pull in
+# image encoders this app never uses; the modules are all we need.
+qrcode = { version = "0.14.1", default-features = false }
 # `default-features = false` on purpose: eframe's defaults switched from glow to
 # wgpu in 0.36, so relying on them would silently swap the rendering backend.
 # `accesskit` is also left off: egui-winit 0.36 needs accesskit 0.24, which is

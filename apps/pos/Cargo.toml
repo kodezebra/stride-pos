@@ -16,6 +16,9 @@ storage.workspace = true
 ui-kit = { workspace = true, features = ["widgets", "icons"] }
 ui-shell.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+qrcode.workspace = true
+tiny_http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authorize the shared libraries
+        env:
+          STRIDE_LIBS_TOKEN: ${{ secrets.STRIDE_LIBS_TOKEN }}
+        run: |
+          if [ -z "$STRIDE_LIBS_TOKEN" ]; then
+            echo "::error::STRIDE_LIBS_TOKEN is not set; CI cannot read the private stride-libs repository."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${STRIDE_LIBS_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  android:
+    name: Android (debug APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install SDK platform and build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        working-directory: apps/scanner
+        run: ./gradlew --no-daemon :app:lintDebug :app:assembleDebug
