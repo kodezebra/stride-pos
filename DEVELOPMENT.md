@@ -196,9 +196,8 @@ Android lint and debug build. The release workflow
 (`.github/workflows/release.yml`) runs on a `pos-v*` tag, refuses a tag that is
 not an ancestor of `main`, builds the Linux desktop tarball and the release APK,
 checks the APK signature, and attaches both plus `SHA256SUMS.txt` to the GitHub
-release. Both workflows need `STRIDE_LIBS_TOKEN`, a read-only token for the
-private `stride-libs` repository that `Cargo.toml` pins; without it the build
-stops with a clear message instead of a confusing clone error. Optional signing
+release. `stride-libs` is public, so both workflows clone the revision
+`Cargo.toml` pins without any credential. Optional signing
 secrets are `STRIDE_SCAN_KEYSTORE_BASE64`, `STRIDE_SCAN_STORE_PASSWORD`,
 `STRIDE_SCAN_KEY_ALIAS`, and `STRIDE_SCAN_KEY_PASSWORD`; without them the APK is
 signed with the debug key and is still installable by sideloading.

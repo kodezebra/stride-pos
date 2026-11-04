@@ -31,15 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Authorize the shared libraries
-        env:
-          STRIDE_LIBS_TOKEN: ${{ secrets.STRIDE_LIBS_TOKEN }}
-        run: |
-          if [ -z "$STRIDE_LIBS_TOKEN" ]; then
-            echo "::error::STRIDE_LIBS_TOKEN is not set; CI cannot read the private stride-libs repository."
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${STRIDE_LIBS_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - uses: Swatinem/rust-cache@v2
 
