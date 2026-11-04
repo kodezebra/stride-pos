@@ -52,3 +52,18 @@ jobs:
       - name: Build
         working-directory: apps/scanner
         run: ./gradlew --no-daemon :app:lintDebug :app:assembleDebug
+
+      # Gradle echoes only the first lint failure, so a red run hides every
+      # other error behind "Lint found N errors ... First failure:". The text
+      # report is written before the task aborts, so show all of it.
+      - name: Lint report
+        if: failure()
+        working-directory: apps/scanner
+        run: |
+          report=app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt
+          if [ -f "$report" ]; then
+            cat "$report"
+          else
+            echo "No lint text report was produced."
+            find app/build -name 'lint-results-*' -print 2>/dev/null || true
+          fi

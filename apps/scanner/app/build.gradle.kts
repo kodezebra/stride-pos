@@ -80,6 +80,12 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.8.1")
 
+    // ML Kit pulls in play-services-basement, which drags fragment 1.1.0 along.
+    // registerForActivityResult() needs fragment 1.3.0 or newer (lint fails the
+    // build otherwise), so the version is pinned here instead of being left to
+    // a 2019 transitive.
+    implementation("androidx.fragment:fragment:1.7.1")
+
     // CameraX preview and analysis. The version is pinned: a phone app that
     // builds differently every day is not something a shop can support.
     implementation("androidx.camera:camera-core:1.3.3")
