@@ -87,10 +87,17 @@ pub fn footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 /// The same right alignment without the leading space, for a confirmation that
 /// lives inside a settings card rather than a dialog.
 pub fn end(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = SPACING.sm;
-        add(ui);
-    });
+    // `with_layout` would take every pixel left in the parent, and a footer
+    // that claims the rest of a dialog pushes the thing being paid for out of
+    // view. Give the row exactly one action's height instead.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), MAIN),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            add(ui);
+        },
+    );
 }
 
 fn text_button(ui: &mut egui::Ui, label: &str, height: f32, quiet: bool) -> egui::Response {
@@ -112,4 +119,42 @@ fn text_button(ui: &mut egui::Ui, label: &str, height: f32, quiet: bool) -> egui
         button = button.frame(false);
     }
     ui.add(button)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_footer_takes_one_action_of_height_not_the_rest_of_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut consumed = 0.0;
+        let mut row_spacing = 0.0;
+
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let before = ui.cursor().top();
+                row_spacing = ui.spacing().item_spacing.y;
+                footer(ui, |ui| {
+                    let _ = ui.add(egui::Button::new("Done").min_size(egui::vec2(0.0, MAIN)));
+                });
+                consumed = ui.cursor().top() - before;
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        // The parent adds one row gap after the footer; anything more means
+        // the footer itself grew to fill the dialog.
+        assert!(
+            consumed <= SPACING.md + MAIN + row_spacing + 1.0,
+            "a footer consumed {consumed} px of a 600 px dialog"
+        );
+    }
 }
