@@ -10,7 +10,7 @@
 //!
 //! | Key         | Action                    |
 //! |-------------|---------------------------|
-//! | `F1`..`F7`  | Switch module             |
+//! | `F1`..`F7`  | Switch to a visible module |
 //! | `F8`        | Reserved: purchase orders |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
@@ -27,6 +27,7 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions::{self, Command, Palette, RailItem, Sidebar, size};
 
+use crate::auth::Role;
 use crate::currencies;
 use crate::modules::{self, Module};
 use crate::prefs::Prefs;
@@ -35,10 +36,11 @@ use crate::state::State;
 pub struct PosShell {
     state: State,
     modules: Vec<Box<dyn Module>>,
-    /// Built once from `modules` so the rail and the tooltips cannot drift from
-    /// the hotkey router: both read the same `Module` methods.
-    rail: Vec<RailItem>,
     commands: Vec<Command<State>>,
+    /// The role the command list was built for. The rail is derived every
+    /// frame, but the palette owns boxed closures and is rebuilt only when the
+    /// signed-in person changes.
+    commands_role: Option<Role>,
     palette: Palette,
     prefs_path: PathBuf,
     /// The phone scanner's worker. Owned by the frame, not by Settings: the
@@ -51,21 +53,11 @@ pub struct PosShell {
 
 impl PosShell {
     pub fn new(state: State, prefs_path: PathBuf) -> Self {
-        let modules = modules::all();
-        let rail = modules
-            .iter()
-            .map(|module| RailItem {
-                icon: module.icon(),
-                label: module.title(),
-                hotkey: module.hotkey().name(),
-            })
-            .collect();
-
         Self {
             state,
-            modules,
-            rail,
-            commands: crate::commands::all(),
+            modules: modules::all(),
+            commands: crate::commands::all(Role::Cashier),
+            commands_role: Some(Role::Cashier),
             palette: Palette::default(),
             prefs_path,
             scan: crate::scan::Service::new(),
@@ -129,6 +121,10 @@ impl PosShell {
             return;
         }
 
+        // The palette and hotkey router are role-scoped. Rebuild them at the
+        // first frame after a new person signs in, not on every frame.
+        self.sync_role();
+
         // First run is a single question: nothing behind the modal is reachable,
         // so module hotkeys and the palette stay off until it is answered.
         let setup = self.state.needs_currency;
@@ -172,6 +168,24 @@ impl PosShell {
         // And the one flow that lends a manager's authority to a cashier.
         crate::auth::override_modal(ui.ctx(), &mut self.state);
         self.persist();
+    }
+
+    /// The role whose navigation the frame should show. Locked means no
+    /// session, and the most restrictive rail is the safe default.
+    fn current_role(&self) -> Role {
+        self.state
+            .session
+            .as_ref()
+            .map(|session| session.role)
+            .unwrap_or(Role::Cashier)
+    }
+
+    fn sync_role(&mut self) {
+        let role = self.current_role();
+        if self.commands_role != Some(role) {
+            self.commands = crate::commands::all(role);
+            self.commands_role = Some(role);
+        }
     }
 
     /// The currency chooser: required on first run, optional from Settings while
@@ -246,9 +260,13 @@ impl PosShell {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let mut jump = None;
+        let order = modules::rail_order(self.current_role());
         ctx.input(|input| {
-            for (index, module) in self.modules.iter().enumerate() {
-                if input.key_pressed(module.hotkey()) {
+            // Walk the visible rail, not the whole module table: an F-key for a
+            // destination this role cannot use should do nothing, not open a
+            // manager prompt from a key the cashier pressed by accident.
+            for &index in order {
+                if input.key_pressed(self.modules[index].hotkey()) {
                     jump = Some(index);
                 }
             }
@@ -303,20 +321,38 @@ impl PosShell {
 
     fn draw_frame(&mut self, ui: &mut egui::Ui) {
         // Borrow the fields separately: the closures below need `state` mutably
-        // while the frame reads `modules` and `rail`.
-        let Self {
-            state,
-            modules,
-            rail,
-            ..
-        } = self;
+        // while the frame reads `modules`.
+        let Self { state, modules, .. } = self;
 
         let active = state.module;
+        let role = state
+            .session
+            .as_ref()
+            .map(|session| session.role)
+            .unwrap_or(Role::Cashier);
+        let order = modules::rail_order(role);
+        let rail: Vec<RailItem> = order
+            .iter()
+            .map(|&index| {
+                let module = &modules[index];
+                RailItem {
+                    icon: module.icon(),
+                    label: module.title(),
+                    hotkey: module.hotkey().name(),
+                }
+            })
+            .collect();
+        let selected = order
+            .iter()
+            .position(|&index| index == active)
+            .unwrap_or(usize::MAX);
 
         regions::status(ui, |ui| status_bar(ui, state));
 
-        if let Some(next) = regions::rail(ui, rail, active) {
-            modules::open(state, next);
+        // The rail's index is the visible row, not the module index. The order
+        // is role-filtered, so those two numbers only agree for a manager.
+        if let Some(next) = regions::rail(ui, &rail, selected) {
+            modules::open(state, order[next]);
         }
 
         let module = &mut modules[active];

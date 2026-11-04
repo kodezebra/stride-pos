@@ -845,6 +845,12 @@ impl State {
                 // The catalog may have moved on since the last shift, and the
                 // shop's own staff are the ones who moved it.
                 self.reload_products();
+                // A shared till must not inherit a screen the new person cannot
+                // use. A cashier who signs in after a manager was in Settings
+                // lands on Sell instead of a locked door.
+                if !crate::modules::rail_order(user.role).contains(&self.module) {
+                    self.select(crate::modules::SELL);
+                }
             }
             Err(denied) => {
                 self.sign_in.secret.clear();

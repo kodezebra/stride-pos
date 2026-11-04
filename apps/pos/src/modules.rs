@@ -6,12 +6,12 @@
 //! the rail all agree on what "module 2" means without a registry.
 //!
 //! Adding a module: add a struct here, add it to [`all`] in the same position as
-//! its index constant, and pick a key in the F1–F8 band. Everything else — rail
-//! entry, tooltip, palette entry, persistence index — follows from those two
-//! edits.
+//! its index constant, pick a key in the F1–F8 band, and add its index to
+//! [`rail_order`] for the roles that should see it. Everything else — rail
+//! entry, tooltip, palette entry, persistence index — follows from those edits.
 //!
 //! F8 is reserved for Purchase orders. It is documented here and nowhere else
-//! so the reservation cannot drift. Inventory took F6.
+//! so the reservation cannot drift.
 
 use std::path::Path;
 
@@ -100,7 +100,11 @@ pub trait Module {
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State);
 }
 
-/// Every module, in rail order. Must stay in sync with the index constants above.
+/// Every module, in stable index order. Must stay in sync with the index
+/// constants above.
+///
+/// This is the persisted order, not the activity bar's order: see
+/// [`rail_order`] for what each role sees, top to bottom.
 pub fn all() -> Vec<Box<dyn Module>> {
     vec![
         Box::new(Sell),
@@ -111,6 +115,30 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(Suppliers),
         Box::new(Inventory),
     ]
+}
+
+/// The activity bar for a role, top to bottom.
+///
+/// Indices stay stable across releases; only this presentation order changes.
+/// Keep the order aligned with the F-keys: the first item is F1, the next F2,
+/// and so on. Settings is last because it is the back office, not a stop on the
+/// selling loop.
+///
+/// A cashier sees only the screens their work needs. Hiding Products,
+/// Suppliers and Settings is not the permission boundary — [`open`] is — but a
+/// navigation bar that offers doors the person cannot walk through is a dead
+/// end, and a dead end teaches a cashier to stop using the bar.
+pub fn rail_order(role: crate::auth::Role) -> &'static [usize] {
+    const CASHIER: [usize; 4] = [SELL, SALES, INVENTORY, DASHBOARD];
+    const MANAGER: [usize; 7] = [
+        SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, SETTINGS,
+    ];
+
+    if role >= crate::auth::Role::Manager {
+        &MANAGER
+    } else {
+        &CASHIER
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +597,7 @@ impl Module for Dashboard {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F2
+        egui::Key::F4
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -1549,7 +1577,7 @@ impl Module for Products {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F3
+        egui::Key::F5
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -2511,7 +2539,7 @@ impl Module for Suppliers {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F7
+        egui::Key::F6
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -2774,7 +2802,7 @@ impl Module for Inventory {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F6
+        egui::Key::F3
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -3384,7 +3412,7 @@ impl Module for Sales {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F4
+        egui::Key::F2
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -3484,7 +3512,7 @@ impl Module for Settings {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F5
+        egui::Key::F7
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -4065,6 +4093,41 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(before, keys.len(), "two modules must never share a hotkey");
+    }
+
+    #[test]
+    fn the_rail_puts_settings_last_and_keeps_hotkeys_in_order() {
+        let modules = all();
+        let manager = rail_order(crate::auth::Role::Manager);
+
+        assert_eq!(
+            manager,
+            &[
+                SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, SETTINGS
+            ][..]
+        );
+        assert_eq!(manager.last().copied(), Some(SETTINGS));
+
+        // The rail's order and the F-keys are one contract: the first row is
+        // F1, and a manager can walk the whole bar without looking for a gap.
+        for (offset, &index) in manager.iter().enumerate() {
+            assert_eq!(
+                modules[index].hotkey() as u8,
+                egui::Key::F1 as u8 + offset as u8,
+                "{} should be F{}",
+                modules[index].title(),
+                offset + 1
+            );
+        }
+
+        let cashier = rail_order(crate::auth::Role::Cashier);
+        assert_eq!(cashier, &[SELL, SALES, INVENTORY, DASHBOARD][..]);
+        for admin_only in [PRODUCTS, SUPPLIERS, SETTINGS] {
+            assert!(
+                !cashier.contains(&admin_only),
+                "a cashier rail must not offer an admin-only module"
+            );
+        }
     }
 
     #[test]
