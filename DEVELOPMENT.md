@@ -36,6 +36,7 @@ apps/pos/src/
   prefs.rs      active module + sidebar visibility
   scan.rs       phone-scanner service: config, token, pairing URI, lifecycle
   scan/         protocol validation and the LAN HTTP listener
+  firewall.rs   is the listener's port reachable, and the privileged step that opens it
   settings.rs   terminal + scanner settings (tax and printer later)
   shell.rs      rail, sidebar, workspace, status bar, the modals
 crates/         reserved for product-internal crates
@@ -130,6 +131,28 @@ Crockford's base 32, drawn from the OS random source on first launch and kept in
 A pairing code is compared after normalising case, dashes and spaces, so
 `7qk4-m2x9ab` and `7QK4M2X9AB` are the same code; ten characters is 50 bits,
 which is enough that guessing one over the shop Wi-Fi is not the weak point.
+
+A listener can be healthy and still unreachable: the host firewall drops the
+packet before the app sees it, while `127.0.0.1` keeps answering because
+loopback never crosses the policed interface. `firewall.rs` therefore detects a
+running firewall (`systemctl is-active firewalld`, and the `ENABLED` flag plus
+the unit for ufw) and the Settings card says which one this till uses. It does
+not read that firewall's rules: firewalld gates `--query-port` behind
+`org.fedoraproject.FirewallD1.config.info`, so probing would raise a password
+dialog just because Settings was opened. Opening the port is a privileged change
+too, so it never happens on its own: the **Allow port** button runs `pkexec
+firewall-cmd --add-port=<port>/tcp --permanent` (or `pkexec ufw allow
+<port>/tcp`) after the OS asks for the administrator password, and the exact
+command is printed when that dialog cannot appear. The probe and the privileged
+step run off the frame thread because both can wait on the OS.
+
+The card reports `Allowed` only for a port this run of the till opened, because
+that is the only thing it can know without asking for a password.
+
+`firewall.rs` is Linux-only because the till ships for Linux. Windows would need
+the same card with a UAC-elevated `netsh advfirewall` rule scoped to the
+executable; Windows already prompts on first listen, so the detection there is
+about a prompt the operator dismissed rather than one that never appeared.
 
 This is a LAN feature, not a cloud service. It binds to the local network,
 requires the token on every request, validates the payload before it reaches the

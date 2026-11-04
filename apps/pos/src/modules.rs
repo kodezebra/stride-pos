@@ -3682,15 +3682,93 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
             });
         });
 
-        ui.add_space(SPACING.md);
-        let hint = format!(
-            "If the phone says it cannot reach the till, this computer's firewall is \
-             probably dropping port {port}. Allow it once: sudo firewall-cmd \
-             --add-port={port}/tcp on Fedora, or sudo ufw allow {port}/tcp on Ubuntu.",
-            port = config.port,
-        );
-        components::caption(ui, &hint);
+        if config.enabled {
+            ui.add_space(SPACING.md);
+            #[cfg(target_os = "linux")]
+            firewall_note(ui, state, config.port);
+        }
     });
+}
+
+/// Whether the computer's firewall will let a phone reach the listening port.
+///
+/// This is the one part of pairing the app cannot finish on its own: reading a
+/// firewall's rules and changing them both need the administrator password, so
+/// the till only says which firewall is running and offers the operating
+/// system's own permission dialog through `pkexec` — the same dialog the user
+/// would see installing a printer. When that dialog cannot appear, the exact
+/// command is printed and can be copied.
+#[cfg(target_os = "linux")]
+fn firewall_note(ui: &mut egui::Ui, state: &mut State, port: u16) {
+    use crate::firewall::Snapshot;
+
+    let palette = theme::current(ui.ctx());
+
+    let (text, color) = match &state.firewall {
+        Snapshot::Unprobed => (
+            "Checking whether this computer's firewall lets phones in…".to_owned(),
+            palette.text_muted,
+        ),
+        Snapshot::Clear => (
+            "No host firewall is blocking phones on this network.".to_owned(),
+            palette.text_muted,
+        ),
+        Snapshot::Allowed(backend) => (
+            format!("Port {port} was allowed in {}.", backend.label()),
+            palette.success,
+        ),
+        Snapshot::Unknown(backend) => (
+            format!(
+                "{} is running, so phones reach the till only after port {port} is \
+                 allowed.",
+                backend.label()
+            ),
+            palette.text_muted,
+        ),
+    };
+    ui.label(egui::RichText::new(text).size(TYPE.small).color(color));
+
+    if state.firewall.wants_allow() {
+        ui.add_space(SPACING.sm);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            let button = ui.add_enabled(!state.firewall_busy, egui::Button::new("Allow port"));
+            if button.clicked() {
+                state.firewall_allow_requested = true;
+            }
+            if state.firewall_busy {
+                ui.label(
+                    egui::RichText::new("Waiting for permission…")
+                        .size(TYPE.small)
+                        .color(palette.text_muted),
+                );
+            } else {
+                components::caption(ui, "Asks for the administrator password once.");
+            }
+        });
+    }
+
+    let Some(error) = state.firewall_error.clone() else {
+        return;
+    };
+
+    ui.add_space(SPACING.sm);
+    ui.label(
+        egui::RichText::new(error)
+            .size(TYPE.small)
+            .color(palette.danger),
+    );
+
+    if let Some(command) = state.firewall.command(port) {
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            components::caption(ui, &format!("Run this instead: {command}"));
+            if ui.small_button("Copy").clicked() {
+                ui.ctx().copy_text(command);
+            }
+        });
+    }
 }
 
 /// Draw the pairing URI as a QR code.

@@ -441,6 +441,15 @@ pub struct State {
     /// What the LAN listener is doing, mirrored from the shell so Settings can
     /// show it without the screen owning the worker thread.
     pub scanner_status: ScanStatus,
+    /// Whether the host firewall will let a phone reach the port that is
+    /// listening. Mirrored from the shell for the same reason as the status.
+    pub firewall: crate::firewall::Snapshot,
+    /// A privileged step is waiting on the polkit dialog.
+    pub firewall_busy: bool,
+    /// Why the last attempt to open the port failed.
+    pub firewall_error: Option<String>,
+    /// The Settings card asked the shell to open the port. Consumed by the shell.
+    pub firewall_allow_requested: bool,
     /// The category both Sell and Products filter by. `None` is "All"; the value
     /// is a category name, because the categories are the shop's, not an index
     /// into a list the app invented.
@@ -613,6 +622,10 @@ impl State {
             scan_focus: true,
             scan_submit: false,
             scanner_status: ScanStatus::Off,
+            firewall: crate::firewall::Snapshot::Unprobed,
+            firewall_busy: false,
+            firewall_error: None,
+            firewall_allow_requested: false,
             category: None,
             range: 0,
             settings_section: 0,

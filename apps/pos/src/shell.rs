@@ -44,6 +44,9 @@ pub struct PosShell {
     /// The phone scanner's worker. Owned by the frame, not by Settings: the
     /// listener must keep running while the operator is on any other screen.
     scan: crate::scan::Service,
+    /// Whether the host firewall is dropping the port the listener is on, and
+    /// the privileged step that opens it. Owned here for the same reason.
+    firewall: crate::firewall::Service,
 }
 
 impl PosShell {
@@ -66,6 +69,7 @@ impl PosShell {
             palette: Palette::default(),
             prefs_path,
             scan: crate::scan::Service::new(),
+            firewall: crate::firewall::Service::new(),
         }
     }
 
@@ -92,6 +96,19 @@ impl PosShell {
             self.state.receive_scan(event);
         }
         self.state.scanner_status = self.scan.status().clone();
+
+        // A healthy listener can still be unreachable, because the host
+        // firewall drops the packet first. Probe the port the listener is on,
+        // and let Settings ask for it to be opened.
+        self.firewall.sync(&self.state.settings.scanner);
+        if std::mem::take(&mut self.state.firewall_allow_requested) {
+            self.firewall.allow();
+        }
+        self.firewall.poll();
+        let firewall = self.firewall.status();
+        self.state.firewall = firewall.snapshot;
+        self.state.firewall_busy = firewall.busy;
+        self.state.firewall_error = firewall.error;
 
         // Locked is a whole screen, not a modal over the workspace: the takings
         // behind it are the reason for the lock, and a modal leaves them legible

@@ -107,8 +107,11 @@ Wi-Fi, that the listener says *Listening* in Settings, and that the shop network
 does not isolate clients (guest Wi-Fi often does).
 
 A host firewall is the most common cause, because the till still answers on
-`127.0.0.1` while every other machine is dropped. Allow the port once, on the
-till:
+`127.0.0.1` while every other machine is dropped. Settings → Scanner says which
+firewall is in the way, if any. Press **Allow port**: the OS asks for the
+administrator password once, and only that one TCP port is opened. If there is
+no password dialog (a headless machine, or no polkit agent), the card prints the
+command to run instead:
 
 ```sh
 sudo firewall-cmd --add-port=47831/tcp --permanent   # Fedora, RHEL, openSUSE

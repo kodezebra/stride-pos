@@ -25,6 +25,7 @@ mod commands;
 mod currencies;
 mod db;
 mod export;
+mod firewall;
 mod import;
 mod modules;
 mod picker;
