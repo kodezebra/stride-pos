@@ -27,6 +27,7 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions::{self, Command, Palette, RailItem, Sidebar, size};
 
+use crate::actions;
 use crate::auth::Role;
 use crate::currencies;
 use crate::modules::{self, Module};
@@ -243,10 +244,11 @@ impl PosShell {
             }
 
             if !required {
-                ui.add_space(SPACING.md);
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
+                actions::footer(ui, |ui| {
+                    if actions::secondary(ui, "Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             }
         });
 

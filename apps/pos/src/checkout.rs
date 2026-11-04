@@ -19,6 +19,7 @@ use ui_kit::theme;
 use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 
+use crate::actions;
 use crate::state::{self, State};
 
 /// Draw the payment modal, if one is open.
@@ -108,17 +109,15 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 components::receipt_line(ui, "Total", &state.money(sale.paid_minor()));
             }
 
-            ui.add_space(SPACING.md);
-            ui.horizontal(|ui| {
-                if components::primary_button(ui, "New sale").clicked() {
+            actions::footer(ui, |ui| {
+                if actions::primary(ui, "New sale").clicked() {
                     close = true;
                 }
                 // The slip as text, because a customer who wants the receipt
                 // usually wants it in a message, not read aloud across the
                 // counter.
                 if let Some(text) = &copy_text {
-                    let copy = ui
-                        .button("Copy receipt")
+                    let copy = actions::secondary(ui, "Copy receipt")
                         .on_hover_text("Copy this slip as text");
                     if copy.clicked() {
                         ui.ctx().copy_text(text.clone());
@@ -130,10 +129,9 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                     }
                 }
                 // The receipt is already written, so this cannot undo the sale;
-                // it dismisses the screen. It exists because "New sale" is a
-                // commitment, and the cashier may only want the receipt gone.
-                if ui
-                    .button("Cancel")
+                // it dismisses the screen. It is quiet because "New sale" is the
+                // decision, and the cashier may only want the receipt gone.
+                if actions::quiet(ui, "Close")
                     .on_hover_text("Close this receipt")
                     .clicked()
                 {
@@ -231,8 +229,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 field_submitted = true;
             }
 
-            if ui
-                .button("Clear")
+            if actions::secondary_compact(ui, "Clear")
                 .on_hover_text("Clear cash received")
                 .clicked()
             {
@@ -320,15 +317,17 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Complete sale").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Complete sale").clicked() {
                 complete = true;
             }
-            if ui.button("Cancel").clicked() {
+            // "Cancel" here would read as cancelling the sale. The basket is
+            // intact; this only returns to it.
+            if actions::secondary(ui, "Back to cart").clicked() {
                 close = true;
             }
         });
+        ui.add_space(SPACING.xs);
         components::caption(
             ui,
             "Enter completes the sale, Escape goes back to the cart.",

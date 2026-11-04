@@ -5,6 +5,7 @@
 //!
 //! | file          | role                                              |
 //! |---------------|---------------------------------------------------|
+//! | `actions.rs`  | the one action hierarchy: primary, secondary, quiet |
 //! | `db.rs`       | schema and the few reads the shell needs           |
 //! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
@@ -19,6 +20,7 @@
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
+mod actions;
 mod auth;
 mod checkout;
 mod commands;

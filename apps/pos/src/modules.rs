@@ -22,6 +22,7 @@ use ui_kit::tokens::{RADII, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
+use crate::actions;
 use crate::db::{Product, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
 use crate::state::{self, State};
@@ -252,7 +253,7 @@ impl Sell {
             );
             ui.add_space(SPACING.sm);
             ui.vertical_centered(|ui| {
-                if components::primary_button(ui, "Add a product").clicked() {
+                if actions::primary(ui, "Add a product").clicked() {
                     // Straight into the form: an empty catalog is a dead end
                     // otherwise, and the operator has already said what they want.
                     state.select(PRODUCTS);
@@ -1601,13 +1602,13 @@ impl Module for Products {
         ui.horizontal(|ui| {
             components::section_title(ui, "Catalog");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::primary_button(ui, "New product").clicked() {
+                if actions::primary(ui, "New product").clicked() {
                     new = true;
                 }
                 // Import and the two exports live behind one menu: they are
                 // occasional setup actions, and three buttons beside the
                 // catalog's only everyday action crowded the header.
-                ui.menu_button("More", |ui| {
+                actions::menu_button(ui, "More", |ui| {
                     ui.set_min_width(190.0);
                     if ui
                         .button("Import CSV")
@@ -1776,7 +1777,7 @@ fn file_feedback(ui: &mut egui::Ui, state: &State) {
     ui.horizontal_wrapped(|ui| {
         components::caption(ui, notice);
         if let Some(path) = state.file_path.as_deref()
-            && ui.small_button("Copy path").clicked()
+            && actions::quiet_compact(ui, "Copy path").clicked()
         {
             ui.ctx().copy_text(path.display().to_string());
         }
@@ -2152,12 +2153,11 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Save").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Save").clicked() {
                 save = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -2265,12 +2265,11 @@ pub fn supplier_editor_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Save").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Save").clicked() {
                 save = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -2340,25 +2339,24 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Import").clicked() {
-                import = true;
-            }
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
-        });
-
         ui.add_space(SPACING.sm);
         ui.horizontal(|ui| {
-            if ui.button("Save a template").clicked() {
+            if actions::quiet_compact(ui, "Save a template").clicked() {
                 template = true;
             }
             components::caption(
                 ui,
                 "A CSV with these columns and two example rows to replace.",
             );
+        });
+
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Import").clicked() {
+                import = true;
+            }
+            if actions::secondary(ui, "Cancel").clicked() {
+                cancel = true;
+            }
         });
     });
 
@@ -2417,15 +2415,13 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
                 crate::receipt::body(ui, detail, &shop, currency, true)
             });
 
-        ui.add_space(SPACING.md);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if components::primary_button(ui, "Close").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::secondary(ui, "Close").clicked() {
                 close = true;
             }
             // Same slip, as text: this is the screen an owner opens when a
             // customer is asking about a figure, and the answer has to travel.
-            if ui
-                .button("Copy receipt")
+            if actions::secondary(ui, "Copy receipt")
                 .on_hover_text("Copy this slip as text")
                 .clicked()
             {
@@ -2565,7 +2561,7 @@ impl Module for Suppliers {
         ui.horizontal(|ui| {
             components::section_title(ui, "Suppliers");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::primary_button(ui, "New supplier").clicked() {
+                if actions::primary(ui, "New supplier").clicked() {
                     new = true;
                 }
             });
@@ -2837,7 +2833,7 @@ impl Module for Inventory {
         ui.horizontal(|ui| {
             components::section_title(ui, "Inventory");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if can_manage && components::primary_button(ui, "Track stock").clicked() {
+                if can_manage && actions::primary(ui, "Track stock").clicked() {
                     track = true;
                 }
             });
@@ -2999,8 +2995,7 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
         .response;
     badge.on_hover_text(hint);
     if can_manage
-        && ui
-            .button("Move stock")
+        && actions::secondary_compact(ui, "Move stock")
             .on_hover_text("Receive, return, waste or adjust this product")
             .clicked()
     {
@@ -3159,12 +3154,11 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Start tracking").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Start tracking").clicked() {
                 save = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -3244,12 +3238,11 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Record").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Record").clicked() {
                 save = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -3343,10 +3336,11 @@ pub fn stock_history_modal(ctx: &egui::Context, state: &mut State) {
             }
         }
 
-        ui.add_space(SPACING.md);
-        if ui.button("Close").clicked() {
-            close = true;
-        }
+        actions::footer(ui, |ui| {
+            if actions::secondary(ui, "Close").clicked() {
+                close = true;
+            }
+        });
     });
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -3441,8 +3435,7 @@ impl Module for Sales {
                 },
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("Export CSV")
+                if actions::secondary(ui, "Export CSV")
                     .on_hover_text(
                         "Export sales as sale_id, when, cashier, total, rounding, paid, method",
                     )
@@ -3634,11 +3627,11 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
             if config.enabled {
-                if ui.button("Turn off").clicked() {
+                if actions::secondary_compact(ui, "Turn off").clicked() {
                     state.settings.scanner.enabled = false;
                     state.settings_dirty = true;
                 }
-            } else if components::primary_button(ui, "Turn on").clicked() {
+            } else if actions::secondary_compact(ui, "Turn on").clicked() {
                 state.settings.scanner.enabled = true;
                 state.settings_dirty = true;
             }
@@ -3698,7 +3691,7 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
                 let shown_token = crate::scan::spaced_token(&config.token);
                 info_row(ui, "Code", &shown_token);
                 ui.add_space(SPACING.sm);
-                if ui.button("Copy code").clicked() {
+                if actions::secondary_compact(ui, "Copy code").clicked() {
                     ui.ctx().copy_text(shown_token);
                 }
                 ui.add_space(SPACING.xs);
@@ -3760,10 +3753,11 @@ fn firewall_note(ui: &mut egui::Ui, state: &mut State, port: u16) {
         ui.add_space(SPACING.sm);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
-            let button = ui.add_enabled(!state.firewall_busy, egui::Button::new("Allow port"));
-            if button.clicked() {
-                state.firewall_allow_requested = true;
-            }
+            ui.add_enabled_ui(!state.firewall_busy, |ui| {
+                if actions::secondary_compact(ui, "Allow port").clicked() {
+                    state.firewall_allow_requested = true;
+                }
+            });
             if state.firewall_busy {
                 ui.label(
                     egui::RichText::new("Waiting for permission…")
@@ -3792,7 +3786,7 @@ fn firewall_note(ui: &mut egui::Ui, state: &mut State, port: u16) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
             components::caption(ui, &format!("Run this instead: {command}"));
-            if ui.small_button("Copy").clicked() {
+            if actions::quiet_compact(ui, "Copy").clicked() {
                 ui.ctx().copy_text(command);
             }
         });
@@ -3868,6 +3862,8 @@ fn locked_card(ui: &mut egui::Ui, permission: crate::auth::Permission) {
 /// shell persists whenever the flag is set: a crash mid-word would leave half a
 /// shop name as the letterhead of every receipt.
 fn shop_card(ui: &mut egui::Ui, state: &mut State) {
+    let dirty = state.shop_draft.trim() != state.settings.shop_name.trim();
+
     components::card(ui, |ui| {
         ui.set_min_width(ui.available_width());
         components::caption(
@@ -3881,7 +3877,10 @@ fn shop_card(ui: &mut egui::Ui, state: &mut State) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
             text_field(ui, &mut state.shop_draft, crate::APP_NAME, 320.0);
-            if components::primary_button(ui, "Save").clicked() {
+            // A Save that is always there invites a press that does nothing.
+            // The action appears with the change, and the caption below says
+            // whether the name on the receipts is the one in the field.
+            if dirty && actions::primary(ui, "Save").clicked() {
                 state.save_shop_name();
             }
         });
@@ -3939,7 +3938,7 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
             // The currency is the owner's: it decides what every stored number
             // means, and a manager borrowing that for a minute is not a thing.
             if state.permits(crate::auth::Permission::ChangeCurrency) {
-                if ui.button("Change currency").clicked() {
+                if actions::secondary_compact(ui, "Change currency").clicked() {
                     // A failed attempt from last time is not about this one.
                     state.currency_error = None;
                     state.currency_picker = true;
@@ -3974,8 +3973,8 @@ fn backup_card(ui: &mut egui::Ui, state: &mut State) {
         if state.backup_confirm {
             components::caption(ui, "Write a copy of the database now?");
             ui.add_space(SPACING.xs);
-            ui.horizontal(|ui| {
-                if components::primary_button(ui, "Back up").clicked() {
+            actions::end(ui, |ui| {
+                if actions::primary(ui, "Back up").clicked() {
                     state.backup_confirm = false;
                     match crate::db::backup(&state.store, &folder) {
                         Ok(path) => {
@@ -3988,11 +3987,11 @@ fn backup_card(ui: &mut egui::Ui, state: &mut State) {
                         }
                     }
                 }
-                if ui.button("Cancel").clicked() {
+                if actions::secondary(ui, "Cancel").clicked() {
                     state.backup_confirm = false;
                 }
             });
-        } else if components::primary_button(ui, "Back up now").clicked() {
+        } else if actions::secondary(ui, "Back up now").clicked() {
             state.backup_confirm = true;
         }
 
