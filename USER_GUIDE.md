@@ -7,6 +7,10 @@ day's takings — and the setup jobs the owner does once.
 If you are installing or building from source, see [README.md](README.md) and
 [DEVELOPMENT.md](DEVELOPMENT.md) instead.
 
+If you are training a new cashier, use [TRAINING_MANUAL.md](TRAINING_MANUAL.md).
+It teaches this material in four lessons, with practice data, scenarios, and a
+competency checklist.
+
 Everything in this guide reflects the current build. Where a feature is planned
 but not present, it says so rather than guessing.
 

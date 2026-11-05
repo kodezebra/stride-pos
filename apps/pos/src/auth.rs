@@ -27,6 +27,7 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
+use crate::actions;
 use crate::db;
 use crate::state::State;
 
@@ -589,17 +590,14 @@ fn sign_in_card(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.md);
         let mut clicked = false;
         ui.add_enabled_ui(!locked, |ui| {
-            clicked = components::primary_button(ui, "Sign in").clicked();
+            clicked = actions::primary(ui, "Sign in").clicked();
         });
         if !locked && (clicked || entered) {
             state.sign_in();
         }
 
         ui.add_space(SPACING.sm);
-        if ui
-            .add(egui::Button::new("Forgot the owner password?").frame(false))
-            .clicked()
-        {
+        if actions::quiet_compact(ui, "Forgot the owner password?").clicked() {
             state.start_recovery();
         }
     });
@@ -648,7 +646,7 @@ fn setup_card(ui: &mut egui::Ui, state: &mut State) {
         }
 
         ui.add_space(SPACING.md);
-        if components::primary_button(ui, "Create the owner").clicked() {
+        if actions::primary(ui, "Create the owner").clicked() {
             state.create_owner();
         }
     });
@@ -674,7 +672,7 @@ fn setup_code_card(ui: &mut egui::Ui, state: &mut State) {
         );
 
         ui.add_space(SPACING.md);
-        if components::primary_button(ui, "I have written it down").clicked() {
+        if actions::primary(ui, "I have written it down").clicked() {
             state.acknowledge_code();
         }
     });
@@ -700,7 +698,7 @@ fn recovery_card(ui: &mut egui::Ui, state: &mut State) {
                     .strong(),
             );
             ui.add_space(SPACING.md);
-            if components::primary_button(ui, "I have written it down").clicked() {
+            if actions::primary(ui, "I have written it down").clicked() {
                 state.finish_recovery();
             }
         });
@@ -743,12 +741,11 @@ fn recovery_card(ui: &mut egui::Ui, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Recover").clicked() {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Recover").clicked() {
                 submit = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -874,12 +871,11 @@ pub fn override_modal(ctx: &egui::Context, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            if components::primary_button(ui, "Approve").clicked() || entered {
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Approve").clicked() || entered {
                 submit = true;
             }
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });
@@ -930,10 +926,9 @@ fn new_pin_card(ui: &mut egui::Ui, state: &mut State) {
         );
 
         ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            ui.label(components::numeric(&pin).size(TYPE.kpi));
-            ui.add_space(SPACING.lg);
-            if components::primary_button(ui, "Written down").clicked() {
+        ui.label(components::numeric(&pin).size(TYPE.kpi));
+        actions::end(ui, |ui| {
+            if actions::primary(ui, "Written down").clicked() {
                 done = true;
             }
         });
@@ -975,17 +970,15 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
                         components::caption(ui, "the owner account");
                         return;
                     }
-                    if ui
-                        .button(if user.active {
-                            "Switch off"
-                        } else {
-                            "Switch on"
-                        })
-                        .clicked()
-                    {
+                    let label = if user.active {
+                        "Switch off"
+                    } else {
+                        "Switch on"
+                    };
+                    if actions::secondary_compact(ui, label).clicked() {
                         toggle = Some((user.id.clone(), !user.active));
                     }
-                    if ui.button("Reset PIN").clicked() {
+                    if actions::secondary_compact(ui, "Reset PIN").clicked() {
                         reset = Some(user.id.clone());
                     }
                 });
@@ -1014,12 +1007,12 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
             let mut cancel = false;
 
             ui.add_space(SPACING.sm);
-            ui.horizontal(|ui| {
-                components::caption(ui, &format!("Give {name} a new PIN?"));
-                if ui.button("New PIN").clicked() {
+            components::caption(ui, &format!("Give {name} a new PIN?"));
+            actions::end(ui, |ui| {
+                if actions::primary(ui, "New PIN").clicked() {
                     apply = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if actions::secondary(ui, "Cancel").clicked() {
                     cancel = true;
                 }
             });
@@ -1086,10 +1079,12 @@ pub fn staff_card(ui: &mut egui::Ui, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        if components::primary_button(ui, "Add").clicked() {
-            add = true;
-        }
+        ui.add_space(SPACING.sm);
+        actions::end(ui, |ui| {
+            if actions::primary(ui, "Add").clicked() {
+                add = true;
+            }
+        });
     });
     if add {
         state.add_staff();
@@ -1139,10 +1134,12 @@ fn password_card(ui: &mut egui::Ui, state: &mut State) {
             );
         }
 
-        ui.add_space(SPACING.md);
-        if components::primary_button(ui, "Change password").clicked() {
-            apply = true;
-        }
+        ui.add_space(SPACING.sm);
+        actions::end(ui, |ui| {
+            if actions::primary(ui, "Change password").clicked() {
+                apply = true;
+            }
+        });
     });
     if apply {
         state.change_owner_password();

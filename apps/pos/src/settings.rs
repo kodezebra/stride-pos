@@ -20,9 +20,73 @@ pub struct Settings {
     /// falls back to the app name, so a fresh till still prints something rather
     /// than a blank letterhead.
     pub shop_name: String,
+    /// The extra lines a shop puts on its paper: address, contact, tax number,
+    /// returns policy and the closing line.
+    pub receipt: ReceiptDetails,
     /// The phone scanner. Off until the shop turns it on; the token is generated
     /// on first launch so pairing never waits for a "generate" button.
     pub scanner: ScanConfig,
+}
+
+/// The receipt's optional content, kept apart from the shop name because these
+/// are the fields a shop fills in once and then forgets.
+///
+/// Every field may be blank; blank simply means the line is not printed. The
+/// footer is the exception: an unset footer still closes the slip with
+/// "Thank you.", because a receipt that ends mid-air reads as unfinished.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReceiptDetails {
+    pub address: String,
+    pub phone: String,
+    /// VAT, TIN or any local tax identifier. The label is generic because the
+    /// app does not know which one the shop uses.
+    pub tax_number: String,
+    pub return_policy: String,
+    /// The line under the total. Blank falls back to "Thank you."
+    pub footer: String,
+    /// Old settings files predate this field, so its default is on rather than
+    /// the derived `false`: hiding the cashier must be a choice, not an upgrade.
+    pub show_cashier: bool,
+}
+
+impl Default for ReceiptDetails {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            phone: String::new(),
+            tax_number: String::new(),
+            return_policy: String::new(),
+            footer: String::new(),
+            show_cashier: true,
+        }
+    }
+}
+
+impl ReceiptDetails {
+    /// The fields as they should be stored: no stray spaces, and a footer that
+    /// is only spaces counts as unset.
+    pub fn normalised(&self) -> Self {
+        Self {
+            address: self.address.trim().to_owned(),
+            phone: self.phone.trim().to_owned(),
+            tax_number: self.tax_number.trim().to_owned(),
+            return_policy: self.return_policy.trim().to_owned(),
+            footer: self.footer.trim().to_owned(),
+            show_cashier: self.show_cashier,
+        }
+    }
+
+    /// The line that closes the receipt. A shop that leaves it blank still gets
+    /// a finished slip rather than a total followed by nothing.
+    pub fn footer_text(&self) -> &str {
+        let footer = self.footer.trim();
+        if footer.is_empty() {
+            "Thank you."
+        } else {
+            footer
+        }
+    }
 }
 
 impl Settings {
@@ -116,5 +180,62 @@ mod tests {
 
         assert_eq!(loaded.shop_name(), "Nakawa Grocers");
         assert_eq!(loaded.theme(), Theme::Light);
+    }
+
+    /// Old `settings.json` files have no `receipt` object at all. They must keep
+    /// printing the cashier and the default footer, not silently lose both.
+    #[test]
+    fn a_settings_file_written_before_receipt_details_keeps_its_defaults() {
+        let loaded: Settings = serde_json::from_str("{}").expect("empty settings load");
+
+        assert_eq!(loaded.receipt, ReceiptDetails::default());
+        assert!(loaded.receipt.show_cashier);
+        assert_eq!(loaded.receipt.footer_text(), "Thank you.");
+    }
+
+    #[test]
+    fn receipt_details_survive_the_file() {
+        let path = std::env::temp_dir().join(format!(
+            "stride-pos-receipt-settings-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let settings = Settings {
+            receipt: ReceiptDetails {
+                address: "12 Kampala Road".to_owned(),
+                phone: "+256 700 123 456".to_owned(),
+                tax_number: "TIN 1000123456".to_owned(),
+                return_policy: "Exchanges within 7 days with this receipt.".to_owned(),
+                footer: "Thank you for shopping with us.".to_owned(),
+                show_cashier: false,
+            },
+            ..Settings::default()
+        };
+
+        config::save(&path, &settings).expect("save");
+        let loaded: Settings = config::load(&path).expect("load").expect("present");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(loaded.receipt, settings.receipt);
+        assert!(!loaded.receipt.show_cashier);
+        assert_eq!(
+            loaded.receipt.footer_text(),
+            "Thank you for shopping with us."
+        );
+    }
+
+    /// A footer of spaces is not a footer: the receipt still needs a closing
+    /// line, and saving should not turn the field into invisible content.
+    #[test]
+    fn a_blank_footer_falls_back_and_trims_otherwise() {
+        let mut details = ReceiptDetails {
+            footer: "   ".to_owned(),
+            ..ReceiptDetails::default()
+        };
+        assert_eq!(details.footer_text(), "Thank you.");
+
+        details.footer = "  Please come again.  ".to_owned();
+        assert_eq!(details.normalised().footer, "Please come again.");
+        assert_eq!(details.footer_text(), "Please come again.");
     }
 }
