@@ -35,6 +35,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     // which the payment does not own, and `Money::format` is the one rendering.
     let currency = state.currency;
     let shop = state.settings.shop_name().to_owned();
+    let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
     let subtotal_minor = state.cart_total_minor();
     let rounding_minor = state.cart_rounding_minor();
     let due_minor = state.due_minor();
@@ -59,7 +60,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         // `receipt` again for no gain.
         let copy_text = receipt
             .as_ref()
-            .map(|detail| crate::receipt::plain(detail, &shop, currency));
+            .map(|detail| crate::receipt::plain(detail, &paper, currency));
         let mut close = false;
         let mut copied = false;
 
@@ -88,7 +89,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
                 egui::ScrollArea::vertical()
                     .max_height(420.0)
                     .show(ui, |ui| {
-                        crate::receipt::body(ui, detail, &shop, currency, false);
+                        crate::receipt::body(ui, detail, &paper, currency, false);
                     });
             } else {
                 // The row was just written, so this should not happen; but a

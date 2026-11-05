@@ -114,7 +114,8 @@ directory, and track stock: build a cart, take the cash, and the sale is recorde
 with the name of whoever took it, on the Dashboard and in Sales.
 
 - payments are cash only — mobile money and cards come later
-- the catalogue is entered by hand; importing a supplier's list comes later
+- the catalogue can be typed in or imported from a CSV
+  (`name, category, price, barcode`); stock counts are not imported
 - receipts can be previewed but not printed
 - void, refund and discount have permissions but no screen yet
 - inventory tracks counts, not cost: purchase orders and valuation come later
@@ -124,6 +125,8 @@ with the name of whoever took it, on the Dashboard and in Sales.
 
 For the people running the till — setup, day-to-day selling, common scenarios,
 and how to read the dashboard — see [USER_GUIDE.md](USER_GUIDE.md).
+To train someone new, use [TRAINING_MANUAL.md](TRAINING_MANUAL.md): the same
+material as a four-lesson course with practice scenarios and a sign-off sheet.
 
 ## Running it
 

@@ -25,7 +25,7 @@ use ui_shell::regions;
 use crate::actions;
 use crate::db::{Product, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
-use crate::state::{self, State};
+use crate::state::{self, SellView, State};
 
 // Indices into `all()`. Order is the activity-bar order and the persisted value,
 // so these numbers are as permanent as the module list.
@@ -200,7 +200,7 @@ impl Module for Sell {
                 .max_rect(grid_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        self.grid(&mut grid_ui, state);
+        self.products(&mut grid_ui, state);
 
         let mut cart_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -221,29 +221,41 @@ impl Module for Sell {
 }
 
 impl Sell {
-    fn grid(&mut self, ui: &mut egui::Ui, state: &mut State) {
+    fn products(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::field_label(ui, "Scan or search");
         ui.add_space(SPACING.xs);
-        let response = components::search_field(ui, &mut state.search, "Name or barcode");
+        // The view switch shares the search row: the cashier's eye is already
+        // here, and a full-width field above a lone pair of buttons would push
+        // the first product down for a control that is only a preference.
+        let response = ui
+            .horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    sell_view_toggle(ui, &mut state.sell_view);
+                    ui.add_space(SPACING.sm);
+                    components::search_field(ui, &mut state.search, "Name or barcode")
+                })
+                .inner
+            })
+            .inner;
         // The cursor belongs here whenever the selling screen opens: nothing else
         // on Sell takes text, and a scanner types into whatever has focus.
         if std::mem::take(&mut state.scan_focus) {
             response.request_focus();
         }
         // A barcode scanner is a keyboard that types and then presses Enter. The
-        // field already filtered the grid, but a cashier with a scanner in their
-        // hand expects the item in the cart — asking them to click a tile they
-        // just scanned is the whole bug. `lost_focus` alone would also fire on a
-        // click elsewhere, so the Enter press is what confirms the scan. A phone
-        // scan has no keyboard to press Enter, so it sets `scan_submit` and the
-        // grid consumes it here, through the same path.
+        // field already filtered the products, but a cashier with a scanner in
+        // their hand expects the item in the cart — asking them to click a tile
+        // they just scanned is the whole bug. `lost_focus` alone would also fire
+        // on a click elsewhere, so the Enter press is what confirms the scan. A
+        // phone scan has no keyboard to press Enter, so it sets `scan_submit`
+        // and the product panel consumes it here, through the same path.
         let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             || std::mem::take(&mut state.scan_submit);
         ui.add_space(SPACING.md);
 
-        // A till with an empty catalog is not a bug in the grid: it is a shop
-        // that has not entered its products yet. Point at the screen that fixes
-        // it instead of showing an empty grid with no explanation.
+        // A till with an empty catalog is not a bug in the product panel: it is a
+        // shop that has not entered its products yet. Point at the screen that
+        // fixes it instead of showing an empty view with no explanation.
         if state.products.is_empty() {
             components::empty_state_card(
                 ui,
@@ -270,17 +282,17 @@ impl Sell {
             let scanned = state.search.trim().to_owned();
             match scan_target(&state.products, &scanned, &visible) {
                 Scan::One(index) => {
-                    // Cloned because the grid holds `state.products` borrowed and
-                    // `add_to_cart` needs the whole state.
+                    // Cloned because the product panel holds `state.products`
+                    // borrowed and `add_to_cart` needs the whole state.
                     let product = state.products[index].clone();
                     state.add_to_cart(&product);
                     // Clear the field so the next scan starts clean, and keep the
                     // focus so it lands here without a mouse.
                     state.search.clear();
                     response.request_focus();
-                    // The grid is drawn this frame from `visible`: recompute it,
-                    // otherwise a successful scan leaves the grid showing only the
-                    // product it just moved to the cart until the next repaint.
+                    // The panel is drawn this frame from `visible`: recompute it,
+                    // otherwise a successful scan leaves the panel showing only
+                    // the product it just moved to the cart until the next repaint.
                     visible = visible_products(&state.products, state.category.as_deref(), "");
                 }
                 // Say what happened in words the cashier can act on. `add_to_cart`
@@ -306,59 +318,184 @@ impl Sell {
             return;
         }
 
-        // Tile by rectangle, not by wrapping. The column count is arithmetic on
-        // the panel width, so a product keeps its place as the window resizes and
-        // a two-line label can never push its neighbour onto the next row. Cell
-        // width follows the count, so a narrow panel fills instead of leaving a
-        // stub of dead space next to every key.
-        let gap = SPACING.sm;
-        let available = ui.available_width();
-        let columns = (((available + gap) / (TILE_MIN + gap)).floor() as usize).clamp(1, 6);
-        let cell = egui::vec2(
-            (available - (columns as f32 - 1.0) * gap) / columns as f32,
-            TILE_HEIGHT,
-        );
-
-        // The click is recorded and applied after the loop: `state.products` is
-        // borrowed for the whole grid, so the cart cannot be touched inside it.
-        let mut clicked = None;
-        egui::ScrollArea::vertical()
-            .id_salt("sell_grid")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let area = ui.available_rect_before_wrap();
-                for (index, &product_index) in visible.iter().enumerate() {
-                    let product = &state.products[product_index];
-                    let column = (index % columns) as f32;
-                    let row = (index / columns) as f32;
-                    let min = egui::pos2(
-                        area.left() + column * (cell.x + gap),
-                        area.top() + row * (cell.y + gap),
-                    );
-                    let rect = egui::Rect::from_min_size(min, cell);
-                    let price = state.money(product.price_minor);
-                    let tile = components::Tile {
-                        name: &product.name,
-                        price: &price,
-                    };
-                    if ui.put(rect, tile).clicked() {
-                        clicked = Some(product_index);
-                    }
-                }
-
-                let rows = visible.len().div_ceil(columns);
-                let height = rows as f32 * cell.y + rows.saturating_sub(1) as f32 * gap;
-                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
-                    area.min,
-                    egui::vec2(area.width(), height),
-                ));
-            });
+        let clicked = match state.sell_view {
+            SellView::Grid => product_tiles(ui, state, &visible),
+            SellView::List => product_rows(ui, state, &visible),
+        };
 
         if let Some(index) = clicked {
             let product = state.products[index].clone();
             state.add_to_cart(&product);
         }
     }
+}
+
+/// Two buttons that choose how the Sell screen arranges its products.
+///
+/// One bordered container, not two loose buttons: the pair is a single choice,
+/// and a gap between them would read as two independent actions.
+fn sell_view_toggle(ui: &mut egui::Ui, view: &mut SellView) {
+    let palette = theme::current(ui.ctx());
+    egui::Frame::NONE
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(egui::CornerRadius::same(RADII.sm as u8))
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (mode, label) in [(SellView::List, "List"), (SellView::Grid, "Grid")] {
+                    let selected = *view == mode;
+                    let text = egui::RichText::new(label).size(TYPE.small);
+                    let text = if selected {
+                        text.family(theme::semibold())
+                            .color(egui::Color32::from(palette.accent))
+                    } else {
+                        text.color(egui::Color32::from(palette.text_muted))
+                    };
+                    let button = egui::Button::new(text)
+                        .min_size(egui::vec2(52.0, 36.0))
+                        .fill(if selected {
+                            egui::Color32::from(palette.accent_soft)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
+                    if ui.add(button).clicked() {
+                        *view = mode;
+                    }
+                }
+            });
+        });
+}
+
+/// The touch layout: touch-sized tiles in rows of as many as the panel holds.
+///
+/// Tile by rectangle, not by wrapping. The column count is arithmetic on the
+/// panel width, so a product keeps its place as the window resizes and a
+/// two-line label can never push its neighbour onto the next row. Cell width
+/// follows the count, so a narrow panel fills instead of leaving a stub of dead
+/// space next to every key.
+fn product_tiles(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<usize> {
+    let gap = SPACING.sm;
+    let available = ui.available_width();
+    let columns = (((available + gap) / (TILE_MIN + gap)).floor() as usize).clamp(1, 6);
+    let cell = egui::vec2(
+        (available - (columns as f32 - 1.0) * gap) / columns as f32,
+        TILE_HEIGHT,
+    );
+
+    // The click is recorded and applied after the loop: `state.products` is
+    // borrowed for the whole grid, so the cart cannot be touched inside it.
+    let mut clicked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("sell_grid")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let area = ui.available_rect_before_wrap();
+            for (index, &product_index) in visible.iter().enumerate() {
+                let product = &state.products[product_index];
+                let column = (index % columns) as f32;
+                let row = (index / columns) as f32;
+                let min = egui::pos2(
+                    area.left() + column * (cell.x + gap),
+                    area.top() + row * (cell.y + gap),
+                );
+                let rect = egui::Rect::from_min_size(min, cell);
+                let price = state.money(product.price_minor);
+                let tile = components::Tile {
+                    name: &product.name,
+                    price: &price,
+                };
+                if ui.put(rect, tile).clicked() {
+                    clicked = Some(product_index);
+                }
+            }
+
+            let rows = visible.len().div_ceil(columns);
+            let height = rows as f32 * cell.y + rows.saturating_sub(1) as f32 * gap;
+            ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                area.min,
+                egui::vec2(area.width(), height),
+            ));
+        });
+
+    clicked
+}
+
+/// The list layout: one full-width row per product, name left, price right.
+///
+/// A list is for products whose names are long enough that a tile would cut
+/// them, so the row is one line high and the name wears the ellipsis, never the
+/// price.
+fn product_rows(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<usize> {
+    let mut clicked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("sell_list")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = SPACING.xs;
+            for &product_index in visible {
+                let product = &state.products[product_index];
+                let price = state.money(product.price_minor);
+                if sell_row(ui, &product.name, &price).clicked() {
+                    clicked = Some(product_index);
+                }
+            }
+        });
+
+    clicked
+}
+
+/// One product in the Sell list: name and price on a row that is one big
+/// click target.
+fn sell_row(ui: &mut egui::Ui, name: &str, price: &str) -> egui::Response {
+    let palette = theme::current(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+
+    if ui.is_rect_visible(rect) {
+        let hovered = ui.rect_contains_pointer(rect);
+        let fill = if hovered {
+            palette.surface_alt
+        } else {
+            palette.surface
+        };
+        let border = if hovered {
+            palette.border_strong
+        } else {
+            palette.border
+        };
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(RADII.sm as u8),
+            fill,
+            egui::Stroke::new(1.0_f32, border),
+            egui::StrokeKind::Inside,
+        );
+
+        let inner = rect.shrink2(egui::vec2(SPACING.md, SPACING.xs));
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(components::numeric(price).size(TYPE.body));
+            // The name gets the width the amount did not take; a long one wears
+            // an ellipsis instead of pushing the price off the row.
+            let width = (ui.available_width() - ui.spacing().item_spacing.x).max(0.0);
+            let label =
+                ui.add(egui::Label::new(components::semibold(name).size(TYPE.body)).truncate());
+            if is_cut(ui, name, width) {
+                label.on_hover_text(name);
+            }
+        });
+    }
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn cart(ui: &mut egui::Ui, state: &mut State) {
@@ -410,6 +547,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut remove = None;
+                let mut edit = None;
                 let mut steps: Vec<(usize, components::Step)> = Vec::new();
 
                 for (index, line) in state.cart.iter().enumerate() {
@@ -452,15 +590,30 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
 
                     // Quantity and unit price under the name, the stepper under
                     // the amount: the control belongs to the number it changes.
+                    //
+                    // The count is a boxed button, not muted text: a till is a
+                    // touch screen, so there is no hover to reveal that the
+                    // count is editable. Tapping it opens the keypad, which is
+                    // how a cashier sells ten of something without tapping `+`
+                    // ten times.
                     ui.horizontal(|ui| {
+                        let qty = ui
+                            .add(
+                                egui::Button::new(
+                                    components::numeric(format!("Qty {}", line.qty))
+                                        .size(TYPE.small),
+                                )
+                                .min_size(egui::vec2(0.0, 26.0))
+                                .corner_radius(egui::CornerRadius::same(RADII.sm as u8)),
+                            )
+                            .on_hover_text("Set quantity");
+                        if qty.clicked() {
+                            edit = Some(index);
+                        }
                         ui.label(
-                            components::numeric(format!(
-                                "{} × {}",
-                                line.qty,
-                                state.money(line.unit_minor)
-                            ))
-                            .size(TYPE.small)
-                            .color(palette.text_muted),
+                            components::numeric(format!("× {}", state.money(line.unit_minor)))
+                                .size(TYPE.small)
+                                .color(palette.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let step = components::stepper(ui, line.qty);
@@ -488,6 +641,8 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
 
                 if let Some(index) = remove {
                     state.cart.remove(index);
+                } else if let Some(index) = edit {
+                    state.edit_cart_quantity(index);
                 }
             });
     }
@@ -2387,6 +2542,134 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
 }
 
 /// The sale detail, drawn with the other foreground layers in `shell.rs`.
+/// Set the quantity of a cart line by typing a number.
+///
+/// A small focused modal — just the field and two buttons — so the cashier
+/// cannot mis-tap a product tile while the count is half-entered. The editor
+/// stays open until the cashier commits or cancels; Escape and Enter do the
+/// same thing as the buttons so a keyboard-only workflow needs no mouse.
+pub fn cart_quantity_modal(ctx: &egui::Context, state: &mut State) {
+    if state.cart_quantity.is_none() {
+        return;
+    }
+
+    let mut confirm = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_cart_quantity")).show(ctx, |ui| {
+        ui.set_width(280.0);
+        ui.label(components::semibold("Set quantity").size(TYPE.heading));
+        ui.add_space(SPACING.sm);
+
+        if let Some(editor) = state.cart_quantity.as_mut() {
+            components::field_label(ui, "Quantity");
+            ui.add_space(SPACING.xs);
+
+            let mut field_text = editor.digits.clone();
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut field_text)
+                    .hint_text("1")
+                    .desired_width(ui.available_width()),
+            );
+            if editor.focus {
+                response.request_focus();
+                editor.focus = false;
+            }
+            if field_text != editor.digits {
+                // Keep only digits, up to four characters.
+                let filtered: String = field_text
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .take(4)
+                    .collect();
+                editor.digits = filtered;
+                editor.replace = false;
+                editor.error = None;
+            }
+
+            if let Some(error) = &editor.error {
+                ui.add_space(SPACING.xs);
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(TYPE.small)
+                        .color(ui.visuals().error_fg_color),
+                );
+            }
+
+            // A counter is not a desk: the keypad is the primary way to set a
+            // count, and the text field stays for a hardware keyboard. Both
+            // feed the same four-digit limit in `CartQuantity`.
+            ui.add_space(SPACING.sm);
+            egui::Grid::new("pos_cart_quantity_keypad")
+                .num_columns(3)
+                .spacing([SPACING.sm, SPACING.sm])
+                .show(ui, |ui| {
+                    for row in [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9']] {
+                        for digit in row {
+                            if quantity_key(ui, &digit.to_string()).clicked() {
+                                editor.push_digit(digit);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                    if quantity_key(ui, "Clear").clicked() {
+                        editor.clear();
+                    }
+                    if quantity_key(ui, "0").clicked() {
+                        editor.push_digit('0');
+                    }
+                    if quantity_key(ui, "Del").clicked() {
+                        editor.backspace();
+                    }
+                    ui.end_row();
+                });
+        }
+
+        ui.add_space(SPACING.sm);
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Set").clicked() {
+                confirm = true;
+            }
+            if actions::secondary(ui, "Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        confirm = true;
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+
+    if confirm && let Some(editor) = &state.cart_quantity {
+        match editor.value() {
+            Some(qty) => state.set_cart_quantity(editor.product_id, qty),
+            None => {
+                if let Some(editor) = state.cart_quantity.as_mut() {
+                    editor.error = Some("Enter a quantity of 1 or more.".to_owned());
+                }
+            }
+        }
+    }
+    if cancel {
+        state.close_cart_quantity();
+    }
+}
+
+/// One key in the quantity keypad, sized for a finger rather than a word.
+fn quantity_key(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .size(TYPE.button)
+        .family(theme::semibold());
+    ui.add(
+        egui::Button::new(text)
+            .min_size(egui::vec2(72.0, 40.0))
+            .corner_radius(egui::CornerRadius::same(RADII.sm as u8)),
+    )
+}
+
 ///
 /// The receipt behind a list row. Every figure on it is what was recorded at
 /// the time — `unit × qty` as charged, the rounding the customer actually
@@ -2398,7 +2681,8 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
     };
     let currency = state.currency;
     let shop = state.settings.shop_name().to_owned();
-    let copy_text = crate::receipt::plain(detail, &shop, currency);
+    let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
+    let copy_text = crate::receipt::plain(detail, &paper, currency);
 
     let mut close = false;
     let mut copied = false;
@@ -2412,7 +2696,7 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
         egui::ScrollArea::vertical()
             .max_height(420.0)
             .show(ui, |ui| {
-                crate::receipt::body(ui, detail, &shop, currency, true)
+                crate::receipt::body(ui, detail, &paper, currency, true)
             });
 
         actions::footer(ui, |ui| {
@@ -4014,13 +4298,114 @@ fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(SPACING.xs);
 }
 
+/// The receipt's optional lines, edited as a draft and committed by Save.
+///
+/// Same rule as the shop name: binding the fields straight to `settings` would
+/// rewrite `settings.json` on every keystroke, so a crash mid-word could leave
+/// half an address on every receipt.
+fn receipt_details_card(ui: &mut egui::Ui, state: &mut State) {
+    let dirty = state.receipt_draft.normalised() != state.settings.receipt;
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Optional lines printed around the sale. Blank fields are left off the paper; \
+             an empty closing line still prints \"Thank you.\"",
+        );
+        ui.add_space(SPACING.md);
+
+        egui::Grid::new("receipt_details_fields")
+            .num_columns(2)
+            .spacing([SPACING.md, SPACING.sm])
+            .show(ui, |ui| {
+                receipt_field(
+                    ui,
+                    "Address",
+                    &mut state.receipt_draft.address,
+                    "Street, town",
+                    360.0,
+                );
+                receipt_field(
+                    ui,
+                    "Phone",
+                    &mut state.receipt_draft.phone,
+                    "+256 700 000",
+                    220.0,
+                );
+                receipt_field(
+                    ui,
+                    "Tax / VAT",
+                    &mut state.receipt_draft.tax_number,
+                    "TIN 1000123456",
+                    220.0,
+                );
+                receipt_field(
+                    ui,
+                    "Return policy",
+                    &mut state.receipt_draft.return_policy,
+                    "Exchanges within 7 days with this receipt.",
+                    420.0,
+                );
+                receipt_field(
+                    ui,
+                    "Closing line",
+                    &mut state.receipt_draft.footer,
+                    "Thank you for shopping with us.",
+                    320.0,
+                );
+            });
+
+        ui.add_space(SPACING.sm);
+        ui.checkbox(
+            &mut state.receipt_draft.show_cashier,
+            "Print the cashier's name on the receipt",
+        );
+
+        ui.add_space(SPACING.sm);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            if dirty && actions::primary(ui, "Save").clicked() {
+                state.save_receipt_details();
+            }
+            components::caption(ui, receipt_caption(state));
+        });
+    });
+}
+
+fn receipt_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, width: f32) {
+    components::field_label(ui, label);
+    text_field(ui, value, hint, width);
+    ui.end_row();
+}
+
+/// What the card says about the fields, derived from the draft rather than a
+/// remembered flag so a "Saved." cannot outlive the text it described.
+fn receipt_caption(state: &State) -> &'static str {
+    if state.receipt_draft.normalised() != state.settings.receipt {
+        "Not saved yet."
+    } else {
+        "Saved. Changes show in the sample below."
+    }
+}
+
+/// The receipt section: the fields that shape the paper, then the sample those
+/// fields produce.
+fn receipt_preview(ui: &mut egui::Ui, state: &mut State) {
+    receipt_details_card(ui, state);
+    ui.add_space(SPACING.lg);
+
+    components::section_title(ui, "Sample");
+    receipt_sample(ui, state);
+}
+
 /// A sample receipt: the one place the receipt face and its 13 px column width
 /// can be judged before a printer exists.
 ///
-/// Reads the draft, not the saved name: the point of the preview is to answer
-/// "what will this look like?" for the name currently being typed, before Save
-/// makes it real.
-fn receipt_preview(ui: &mut egui::Ui, state: &State) {
+/// Reads the drafts, not the saved values: the point of the preview is to answer
+/// "what will this look like?" for the name and lines currently being typed,
+/// before Save makes them real.
+fn receipt_sample(ui: &mut egui::Ui, state: &State) {
     let typed = state.shop_draft.trim();
     let shop = if typed.is_empty() {
         crate::APP_NAME
@@ -4030,26 +4415,15 @@ fn receipt_preview(ui: &mut egui::Ui, state: &State) {
     // A preview of a name that has not been saved is still a preview, but it
     // must not pass for the letterhead: the till prints what was saved.
     let unsaved = typed != state.settings.shop_name.trim();
+    let paper = crate::receipt::Paper::from_receipt(shop, &state.receipt_draft);
 
     components::card(ui, |ui| {
         ui.set_width(300.0);
-        ui.vertical_centered(|ui| {
-            ui.label(components::semibold(shop).size(TYPE.body));
-            components::caption(ui, "Sample receipt");
-            if unsaved {
-                components::caption(ui, "Not saved yet: save it under Terminal.");
-            }
-        });
-        ui.add_space(SPACING.sm);
-        components::divider(ui);
-        components::receipt_line(ui, "2 x Flat white", &state.money(700));
-        components::receipt_line(ui, "1 x Cinnamon roll", &state.money(325));
-        components::receipt_line(ui, "1 x Orange juice", &state.money(450));
-        components::divider(ui);
-        components::receipt_line(ui, "Subtotal", &state.money(1_475));
-        components::receipt_line(ui, "Tax", &state.money(0));
-        components::divider(ui);
-        components::receipt_line(ui, "Total", &state.money(1_475));
+        if unsaved {
+            components::caption(ui, "Shop name not saved yet: save it under Terminal.");
+            ui.add_space(SPACING.xs);
+        }
+        crate::receipt::body(ui, &crate::receipt::sample(), &paper, state.currency, true);
         ui.add_space(SPACING.sm);
         components::caption(ui, "Printer and paper width arrive with the receipt flow.");
     });

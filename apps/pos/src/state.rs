@@ -15,7 +15,7 @@ use ui_shell::egui;
 
 use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
-use crate::settings::Settings;
+use crate::settings::{ReceiptDetails, Settings};
 
 /// One line on the till. Money is integer minor units, always.
 ///
@@ -33,6 +33,69 @@ pub struct CartLine {
 impl CartLine {
     pub fn total_minor(&self) -> i64 {
         self.qty * self.unit_minor
+    }
+}
+
+/// The quantity editor for one cart line, open as a modal over the sell screen.
+///
+/// The count is held as typed text, not as a number: the cashier may clear it
+/// and start again, and a half-typed quantity is not a quantity yet. The first
+/// key replaces the prefilled current count, so setting an item from one to five
+/// is one tap rather than a Clear and a five.
+#[derive(Debug)]
+pub struct CartQuantity {
+    /// The product the row belongs to. A product appears at most once in the
+    /// cart, so this survives a row being removed while the modal is open.
+    pub product_id: i64,
+    pub digits: String,
+    /// True until the first key: tapping `5` should mean five, not fifteen.
+    pub replace: bool,
+    /// True on the first frame, so the edit field can take focus and select
+    /// the current count. Typing `5` then replaces it instead of appending.
+    pub focus: bool,
+    /// Set when the cashier tried to commit something that is not a quantity.
+    pub error: Option<String>,
+}
+
+impl CartQuantity {
+    pub fn new(product_id: i64, qty: i64) -> Self {
+        Self {
+            product_id,
+            digits: qty.to_string(),
+            replace: true,
+            focus: true,
+            error: None,
+        }
+    }
+
+    /// The positive quantity on screen, or `None` while it is empty or zero.
+    /// The keypad and the edit field both stay inside four digits.
+    pub fn value(&self) -> Option<i64> {
+        let qty = self.digits.parse::<i64>().ok()?;
+        (qty > 0).then_some(qty)
+    }
+
+    pub fn push_digit(&mut self, digit: char) {
+        if self.replace {
+            self.digits.clear();
+            self.replace = false;
+        }
+        if self.digits.len() < 4 {
+            self.digits.push(digit);
+        }
+        self.error = None;
+    }
+
+    pub fn backspace(&mut self) {
+        self.replace = false;
+        self.digits.pop();
+        self.error = None;
+    }
+
+    pub fn clear(&mut self) {
+        self.replace = false;
+        self.digits.clear();
+        self.error = None;
     }
 }
 
@@ -402,6 +465,20 @@ impl PasswordDraft {
 /// it, short enough that it cannot be handed to the next person.
 const ELEVATION: Duration = Duration::from_secs(60);
 
+/// How the Sell screen arranges the products it can sell.
+///
+/// The choice is a view, not a preference: it changes nothing about the cart or
+/// the prices, and it is kept for the session so a cashier who prefers keys is
+/// not sent back to the default every time they open the till.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SellView {
+    /// One product per row. Long names stay readable; fewer fit on screen.
+    List,
+    /// Touch-sized tiles several per row. Trades name length for reach.
+    #[default]
+    Grid,
+}
+
 /// The two places the till keeps its own files.
 ///
 /// Grouped because they are only ever known together, at boot: the database
@@ -417,12 +494,18 @@ pub struct State {
     pub store: storage::Store,
 
     pub cart: Vec<CartLine>,
+    /// The cart line whose quantity is being set, if any. One editor at a time:
+    /// the modal owns the screen while it is open.
+    pub cart_quantity: Option<CartQuantity>,
 
     /// Index into [`crate::modules::all`]. Also the activity-bar selection.
     pub module: usize,
     /// Per-module sidebar visibility, so collapsing Sell does not collapse
     /// Settings. Indexed in parallel with the module list.
     pub sidebar_open: Vec<bool>,
+    /// How the Sell screen lays out its products. The toggle sits beside the
+    /// scan field, because that is where the cashier already looks.
+    pub sell_view: SellView,
     /// Set when something persisted changed; the shell writes `prefs.json` and
     /// clears it.
     pub prefs_dirty: bool,
@@ -434,9 +517,9 @@ pub struct State {
     /// the scan field. A scanner types into whatever has focus; a till that needs
     /// one click before the first barcode is a till that "doesn't scan".
     pub scan_focus: bool,
-    /// A phone scan asked the grid to submit the next frame. The search field is
-    /// already filled with the barcode; this is the Enter key the phone cannot
-    /// press, and it is consumed by the grid that draws Sell.
+    /// A phone scan asked the product panel to submit the next frame. The search
+    /// field is already filled with the barcode; this is the Enter key the phone
+    /// cannot press, and it is consumed by the panel that draws Sell.
     pub scan_submit: bool,
     /// What the LAN listener is doing, mirrored from the shell so Settings can
     /// show it without the screen owning the worker thread.
@@ -535,6 +618,9 @@ pub struct State {
     /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
     /// so a half-typed name is never written to disk.
     pub shop_draft: String,
+    /// The receipt fields as typed. Committed together by
+    /// [`State::save_receipt_details`], for the same reason as the shop name.
+    pub receipt_draft: ReceiptDetails,
 
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
@@ -603,6 +689,7 @@ impl State {
     ) -> Self {
         let theme = settings.theme();
         let shop_draft = settings.shop_name.trim().to_owned();
+        let receipt_draft = settings.receipt.clone();
         // A till upgraded from a build without the scanner has no token yet. A
         // token is not a pairing decision, so generate it on boot and let the
         // settings write below persist it; enabling the listener stays manual.
@@ -615,8 +702,10 @@ impl State {
         Self {
             store,
             cart: Vec::new(),
+            cart_quantity: None,
             module,
             sidebar_open,
+            sell_view: SellView::default(),
             prefs_dirty: false,
             search: String::new(),
             scan_focus: true,
@@ -655,6 +744,7 @@ impl State {
             file_path: None,
             backup_confirm: false,
             shop_draft,
+            receipt_draft,
             settings,
             paths,
             theme,
@@ -737,6 +827,21 @@ impl State {
         }
     }
 
+    /// Commit the optional receipt fields typed in Settings.
+    ///
+    /// They are saved together because they are read as one block on paper: an
+    /// address saved without the phone number beside it is a half-edited
+    /// letterhead, and the owner would have to notice which field they last
+    /// touched.
+    pub fn save_receipt_details(&mut self) {
+        let details = self.receipt_draft.normalised();
+        self.receipt_draft = details.clone();
+        if self.settings.receipt != details {
+            self.settings.receipt = details;
+            self.settings_dirty = true;
+        }
+    }
+
     pub fn select(&mut self, module: usize) {
         if self.module != module {
             self.module = module;
@@ -793,6 +898,7 @@ impl State {
         self.elevated_until = None;
         self.override_request = None;
         self.payment = None;
+        self.cart_quantity = None;
         self.product_editor = None;
         self.product_delete = None;
         self.supplier_editor = None;
@@ -1337,6 +1443,42 @@ impl State {
                 unit_minor: product.price_minor,
             }),
         }
+    }
+
+    /// Open the quantity editor for one cart line.
+    ///
+    /// The index is the row the cashier tapped; the editor remembers the product
+    /// rather than the row, so it still points at the right line if the cart
+    /// changes.
+    pub fn edit_cart_quantity(&mut self, index: usize) {
+        if let Some(line) = self.cart.get(index) {
+            self.cart_quantity = Some(CartQuantity::new(line.product_id, line.qty));
+        }
+    }
+
+    pub fn close_cart_quantity(&mut self) {
+        self.cart_quantity = None;
+    }
+
+    /// Commit a typed quantity to a cart line.
+    ///
+    /// A zero, a negative number or a stale product is ignored rather than
+    /// removing the line: the modal has a separate Cancel, and deleting stock
+    /// because a field was empty is not a safe default. The caller decides how
+    /// to surface the rejection.
+    pub fn set_cart_quantity(&mut self, product_id: i64, qty: i64) {
+        if qty <= 0 {
+            return;
+        }
+        let Some(line) = self
+            .cart
+            .iter_mut()
+            .find(|line| line.product_id == product_id)
+        else {
+            return;
+        };
+        line.qty = qty;
+        self.cart_quantity = None;
     }
 
     /// Re-read the catalog and the category list after a write.
@@ -1966,6 +2108,7 @@ impl State {
 
     pub fn clear_cart(&mut self) {
         self.cart.clear();
+        self.cart_quantity = None;
         self.notice = None;
     }
 
@@ -2004,6 +2147,9 @@ impl State {
         if self.payment.is_some() || self.cart.is_empty() {
             return;
         }
+        // Paying is a decision about the whole basket. A quantity still being
+        // edited is not part of that decision yet.
+        self.cart_quantity = None;
         // Taking money is its own permission, separate from filling a basket: a
         // shop can have someone who only ever puts the order together.
         if !self.permits(crate::auth::Permission::TakePayment) {
@@ -2272,6 +2418,53 @@ mod tests {
         state.cart = vec![line("Sugar", 1, 340)];
         assert_eq!(state.cart_rounding_minor(), 0);
         assert_eq!(state.due_minor(), 340);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Setting five of something should be one key and one Set, not four taps
+    /// on plus. The prefilled count is replaced by the first key so the cashier
+    /// does not have to clear a `1` before typing `5`.
+    #[test]
+    fn a_cart_quantity_can_be_typed_directly() {
+        let (mut state, path) = state("cart-quantity", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 340)];
+
+        state.edit_cart_quantity(0);
+        let editor = state.cart_quantity.as_mut().expect("editor open");
+        assert_eq!(editor.digits, "1");
+        editor.push_digit('5');
+        assert_eq!(editor.digits, "5", "the first key replaces the count");
+        editor.push_digit('0');
+        assert_eq!(editor.value(), Some(50), "later keys append");
+
+        assert_eq!(state.cart[0].qty, 1, "nothing changes until Set");
+        state.set_cart_quantity(1, 50);
+        assert_eq!(state.cart[0].qty, 50);
+        assert!(state.cart_quantity.is_none(), "Set closes the editor");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Zero is not a quantity. Refusing it must leave the editor open so the
+    /// cashier can correct a mistyped count instead of losing the row.
+    #[test]
+    fn a_zero_cart_quantity_is_refused() {
+        let (mut state, path) = state("cart-quantity-zero", Currency::UGX);
+        state.cart = vec![line("Sugar", 1, 340)];
+
+        state.edit_cart_quantity(0);
+        let editor = state.cart_quantity.as_mut().expect("editor open");
+        editor.clear();
+        editor.push_digit('0');
+        assert_eq!(editor.value(), None);
+
+        state.set_cart_quantity(1, 0);
+        assert_eq!(state.cart[0].qty, 1);
+        assert!(
+            state.cart_quantity.is_some(),
+            "the editor stays open for a correction"
+        );
 
         let _ = std::fs::remove_file(path);
     }

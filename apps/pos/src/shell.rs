@@ -163,6 +163,10 @@ impl PosShell {
         // The receipt behind a sales row, one tap from either list that shows
         // sales; it owns the screen while it holds the floor.
         crate::modules::sale_detail_modal(ui.ctx(), &mut self.state);
+        // Setting a cart line's count, which must finish before the basket can
+        // be paid for: the modal is drawn under payment so a shortcut cannot
+        // leave a quantity editor floating over a sale in progress.
+        crate::modules::cart_quantity_modal(ui.ctx(), &mut self.state);
         // Same reason: paying is the one flow that writes a sale, and it must own
         // the screen while the cashier counts notes.
         crate::checkout::payment_modal(ui.ctx(), &mut self.state);
@@ -315,6 +319,7 @@ impl PosShell {
             && self.state.stock_editor.is_none()
             && self.state.stock_move.is_none()
             && self.state.stock_history.is_none()
+            && self.state.cart_quantity.is_none()
             && self.state.payment.is_none()
         {
             self.state.start_payment();
