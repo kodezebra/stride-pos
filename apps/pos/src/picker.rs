@@ -13,6 +13,7 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
+use crate::actions;
 use crate::state::{ImportDraft, State};
 
 /// What the chosen path is for.
@@ -310,7 +311,7 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.xs;
             for place in &picker.places {
-                if ui.button(place.label).clicked() {
+                if actions::secondary_compact(ui, place.label).clicked() {
                     go = Some(place.path.clone());
                 }
             }
@@ -380,26 +381,30 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
         };
         components::caption(ui, &chosen);
 
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
+        if purpose == Purpose::Import {
+            ui.add_space(SPACING.sm);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACING.xs;
+                if actions::quiet_compact(ui, "Type the path instead").clicked() {
+                    type_path = true;
+                }
+                if actions::quiet_compact(ui, "Save a template")
+                    .on_hover_text("Save a CSV with these columns and two example rows")
+                    .clicked()
+                {
+                    template = true;
+                }
+            });
+        }
+
+        actions::footer(ui, |ui| {
             ui.add_enabled_ui(picker.choice().is_some(), |ui| {
-                if components::primary_button(ui, purpose.action()).clicked() {
+                if actions::primary(ui, purpose.action()).clicked() {
                     confirm_pick = true;
                 }
             });
-            if ui.button("Cancel").clicked() {
+            if actions::secondary(ui, "Cancel").clicked() {
                 cancel = true;
-            }
-            if purpose == Purpose::Import && ui.button("Type the path instead").clicked() {
-                type_path = true;
-            }
-            if purpose == Purpose::Import
-                && ui
-                    .button("Save a template")
-                    .on_hover_text("Save a CSV with these columns and two example rows")
-                    .clicked()
-            {
-                template = true;
             }
         });
     });

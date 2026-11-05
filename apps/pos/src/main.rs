@@ -5,6 +5,7 @@
 //!
 //! | file          | role                                              |
 //! |---------------|---------------------------------------------------|
+//! | `actions.rs`  | the one action hierarchy: primary, secondary, quiet |
 //! | `db.rs`       | schema and the few reads the shell needs           |
 //! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
@@ -19,6 +20,7 @@
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
+mod actions;
 mod auth;
 mod checkout;
 mod commands;
@@ -35,9 +37,11 @@ mod scan;
 mod settings;
 mod shell;
 mod state;
+mod theme;
 
 use std::process::ExitCode;
 
+use crate::theme::{DARK, LIGHT};
 use ui_shell::regions::{self, Window};
 
 /// The one brand string. Window title and receipt header both read it, so a
@@ -90,9 +94,15 @@ fn main() -> ExitCode {
         );
         let app = shell::PosShell::new(state, prefs_path);
 
-        regions::run_app(APP_NAME, theme, Window::default(), app, |ui, app| {
-            app.draw(ui);
-        })?;
+        regions::run_app(
+            APP_NAME,
+            theme,
+            LIGHT,
+            DARK,
+            Window::default(),
+            app,
+            |ui, app| app.draw(ui),
+        )?;
 
         Ok(())
     })

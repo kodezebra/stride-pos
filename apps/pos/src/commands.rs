@@ -6,42 +6,35 @@
 //!
 //! Module commands go through [`modules::open`] rather than `State::select`, so
 //! the palette cannot walk past a permission the rail enforces.
+//!
+//! The module list is the same role-filtered list the rail draws, so a cashier
+//! is not offered a destination they cannot open. The palette is rebuilt when
+//! the signed-in role changes, not every frame.
 
 use ui_shell::regions::Command;
 
+use crate::auth::Role;
 use crate::modules;
 use crate::state::State;
 
-pub fn all() -> Vec<Command<State>> {
-    vec![
-        Command::new("Go to Sell", |state: &mut State| {
-            modules::open(state, modules::SELL)
-        })
-        .hint("F1"),
-        Command::new("Go to Dashboard", |state: &mut State| {
-            modules::open(state, modules::DASHBOARD)
-        })
-        .hint("F2"),
-        Command::new("Go to Products", |state: &mut State| {
-            modules::open(state, modules::PRODUCTS)
-        })
-        .hint("F3"),
-        Command::new("Go to Sales", |state: &mut State| {
-            modules::open(state, modules::SALES)
-        })
-        .hint("F4"),
-        Command::new("Go to Settings", |state: &mut State| {
-            modules::open(state, modules::SETTINGS)
-        })
-        .hint("F5"),
-        Command::new("Go to Inventory", |state: &mut State| {
-            modules::open(state, modules::INVENTORY)
-        })
-        .hint("F6"),
-        Command::new("Go to Suppliers", |state: &mut State| {
-            modules::open(state, modules::SUPPLIERS)
-        })
-        .hint("F7"),
+pub fn all(role: Role) -> Vec<Command<State>> {
+    let modules = modules::all();
+    let mut commands = Vec::new();
+
+    for &index in modules::rail_order(role) {
+        let module = &modules[index];
+        commands.push(
+            Command::new(
+                format!("Go to {}", module.title()),
+                move |state: &mut State| {
+                    modules::open(state, index);
+                },
+            )
+            .hint(module.hotkey().name()),
+        );
+    }
+
+    commands.extend([
         Command::new("Toggle sidebar", State::toggle_sidebar).hint("Ctrl+B"),
         Command::new("Toggle theme", State::toggle_theme).hint("Ctrl+T"),
         Command::new("Take payment", State::start_payment).hint("F12 or Ctrl+Enter"),
@@ -54,5 +47,44 @@ pub fn all() -> Vec<Command<State>> {
             }
         })
         .hint("Ctrl+L"),
-    ]
+    ]);
+
+    commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_palette_offers_only_the_rail_the_role_can_use() {
+        let cashier: Vec<String> = all(Role::Cashier)
+            .into_iter()
+            .take(4)
+            .map(|command| command.label)
+            .collect();
+        assert_eq!(
+            cashier,
+            vec![
+                "Go to Sell",
+                "Go to Sales",
+                "Go to Inventory",
+                "Go to Dashboard"
+            ]
+        );
+
+        let cashier = all(Role::Cashier);
+        assert!(
+            !cashier
+                .iter()
+                .any(|command| command.label == "Go to Settings")
+        );
+
+        let manager = all(Role::Manager);
+        let settings = manager
+            .iter()
+            .find(|command| command.label == "Go to Settings")
+            .expect("a manager can open Settings");
+        assert_eq!(settings.hint, "F7");
+    }
 }
