@@ -33,6 +33,7 @@ use crate::currencies;
 use crate::modules::{self, Module};
 use crate::prefs::Prefs;
 use crate::state::State;
+use crate::theme::palette_for;
 
 pub struct PosShell {
     state: State,
@@ -70,9 +71,11 @@ impl PosShell {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         // A theme switch takes effect here, at the top of the next frame. The
         // shell is the only place that installs global visuals; the Settings
-        // screen only records the intent on `state`.
+        // screen only records the intent on `state`. The palette is the POS's
+        // own — ui-kit never invents brand colors.
         if self.state.theme_dirty {
-            ui_kit::theme::install(ui.ctx(), self.state.theme);
+            let (palette, dark) = palette_for(self.state.theme);
+            ui_kit::theme::install(ui.ctx(), palette, dark);
             self.state.theme_dirty = false;
         }
 

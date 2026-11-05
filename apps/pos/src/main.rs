@@ -37,9 +37,11 @@ mod scan;
 mod settings;
 mod shell;
 mod state;
+mod theme;
 
 use std::process::ExitCode;
 
+use crate::theme::{DARK, LIGHT};
 use ui_shell::regions::{self, Window};
 
 /// The one brand string. Window title and receipt header both read it, so a
@@ -92,9 +94,15 @@ fn main() -> ExitCode {
         );
         let app = shell::PosShell::new(state, prefs_path);
 
-        regions::run_app(APP_NAME, theme, Window::default(), app, |ui, app| {
-            app.draw(ui);
-        })?;
+        regions::run_app(
+            APP_NAME,
+            theme,
+            LIGHT,
+            DARK,
+            Window::default(),
+            app,
+            |ui, app| app.draw(ui),
+        )?;
 
         Ok(())
     })
