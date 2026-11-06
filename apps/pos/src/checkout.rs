@@ -42,6 +42,10 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     let subtotal = state.money(subtotal_minor);
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
+    let tax_minor = state.cart_tax_minor();
+    let tax_rate = state.settings.tax_rate_percent;
+    let pre_tax = state.money(subtotal_minor - tax_minor);
+    let tax_amount = state.money(tax_minor);
 
     // A finished sale is a different screen and needs no mutable payment.
     if let Some(payment) = state.payment.as_mut()
@@ -181,6 +185,14 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
 
         ui.add_space(SPACING.md);
         components::receipt_line(ui, "Subtotal", &subtotal);
+        if tax_minor > 0 {
+            components::receipt_line(ui, "Pre-tax", &pre_tax);
+            components::receipt_line(
+                ui,
+                &format!("Tax (@ {}%)", tax_rate),
+                &tax_amount,
+            );
+        }
         if rounding_minor != 0 {
             // Named by the direction the drawer moved, not by the mechanism: a
             // cashier can act on "rounded down" without knowing what a rounding

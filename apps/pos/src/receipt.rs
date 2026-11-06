@@ -75,6 +75,7 @@ pub fn sample() -> SaleDetail {
         created_at: "02/11/2026 14:03".to_owned(),
         total_minor: 14_750,
         rounding_minor: 0,
+        tax_minor: 0,
         paid_minor: 14_750,
         method: "cash".to_owned(),
         tendered_minor: 20_000,
@@ -171,6 +172,25 @@ pub fn body(
     }
 
     components::divider(ui);
+
+    // When the till charges tax, the shelf price is tax-inclusive: the receipt
+    // backs the tax out of the total so the customer can see what the shop
+    // keeps and what goes to the authority. Zero tax means no line — some small
+    // stores are not VAT-registered.
+    if detail.tax_minor > 0 {
+        row(
+            ui,
+            "Pre-tax",
+            &amount(detail.total_minor - detail.tax_minor, currency),
+            Weight::Plain,
+        );
+        row(
+            ui,
+            &format!("Tax (@ {}%)", detail.tax_minor * 100 / detail.total_minor),
+            &amount(detail.tax_minor, currency),
+            Weight::Plain,
+        );
+    }
 
     // Subtotal earns a line only when rounding moved the figure: otherwise it
     // would repeat the total a centimetre above it. The rounding is named by
@@ -273,6 +293,18 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
     }
 
     out.push('\n');
+    if detail.tax_minor > 0 {
+        out.push_str(&text_row(
+            "Pre-tax",
+            &amount(detail.total_minor - detail.tax_minor, currency),
+        ));
+        out.push('\n');
+        out.push_str(&text_row(
+            &format!("Tax (@ {}%)", detail.tax_minor * 100 / detail.total_minor),
+            &amount(detail.tax_minor, currency),
+        ));
+        out.push('\n');
+    }
     if detail.rounding_minor != 0 {
         out.push_str(&text_row("Subtotal", &amount(detail.total_minor, currency)));
         out.push('\n');
@@ -611,6 +643,7 @@ mod tests {
             created_at: "2026-11-02 14:03".to_owned(),
             total_minor: 12_400,
             rounding_minor: 100,
+            tax_minor: 0,
             paid_minor: 12_500,
             method: "cash".to_owned(),
             tendered_minor: 20_000,

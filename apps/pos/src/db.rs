@@ -66,10 +66,13 @@ pub struct SaleLine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSale {
     pub id: i64,
-    /// The exact sum of the lines.
+    /// The exact sum of the lines, tax-inclusive.
     pub total_minor: i64,
     /// The cash adjustment, signed: `paid = total + rounding`.
     pub rounding_minor: i64,
+    /// The tax the sale collected, included in `total_minor`: `pre_tax =
+    /// total - tax`. Zero when the till charges no tax.
+    pub tax_minor: i64,
     pub tendered_minor: i64,
     pub change_minor: i64,
 }
@@ -454,6 +457,19 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON stock_movements (product_id, id);
             CREATE INDEX IF NOT EXISTS stock_movements_sale
                 ON stock_movements (sale_id) WHERE sale_id IS NOT NULL;
+        "#,
+    },
+    // What the sale collected for the tax authority. The rate is a terminal
+    // setting that can change, so the amount is written onto the sale itself:
+    // a receipt reprinted after the rate moves must show the same tax it did
+    // the day the sale happened. `0` means no tax — some small stores are not
+    // VAT-registered, and `DEFAULT 0` keeps old rows honest without a rewrite.
+    Migration {
+        version: 8,
+        name: "sale_tax",
+        sql: r#"
+            ALTER TABLE sales ADD COLUMN tax_minor INTEGER NOT NULL DEFAULT 0
+                CHECK (tax_minor >= 0);
         "#,
     },
 ];
@@ -1246,6 +1262,7 @@ pub fn record_sale(
     store: &storage::Store,
     lines: &[SaleLine],
     rounding_minor: i64,
+    tax_minor: i64,
     tendered_minor: i64,
     user_id: Option<&str>,
 ) -> anyhow::Result<RecordedSale> {
@@ -1266,6 +1283,11 @@ pub fn record_sale(
             .context("the sale total does not fit in 64 bits")
     })?;
 
+    anyhow::ensure!(
+        tax_minor <= total_minor,
+        "tax cannot exceed the sale total"
+    );
+
     let paid_minor = total_minor
         .checked_add(rounding_minor)
         .context("the amount due does not fit in 64 bits")?;
@@ -1281,8 +1303,9 @@ pub fn record_sale(
     let transaction = store.conn().unchecked_transaction()?;
 
     transaction.execute(
-        "INSERT INTO sales (total_minor, rounding_minor, user_id) VALUES (?1, ?2, ?3)",
-        (total_minor, rounding_minor, user_id),
+        "INSERT INTO sales (total_minor, rounding_minor, tax_minor, user_id) \
+         VALUES (?1, ?2, ?3, ?4)",
+        (total_minor, rounding_minor, tax_minor, user_id),
     )?;
     let id = transaction.last_insert_rowid();
 
@@ -1337,6 +1360,7 @@ pub fn record_sale(
         id,
         total_minor,
         rounding_minor,
+        tax_minor,
         tendered_minor,
         change_minor,
     })
@@ -1682,13 +1706,16 @@ pub struct SaleDetail {
     pub cashier: Option<String>,
     /// Local time, like the list shows: the stored value stays UTC.
     pub created_at: String,
-    /// The pre-rounding amount.
+    /// The pre-rounding amount, tax-inclusive.
     pub total_minor: i64,
     /// Cash rounding on top of `total` — `0` most of the time, and what the
     /// customer paid above the exact total otherwise.
     pub rounding_minor: i64,
     /// `total + rounding`: what actually entered the drawer for this sale.
     pub paid_minor: i64,
+    /// The tax the sale collected, included in `total_minor`. `0` when the
+    /// till charges no tax.
+    pub tax_minor: i64,
     /// " + "-joined payment methods. One sale; one day, "cash + mobile".
     pub method: String,
     /// What was handed over, summed across payments. Cash only today.
@@ -1705,7 +1732,8 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     let conn = store.conn();
 
     let head = match conn.query_row(
-        "SELECT s.total_minor, s.rounding_minor, strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name
+        "SELECT s.total_minor, s.rounding_minor, s.tax_minor, \
+         strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name
          FROM sales s LEFT JOIN users u ON u.id = s.user_id
          WHERE s.id = ?1",
         [id],
@@ -1713,8 +1741,9 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         },
     ) {
@@ -1781,10 +1810,11 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
 
     Some(SaleDetail {
         id,
-        cashier: head.3,
-        created_at: head.2,
+        cashier: head.4,
+        created_at: head.3,
         total_minor: head.0,
         rounding_minor: head.1,
+        tax_minor: head.2,
         paid_minor: head.0 + head.1,
         method: if method_parts.is_empty() {
             "-".to_owned()
@@ -2851,7 +2881,7 @@ mod tests {
         ];
 
         // 2800 + 1000 = 3800 exact; rounded down 20 to the 100 shilling coin.
-        let sale = record_sale(&store, &lines, -20, 4_000, None).expect("record");
+        let sale = record_sale(&store, &lines, -20, 0, 4_000, None).expect("record");
 
         assert_eq!(sale.total_minor, 3_800, "the exact total is kept exact");
         assert_eq!(sale.paid_minor(), 3_780);
@@ -2964,6 +2994,7 @@ mod tests {
                 },
             ],
             0,
+            0,
             4_000,
             Some(&cashier.id),
         )
@@ -3062,6 +3093,7 @@ mod tests {
                 unit_minor: 1_000,
             }],
             0,
+            0,
             4_000,
             None,
         )
@@ -3109,7 +3141,7 @@ mod tests {
         }];
 
         assert!(
-            record_sale(&store, &lines, 0, 2_000, None).is_err(),
+            record_sale(&store, &lines, 0, 0, 2_000, None).is_err(),
             "2000 does not cover 2800"
         );
 
@@ -3129,7 +3161,7 @@ mod tests {
     fn an_empty_cart_is_not_a_sale() {
         let (store, path) = store("empty-cart");
 
-        assert!(record_sale(&store, &[], 0, 0, None).is_err());
+        assert!(record_sale(&store, &[], 0, 0, 0, None).is_err());
         assert_eq!(totals(&store, 3, None), (0, 0));
 
         let _ = std::fs::remove_file(path);
@@ -3149,6 +3181,7 @@ mod tests {
                 qty: 1,
                 unit_minor: 3_400,
             }],
+            0,
             0,
             3_400,
             None,
@@ -3225,6 +3258,7 @@ mod tests {
                 qty: 1,
                 unit_minor: 500,
             }],
+            0,
             0,
             500,
             Some(&brian.id),
@@ -3313,6 +3347,7 @@ mod tests {
             ],
             // Total is 16 500; UGX coins end in 100, so the till rounds up 100.
             100,
+            0,
             16_600,
             Some(&brian.id),
         )
@@ -3354,6 +3389,7 @@ mod tests {
                 qty: 1,
                 unit_minor: 500,
             }],
+            0,
             0,
             1_000,
             None,
@@ -3401,6 +3437,7 @@ mod tests {
                 unit_minor: 5_000,
             }],
             0,
+            0,
             5_000,
             Some(&brian.id),
         )
@@ -3414,6 +3451,7 @@ mod tests {
                 unit_minor: 340,
             }],
             60,
+            0,
             400,
             Some(&brian.id),
         )
@@ -3427,6 +3465,7 @@ mod tests {
                 qty: 1,
                 unit_minor: 12_000,
             }],
+            0,
             0,
             12_000,
             Some(&amina.id),
@@ -3462,6 +3501,7 @@ mod tests {
                 unit_minor: 500,
             }],
             0,
+            0,
             500,
             None,
         )
@@ -3492,6 +3532,7 @@ mod tests {
                 unit_minor: 340,
             }],
             60,
+            0,
             1_000,
             None,
         )
@@ -3504,6 +3545,7 @@ mod tests {
                 qty: 1,
                 unit_minor: 500,
             }],
+            0,
             0,
             500,
             None,
