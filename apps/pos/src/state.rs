@@ -621,6 +621,9 @@ pub struct State {
     /// The receipt fields as typed. Committed together by
     /// [`State::save_receipt_details`], for the same reason as the shop name.
     pub receipt_draft: ReceiptDetails,
+    /// The tax rate as typed. Committed by [`State::save_tax_rate`] so a
+    /// half-typed percentage is never written to disk.
+    pub tax_draft: String,
 
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
@@ -690,6 +693,7 @@ impl State {
         let theme = settings.theme();
         let shop_draft = settings.shop_name.trim().to_owned();
         let receipt_draft = settings.receipt.clone();
+        let tax_draft = settings.tax_rate_percent.to_string();
         // A till upgraded from a build without the scanner has no token yet. A
         // token is not a pairing decision, so generate it on boot and let the
         // settings write below persist it; enabling the listener stays manual.
@@ -745,6 +749,7 @@ impl State {
             backup_confirm: false,
             shop_draft,
             receipt_draft,
+            tax_draft,
             settings,
             paths,
             theme,
@@ -838,6 +843,19 @@ impl State {
         self.receipt_draft = details.clone();
         if self.settings.receipt != details {
             self.settings.receipt = details;
+            self.settings_dirty = true;
+        }
+    }
+
+    /// Commit the tax rate typed in Settings. The draft is parsed as a whole
+    /// percentage; anything that does not parse is ignored rather than written
+    /// to disk, so a stray keystroke cannot invent a rate the shop does not pay.
+    pub fn save_tax_rate(&mut self) {
+        let parsed: Option<i64> = self.tax_draft.trim().parse().ok();
+        let rate = parsed.unwrap_or(0).max(0);
+        self.tax_draft = rate.to_string();
+        if self.settings.tax_rate_percent != rate {
+            self.settings.tax_rate_percent = rate;
             self.settings_dirty = true;
         }
     }
@@ -2141,6 +2159,26 @@ impl State {
         self.cart_total_minor() + self.cart_rounding_minor()
     }
 
+    /// The tax on the cart, given the till's tax rate. Prices are tax-inclusive:
+    /// the shelf price is what the customer pays, so the tax element is backed
+    /// out of the total. `0` when the rate is `0`.
+    ///
+    /// Integer division rounds the pre-tax amount down, which slightly
+    /// under-collects tax on odd figures — acceptable for a small till, and
+    /// `pre_tax + tax` always equals the total.
+    pub fn cart_tax_minor(&self) -> i64 {
+        let rate = self.settings.tax_rate_percent;
+        if rate <= 0 {
+            return 0;
+        }
+        let total = self.cart_total_minor();
+        let pre_tax = total
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(100 + rate))
+            .unwrap_or(0);
+        total - pre_tax
+    }
+
     /// Open the payment screen. Does nothing when the cart is empty or the
     /// screen is already open — both are "the operator pressed Pay twice".
     pub fn start_payment(&mut self) {
@@ -2211,6 +2249,7 @@ impl State {
             &self.store,
             &lines,
             self.cart_rounding_minor(),
+            self.cart_tax_minor(),
             tendered_minor,
             self.session
                 .as_ref()

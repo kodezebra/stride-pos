@@ -3872,12 +3872,7 @@ impl Module for Settings {
                     locked_card(ui, crate::auth::Permission::ManageUsers);
                 }
             }
-            "Tax" => components::empty_state_card(
-                ui,
-                "No tax rules",
-                "Rates are applied at checkout; the table that stores them lands with the sale flow.",
-                160.0,
-            ),
+            "Tax" => tax_card(ui, state),
             _ => components::empty_state_card(
                 ui,
                 "Not connected",
@@ -4185,6 +4180,53 @@ fn shop_caption(state: &State) -> &'static str {
         "Not saved yet."
     } else if saved.is_empty() {
         "Leave it blank to print the app name."
+    } else {
+        "Saved."
+    }
+}
+
+/// The tax rate the till charges, as a whole percentage.
+///
+/// `0` means no tax — some small stores are not VAT-registered. Prices on the
+/// till are tax-inclusive: the shelf price is what the customer pays, and the
+/// receipt backs the tax out underneath the total. Changing the rate does not
+/// alter past sales; each sale records the tax it collected.
+fn tax_card(ui: &mut egui::Ui, state: &mut State) {
+    let dirty = state.tax_draft.trim() != state.settings.tax_rate_percent.to_string();
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "The tax rate the till charges, as a whole percentage. Zero means no \
+             tax. Prices are tax-inclusive: the receipt breaks the tax out \
+             underneath the total, and past sales keep the rate they were sold \
+             at.",
+        );
+        ui.add_space(SPACING.md);
+
+        components::field_label(ui, "Tax rate (%)");
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            text_field(ui, &mut state.tax_draft, "0", 120.0);
+            if dirty && actions::primary(ui, "Save").clicked() {
+                state.save_tax_rate();
+            }
+        });
+
+        ui.add_space(SPACING.xs);
+        components::caption(ui, tax_caption(state));
+    });
+}
+
+/// What the card says under the field.
+fn tax_caption(state: &State) -> &'static str {
+    let rate = state.settings.tax_rate_percent;
+    if state.tax_draft.trim() != rate.to_string() {
+        "Not saved yet."
+    } else if rate == 0 {
+        "No tax charged."
     } else {
         "Saved."
     }
