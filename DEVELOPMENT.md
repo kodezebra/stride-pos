@@ -15,9 +15,9 @@ One of three repos:
 ## Run
 
 ```bash
-cargo run -p pos              # debug
-cargo run --release -p pos    # optimized, single stripped binary
-cargo build --offline         # must always work: every dep is cached
+cargo run -p desktop              # debug
+cargo run --release -p desktop    # optimized, single stripped binary
+cargo build --offline             # must always work: every dep is cached
 ```
 
 Needs a display (X11 or Wayland).
@@ -25,7 +25,7 @@ Needs a display (X11 or Wayland).
 ## Layout
 
 ```
-apps/pos/src/
+apps/desktop/src/
   main.rs       wiring only: open db → migrate → settings → state → shell
   db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
@@ -93,7 +93,7 @@ staff existed read `NULL` and show `-`).
 
 ## Phone scanner
 
-The till side lives in `apps/pos/src/scan.rs` (config, token, pairing URI,
+The till side lives in `apps/desktop/src/scan.rs` (config, token, pairing URI,
 service lifecycle), `scan/protocol.rs` (request validation), and `scan/server.rs`
 (the LAN listener). `shell.rs` owns one `Service` for the life of the process;
 `modules.rs` draws the Settings card, and `state.rs` routes a delivered scan

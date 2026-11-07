@@ -1,6 +1,6 @@
 # Stride POS workspace root.
 #
-# A virtual manifest: the app lives in apps/pos. crates/ is reserved for
+# A virtual manifest: the app lives in apps/desktop. crates/ is reserved for
 # product-internal crates later. Shared plumbing comes from stride-libs at a
 # pinned revision — never a tag, never a branch.
 
@@ -8,7 +8,7 @@
 resolver = "3"
 # `crates/*` joins this list when the first product-internal crate lands; Cargo
 # errors on a glob that matches nothing, so the directory stays empty for now.
-members = ["apps/pos"]
+members = ["apps/desktop"]
 
 [workspace.package]
 version = "0.1.0"

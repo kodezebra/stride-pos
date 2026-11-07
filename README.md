@@ -133,7 +133,7 @@ material as a four-lesson course with practice scenarios and a sign-off sheet.
 Today it is started from a terminal, on a Linux desktop:
 
 ```bash
-cargo run -p pos
+cargo run -p desktop
 ```
 
 There is no installer yet. A release build is published as a Linux tarball on
