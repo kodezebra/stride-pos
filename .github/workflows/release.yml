@@ -25,10 +25,20 @@ jobs:
             exit 1
           fi
 
-  rust:
-    name: Desktop release
+  desktop:
+    name: Desktop packages
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-latest
+            os: linux
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
+            os: windows
     steps:
       - uses: actions/checkout@v4
 
@@ -38,25 +48,31 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#pos-v}" >> "$GITHUB_OUTPUT"
 
+      - name: Install packaging tools (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+
       - name: Build
-        run: cargo build --release --locked -p desktop
+        run: cargo build --release --locked -p desktop --target ${{ matrix.target }}
 
       - name: Package
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          set -eu
-          package="stride-pos-${VERSION}-x86_64-unknown-linux-gnu"
-          mkdir -p "dist/${package}"
-          cp target/release/pos "dist/${package}/stride-pos"
-          cp README.md "dist/${package}/README.md"
-          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
-          rm -rf "dist/${package}"
+          set -euo pipefail
+          BIN_DIR="target/${{ matrix.target }}/release"
+          binary=""
+          for b in desktop desktop.exe pos pos.exe; do
+            if [ -f "$BIN_DIR/$b" ]; then binary="$BIN_DIR/$b"; break; fi
+          done
+          [ -n "$binary" ] || { echo "::error::No release binary found in $BIN_DIR"; exit 1; }
+          chmod +x apps/desktop/package-release.sh
+          ./apps/desktop/package-release.sh "$binary" "$VERSION" dist "${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop
-          path: dist/*.tar.gz
+          name: desktop-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -144,7 +160,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [rust, android]
+    needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -156,11 +172,12 @@ jobs:
         run: |
           set -eu
           cd dist
-          sha256sum *.tar.gz *.apk > SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           name: Stride POS ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           append_body: |
             ## Phone scanner
@@ -169,10 +186,17 @@ jobs:
             the same Wi-Fi as the till, then open **Settings → Scanner** on the
             till, turn the listener on, and scan the pairing QR code with the app.
 
-            The desktop build is the Linux x86_64 tarball. Verify both downloads
-            against `SHA256SUMS.txt`.
+            ## Desktop
+
+            - Linux: `stride-pos-*-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}`
+            - Windows: `stride-pos-*-x86_64-pc-windows-msvc.zip`
+
+            Verify all downloads against `SHA256SUMS.txt`.
           files: |
             dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/*.zip
             dist/*.apk
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
