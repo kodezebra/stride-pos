@@ -500,6 +500,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "app-boot",
+ "argon2",
+ "config",
+ "directories",
+ "getrandom 0.3.4",
+ "money",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "storage",
+ "tiny_http",
+ "tracing",
+ "ui-kit",
+ "ui-shell",
+ "uuid",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2256,28 +2278,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
-]
-
-[[package]]
-name = "pos"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "app-boot",
- "argon2",
- "config",
- "directories",
- "getrandom 0.3.4",
- "money",
- "qrcode",
- "serde",
- "serde_json",
- "storage",
- "tiny_http",
- "tracing",
- "ui-kit",
- "ui-shell",
- "uuid",
 ]
 
 [[package]]

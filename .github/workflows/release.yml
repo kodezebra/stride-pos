@@ -39,7 +39,7 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#pos-v}" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: cargo build --release --locked -p pos
+        run: cargo build --release --locked -p desktop
 
       - name: Package
         env:

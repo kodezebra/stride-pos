@@ -1,5 +1,5 @@
 [package]
-name = "pos"
+name = "desktop"
 version.workspace = true
 edition.workspace = true
 description = "Stride POS - point of sale desktop app"

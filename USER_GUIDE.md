@@ -143,7 +143,7 @@ lock — it is in memory, not written until you complete a sale.
 
 Do this once, in order. Budget about twenty minutes.
 
-1. **Launch the app** (`cargo run -p pos`, or the installed release). The very
+1. **Launch the app** (`cargo run -p desktop`, or the installed release). The very
    first screen is the lock screen in "Set up this till" mode — not the normal
    sign-in list.
 2. **Create the owner account.** Enter the owner's name (e.g. "Amina"), a
