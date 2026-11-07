@@ -23,6 +23,7 @@ use ui_shell::egui;
 use ui_shell::regions;
 
 use crate::actions;
+use crate::category_seeds;
 use crate::db::{Product, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
 use crate::state::{self, SellView, State};
@@ -2221,11 +2222,27 @@ pub(crate) fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
 /// backdrop covers the screen and the list behind it cannot be clicked.
 pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
-    // Suggested category names, computed before the form is borrowed for
-    // editing: the list comes from the catalog read-only and is offered from
-    // the dropdown into the draft being edited.
+    // Suggested category names: categories the shop has already created, then
+    // the seed list for this till's business type. Case-insensitive
+    // de-duplication keeps "Vitamins" and "vitamins" as one shelf.
     let suggestions: Vec<String> = match state.product_editor.as_ref() {
-        Some(draft) => crate::state::category_suggestions(&state.categories, &draft.category),
+        Some(draft) => {
+            let mut names: Vec<String> = crate::db::categories_list(&state.store)
+                .iter()
+                .map(|category| category.name.clone())
+                .collect();
+            if let Some(business_type) = &state.settings.business_type {
+                for seed in category_seeds::seed_names(business_type) {
+                    if !names.iter().any(|name| name.eq_ignore_ascii_case(&seed)) {
+                        names.push(seed);
+                    }
+                }
+            }
+            // Remove the category already in the field: suggesting it is noise.
+            let current = draft.category.trim();
+            names.retain(|name| !name.eq_ignore_ascii_case(current));
+            names
+        }
         None => Vec::new(),
     };
     let Some(draft) = state.product_editor.as_mut() else {
@@ -3862,6 +3879,8 @@ impl Module for Settings {
                 ui.add_space(SPACING.lg);
                 terminal_card(ui, state);
                 ui.add_space(SPACING.lg);
+                business_type_card(ui, state);
+                ui.add_space(SPACING.lg);
                 backup_card(ui, state);
             }
             "Scanner" => scanner_card(ui, state),
@@ -4276,6 +4295,45 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
     });
 }
 
+/// Which kind of shop this till is. The choice only affects which category
+/// names the product form offers as suggestions: it never inserts categories
+/// automatically, and the shop can rename or add to them at any time.
+fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
+    let dirty = state.business_draft.trim()
+        != state.settings.business_type.as_deref().unwrap_or("");
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Picks which category names the product form offers as suggestions. \
+             It never inserts anything: the shop's own categories are the ones \
+             it has actually used, and any name can be added from the form.",
+        );
+        ui.add_space(SPACING.md);
+
+        components::field_label(ui, "Business type");
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            text_field(ui, &mut state.business_draft, "supermarket", 220.0);
+            components::caption(ui, "e.g. supermarket, pharmacy, stationery");
+            if dirty && actions::primary(ui, "Save").clicked() {
+                state.save_business_type();
+            }
+        });
+
+        ui.add_space(SPACING.xs);
+        if dirty {
+            components::caption(ui, "Not saved yet.");
+        } else if let Some(ref current) = state.settings.business_type {
+            components::caption(ui, &format!("Saved: {current}."));
+        } else {
+            components::caption(ui, "No business type set. Category suggestions are off.");
+        }
+    });
+}
+
 /// The owner's copy of the books.
 ///
 /// A button, not a dialog: a backup is the thing an owner postpones, so the
@@ -4638,6 +4696,7 @@ mod tests {
             name: name.to_owned(),
             price_minor: 1_000,
             category: "Drinks".to_owned(),
+            category_id: None,
             barcode: barcode.map(str::to_owned),
         }
     }

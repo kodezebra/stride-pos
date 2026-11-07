@@ -31,6 +31,10 @@ pub struct Settings {
     /// customer pays, and the receipt breaks the tax out underneath the total.
     /// Default `0` because some small stores are not VAT-registered.
     pub tax_rate_percent: i64,
+    /// The shop's business type: `supermarket`, `pharmacy`, `stationery`, or
+    /// `None` when not yet chosen. It selects which category seed list the
+    /// product form offers as suggestions; it never auto-inserts anything.
+    pub business_type: Option<String>,
 }
 
 /// The receipt's optional content, kept apart from the shop name because these

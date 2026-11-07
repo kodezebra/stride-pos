@@ -23,6 +23,7 @@
 mod actions;
 mod auth;
 mod checkout;
+mod category_seeds;
 mod commands;
 mod currencies;
 mod db;

@@ -92,6 +92,7 @@ pub fn template_csv(currency: Currency) -> String {
                 id: 0,
                 name: "Sugar 1 kg".to_owned(),
                 category: "Groceries".to_owned(),
+                category_id: None,
                 price_minor: 4_500,
                 barcode: None,
             },
@@ -99,6 +100,7 @@ pub fn template_csv(currency: Currency) -> String {
                 id: 0,
                 name: "Bread".to_owned(),
                 category: "Bakery".to_owned(),
+                category_id: None,
                 price_minor: 3_400,
                 barcode: None,
             },
@@ -158,6 +160,7 @@ mod tests {
             id: 0,
             name: name.to_owned(),
             category: category.to_owned(),
+            category_id: None,
             price_minor,
             barcode: barcode.map(str::to_owned),
         }

@@ -88,12 +88,18 @@ impl RecordedSale {
 ///
 /// `price_minor` is in the till's currency, like every other amount: there is no
 /// second unit and nothing to convert at checkout.
+///
+/// `category` is the denormalized name printed on receipts and reports — it is
+/// copied at save time so a receipt never changes when a category is renamed.
+/// `category_id` links to [`Category`] so the product form can offer a real
+/// dropdown and renaming a category cascades to every product that uses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Product {
     pub id: i64,
     pub name: String,
     pub price_minor: i64,
     pub category: String,
+    pub category_id: Option<i64>,
     /// Optional, and unique when present: two products claiming one barcode is
     /// a scanning bug rather than a preference.
     pub barcode: Option<String>,
@@ -114,6 +120,19 @@ pub struct Supplier {
     pub address: Option<String>,
     pub notes: Option<String>,
     pub archived: bool,
+}
+
+/// A category the shop uses to group products.
+///
+/// Categories live in their own table so renaming one updates every product
+/// that points at it, and so the product form can offer a real dropdown
+/// instead of re-deriving the list from the catalog each frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub color: Option<String>,
 }
 
 /// The editable fields of a supplier, as the form holds them.
@@ -472,6 +491,31 @@ pub const MIGRATIONS: &[Migration] = &[
                 CHECK (tax_minor >= 0);
         "#,
     },
+    // Categories: a proper table so the product form can offer a dropdown and
+    // renaming a shelf cascades to every product on it. `category_id` is added
+    // to `products` and the old free-text `category` column stays as the
+    // denormalized name printed on receipts.
+    Migration {
+        version: 9,
+        name: "create_categories",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS categories (
+                id          INTEGER PRIMARY KEY,
+                name        TEXT    NOT NULL CHECK (length(trim(name)) > 0),
+                sort_order  INTEGER NOT NULL DEFAULT 0,
+                color       TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS categories_name
+                ON categories (name COLLATE NOCASE);
+
+            ALTER TABLE products ADD COLUMN category_id INTEGER
+                REFERENCES categories(id) ON DELETE SET NULL;
+
+            CREATE INDEX IF NOT EXISTS products_category
+                ON products (category_id);
+        "#,
+    },
 ];
 
 /// Repair a `suppliers` table left behind by an intermediate build of the
@@ -785,7 +829,7 @@ pub fn has_sales(store: &storage::Store) -> bool {
 /// move the filter into SQL.
 pub fn products(store: &storage::Store) -> Vec<Product> {
     let mut statement = match store.conn().prepare(
-        "SELECT id, name, price_minor, category, barcode
+        "SELECT id, name, price_minor, category, category_id, barcode
          FROM products ORDER BY name COLLATE NOCASE",
     ) {
         Ok(statement) => statement,
@@ -801,7 +845,8 @@ pub fn products(store: &storage::Store) -> Vec<Product> {
             name: row.get(1)?,
             price_minor: row.get(2)?,
             category: row.get(3)?,
-            barcode: row.get(4)?,
+            category_id: row.get(4)?,
+            barcode: row.get(5)?,
         })
     });
 
@@ -838,18 +883,83 @@ pub fn categories(store: &storage::Store) -> Vec<String> {
     }
 }
 
+/// Every row in the `categories` table, by name.
+///
+/// Used by the product form's dropdown: these are the categories the shop has
+/// actually created, not the seed list the app invented.
+pub fn categories_list(store: &storage::Store) -> Vec<Category> {
+    let mut statement = match store
+        .conn()
+        .prepare("SELECT id, name, sort_order, color FROM categories ORDER BY sort_order, name COLLATE NOCASE")
+    {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "categories_list prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok(Category {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            sort_order: row.get(2)?,
+            color: row.get(3)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "categories_list query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Look up a category by name, inserting it when it does not exist.
+///
+/// Returns the category id. Case-insensitive lookup because "Vitamins" and
+/// "vitamins" are the same shelf, and a second product typed by hand should not
+/// create a duplicate.
+pub fn find_or_insert_category(store: &storage::Store, name: &str) -> anyhow::Result<i64> {
+    let name = name.trim();
+    anyhow::ensure!(!name.is_empty(), "a category needs a name");
+
+    // Try to find an existing one (case-insensitive).
+    if let Ok(found) = store.conn().query_row(
+        "SELECT id FROM categories WHERE name = ?1 COLLATE NOCASE",
+        [name],
+        |row| row.get::<_, i64>(0),
+    ) {
+        return Ok(found);
+    }
+
+    // Insert it.
+    store.conn().execute(
+        "INSERT INTO categories (name, sort_order) VALUES (?1, 0)",
+        [name],
+    )?;
+    Ok(store.conn().last_insert_rowid())
+}
+
 /// Add a product and return its id.
+///
+/// `category_id` links to the `categories` table when the product was saved
+/// with a known shelf; `None` when it was saved with free text that was never
+/// added to the categories table.
 pub fn insert_product(
     store: &storage::Store,
     name: &str,
     price_minor: i64,
     category: &str,
+    category_id: Option<i64>,
     barcode: Option<&str>,
 ) -> anyhow::Result<i64> {
     store.conn().execute(
-        "INSERT INTO products (name, price_minor, category, barcode)
-         VALUES (?1, ?2, ?3, ?4)",
-        (name, price_minor, category, barcode),
+        "INSERT INTO products (name, price_minor, category, category_id, barcode)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (name, price_minor, category, category_id, barcode),
     )?;
     Ok(store.conn().last_insert_rowid())
 }
@@ -865,13 +975,14 @@ pub fn update_product(
     name: &str,
     price_minor: i64,
     category: &str,
+    category_id: Option<i64>,
     barcode: Option<&str>,
 ) -> anyhow::Result<()> {
     let changed = store.conn().execute(
         "UPDATE products
-         SET name = ?2, price_minor = ?3, category = ?4, barcode = ?5
+         SET name = ?2, price_minor = ?3, category = ?4, category_id = ?5, barcode = ?6
          WHERE id = ?1",
-        (id, name, price_minor, category, barcode),
+        (id, name, price_minor, category, category_id, barcode),
     )?;
     anyhow::ensure!(changed == 1, "product {id} is no longer in the catalog");
     Ok(())
@@ -2620,9 +2731,9 @@ mod tests {
         assert!(categories(&store).is_empty());
 
         let flat_white =
-            insert_product(&store, "Flat white", 3_400, "Coffee", None).expect("insert");
-        insert_product(&store, "Croissant", 3_200, "Bakery", Some("4001")).expect("insert");
-        insert_product(&store, "Espresso", 2_800, "Coffee", None).expect("insert");
+            insert_product(&store, "Flat white", 3_400, "Coffee", None, None).expect("insert");
+        insert_product(&store, "Croissant", 3_200, "Bakery", None, Some("4001")).expect("insert");
+        insert_product(&store, "Espresso", 2_800, "Coffee", None, None).expect("insert");
 
         let names: Vec<String> = products(&store)
             .into_iter()
@@ -2641,6 +2752,7 @@ mod tests {
             "Flat white",
             3_600,
             "Coffee",
+            None,
             Some("4002"),
         )
         .expect("update");
@@ -2661,7 +2773,7 @@ mod tests {
     fn a_barcode_belongs_to_one_product() {
         let (store, path) = store("barcodes");
         let espresso =
-            insert_product(&store, "Espresso", 2_800, "Coffee", Some("4001")).expect("insert");
+            insert_product(&store, "Espresso", 2_800, "Coffee", None, Some("4001")).expect("insert");
 
         assert!(barcode_taken(&store, "4001", None));
         assert!(
@@ -2671,13 +2783,13 @@ mod tests {
         assert!(!barcode_taken(&store, "4002", None));
 
         assert!(
-            insert_product(&store, "Croissant", 3_200, "Bakery", Some("4001")).is_err(),
+            insert_product(&store, "Croissant", 3_200, "Bakery", None, Some("4001")).is_err(),
             "the unique index is the real guard, not the pre-check"
         );
 
         // Products without a barcode are not competing for one.
-        insert_product(&store, "Filter", 2_600, "Coffee", None).expect("insert");
-        insert_product(&store, "Lemonade", 3_000, "Cold", None).expect("insert");
+        insert_product(&store, "Filter", 2_600, "Coffee", None, None).expect("insert");
+        insert_product(&store, "Lemonade", 3_000, "Cold", None, None).expect("insert");
 
         let _ = std::fs::remove_file(path);
     }
@@ -2687,7 +2799,7 @@ mod tests {
         let (store, path) = store("negative-price");
 
         assert!(
-            insert_product(&store, "Refund", -100, "Coffee", None).is_err(),
+            insert_product(&store, "Refund", -100, "Coffee", None, None).is_err(),
             "a price is a non-negative amount; the CHECK is the guard"
         );
 
@@ -2863,7 +2975,7 @@ mod tests {
     fn a_sale_writes_its_lines_and_its_payment() {
         let (store, path) = store("record-sale");
         let espresso =
-            insert_product(&store, "Espresso", 2_800, "Coffee", None).expect("insert product");
+            insert_product(&store, "Espresso", 2_800, "Coffee", None, None).expect("insert product");
 
         let lines = [
             SaleLine {
@@ -2924,7 +3036,7 @@ mod tests {
     #[test]
     fn tracking_writes_an_opening_movement_and_manual_kinds_keep_their_signs() {
         let (store, path) = store("stock-track");
-        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
 
         track_product(&store, soap, 12, 3, None).expect("track");
         let tracked = stock(&store);
@@ -2964,8 +3076,8 @@ mod tests {
     #[test]
     fn a_sale_subtracts_only_the_tracked_lines() {
         let (store, path) = store("stock-sale");
-        let soap = insert_product(&store, "Soap", 1_000, "Household", None).expect("soap");
-        let bun = insert_product(&store, "Bun", 500, "Bakery", None).expect("bun");
+        let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("soap");
+        let bun = insert_product(&store, "Bun", 500, "Bakery", None, None).expect("bun");
         track_product(&store, soap, 10, 5, None).expect("track soap");
 
         let cashier = insert_user(
@@ -3033,7 +3145,7 @@ mod tests {
     #[test]
     fn a_zero_opening_count_tracks_without_pretending_anything_moved() {
         let (store, path) = store("stock-zero");
-        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
 
         track_product(&store, soap, 0, 5, None).expect("track");
         let tracked = stock(&store);
@@ -3051,7 +3163,7 @@ mod tests {
     #[test]
     fn a_movement_whose_sign_contradicts_its_kind_is_refused() {
         let (store, path) = store("stock-signs");
-        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
         track_product(&store, soap, 5, 2, None).expect("track");
 
         for (delta, kind) in [
@@ -3069,7 +3181,7 @@ mod tests {
         }
         assert_eq!(stock(&store)[0].on_hand, 5, "nothing was written");
 
-        let untracked = insert_product(&store, "Bun", 500, "Bakery", None).expect("bun");
+        let untracked = insert_product(&store, "Bun", 500, "Bakery", None, None).expect("bun");
         assert!(
             record_stock_movement(&store, untracked, 1, StockKind::Receive, "", None).is_err(),
             "an untracked product has no ledger to append to"
@@ -3081,7 +3193,7 @@ mod tests {
     #[test]
     fn stock_may_go_negative_when_the_shelf_and_the_ledger_disagree() {
         let (store, path) = store("stock-negative");
-        let soap = insert_product(&store, "Soap", 1_000, "Household", None).expect("product");
+        let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("product");
         track_product(&store, soap, 1, 2, None).expect("track");
 
         record_sale(
@@ -3115,7 +3227,7 @@ mod tests {
     #[test]
     fn history_is_newest_first_and_capped() {
         let (store, path) = store("stock-history");
-        let soap = insert_product(&store, "Soap", 1_200, "Household", None).expect("product");
+        let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
         track_product(&store, soap, 0, 5, None).expect("track");
 
         for _ in 0..(MOVEMENT_HISTORY + 5) {
@@ -3171,7 +3283,7 @@ mod tests {
     fn deleting_a_product_does_not_rewrite_its_receipt() {
         let (store, path) = store("sale-then-delete");
         let flat_white =
-            insert_product(&store, "Flat white", 3_400, "Coffee", None).expect("insert product");
+            insert_product(&store, "Flat white", 3_400, "Coffee", None, None).expect("insert product");
 
         let sale = record_sale(
             &store,

@@ -110,17 +110,20 @@ pub struct ProductDraft {
     pub name: String,
     pub price: String,
     pub category: String,
+    #[allow(dead_code)]
+    pub category_id: Option<i64>,
     pub barcode: String,
     pub error: Option<String>,
 }
 
 impl ProductDraft {
-    fn new(category: String) -> Self {
+    fn new(category: String, category_id: Option<i64>) -> Self {
         Self {
             id: None,
             name: String::new(),
             price: String::new(),
             category,
+            category_id,
             barcode: String::new(),
             error: None,
         }
@@ -244,6 +247,7 @@ pub struct StockHistory {
 /// database until a product actually uses one, so a shop that names its own
 /// shelves simply outgrows the list — and a till whose catalog is untouched
 /// still filters on nothing, exactly as before.
+#[allow(dead_code)]
 pub const STARTER_CATEGORIES: &[&str] = &[
     "Grains, Rice & Flours",
     "Spices, Masalas & Seasonings",
@@ -265,6 +269,7 @@ pub const STARTER_CATEGORIES: &[&str] = &[
 /// de-duplicating, because "Drinks" and "drinks" are meant to be one category
 /// and must not advertise themselves as two. `current` is left out — a
 /// suggestion for the name already in the field is noise.
+#[allow(dead_code)]
 pub fn category_suggestions(categories: &[String], current: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let current = current.trim();
@@ -624,6 +629,9 @@ pub struct State {
     /// The tax rate as typed. Committed by [`State::save_tax_rate`] so a
     /// half-typed percentage is never written to disk.
     pub tax_draft: String,
+    /// The business type as typed. Committed by [`State::save_business_type`]
+    /// so a half-chosen value is never written to disk.
+    pub business_draft: String,
 
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
@@ -694,6 +702,7 @@ impl State {
         let shop_draft = settings.shop_name.trim().to_owned();
         let receipt_draft = settings.receipt.clone();
         let tax_draft = settings.tax_rate_percent.to_string();
+        let business_draft = settings.business_type.clone().unwrap_or_default();
         // A till upgraded from a build without the scanner has no token yet. A
         // token is not a pairing decision, so generate it on boot and let the
         // settings write below persist it; enabling the listener stays manual.
@@ -750,6 +759,7 @@ impl State {
             shop_draft,
             receipt_draft,
             tax_draft,
+            business_draft,
             settings,
             paths,
             theme,
@@ -856,6 +866,27 @@ impl State {
         self.tax_draft = rate.to_string();
         if self.settings.tax_rate_percent != rate {
             self.settings.tax_rate_percent = rate;
+            self.settings_dirty = true;
+        }
+    }
+
+    /// Commit the business type chosen in Settings. The value must match one of
+    /// the seed files; anything else is ignored. The choice only affects which
+    /// category names the product form offers as suggestions — it never inserts
+    /// categories automatically.
+    pub fn save_business_type(&mut self) {
+        let chosen = self.business_draft.trim().to_owned();
+        if chosen.is_empty() {
+            self.business_draft = String::new();
+            if self.settings.business_type.is_some() {
+                self.settings.business_type = None;
+                self.settings_dirty = true;
+            }
+            return;
+        }
+        if self.settings.business_type.as_deref() != Some(&chosen) {
+            self.settings.business_type = Some(chosen.clone());
+            self.business_draft = chosen;
             self.settings_dirty = true;
         }
     }
@@ -1521,7 +1552,12 @@ impl State {
             .category
             .clone()
             .unwrap_or_else(|| "General".to_owned());
-        self.product_editor = Some(ProductDraft::new(category));
+        // Find the category id if this category already exists in the table.
+        let category_id = crate::db::categories_list(&self.store)
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(&category))
+            .map(|c| c.id);
+        self.product_editor = Some(ProductDraft::new(category, category_id));
         self.product_delete = None;
         self.notice = None;
     }
@@ -1582,6 +1618,7 @@ impl State {
             name: product.name.clone(),
             price: plain_amount(product.price_minor, self.currency),
             category: product.category.clone(),
+            category_id: product.category_id,
             barcode: product.barcode.clone().unwrap_or_default(),
             error: None,
         });
@@ -1616,6 +1653,15 @@ impl State {
             category
         };
 
+        // Look up or create the category row, then link the product to it.
+        let category_id = match crate::db::find_or_insert_category(&self.store, &category) {
+            Ok(id) => Some(id),
+            Err(error) => {
+                tracing::error!(error = %error, category = %category, "could not resolve category");
+                None
+            }
+        };
+
         let price_minor = match Money::parse(&price_text, self.currency) {
             Ok(price) if price.minor() >= 0 => price.minor(),
             Ok(_) => return self.editor_error("A price cannot be negative."),
@@ -1636,6 +1682,7 @@ impl State {
                 &name,
                 price_minor,
                 &category,
+                category_id,
                 barcode.as_deref(),
             ),
             None => crate::db::insert_product(
@@ -1643,6 +1690,7 @@ impl State {
                 &name,
                 price_minor,
                 &category,
+                category_id,
                 barcode.as_deref(),
             )
             .map(|_| ()),
@@ -2036,6 +2084,7 @@ impl State {
                 &row.name,
                 row.price_minor,
                 &row.category,
+                None,
                 row.barcode.as_deref(),
             ) {
                 // The catalog's own rejects count like the file's: a row the
@@ -2340,7 +2389,7 @@ mod tests {
         store.migrate(crate::db::MIGRATIONS).expect("migrate");
         // A cart only ever holds real products — `sale_lines.product_id` is a
         // foreign key — so the first row is the one `line()` points at.
-        crate::db::insert_product(&store, "Test item", 100, "Test", None).expect("seed product");
+        crate::db::insert_product(&store, "Test item", 100, "Test", None, None).expect("seed product");
         let mut state = State::new(
             store,
             0,
@@ -2653,6 +2702,7 @@ mod tests {
             name: "Hot water".to_owned(),
             price: "100".to_owned(),
             category: "   ".to_owned(),
+            category_id: None,
             barcode: String::new(),
             error: None,
         });
