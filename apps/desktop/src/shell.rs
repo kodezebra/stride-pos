@@ -88,10 +88,18 @@ impl PosShell {
         // effect on the next frame, then hand every scan to the same routing a
         // keyboard scan uses.
         self.scan.sync(&self.state.settings.scanner);
-        for event in self.scan.drain() {
+        let events = self.scan.drain();
+        let had_scan = !events.is_empty();
+        for event in events {
             self.state.receive_scan(event);
         }
         self.state.scanner_status = self.scan.status().clone();
+        // A scan that arrived while the till was idle still lands within a
+        // single frame: ask egui to repaint immediately so the cart updates
+        // instead of waiting for the next touch or mouse move.
+        if had_scan {
+            ui.ctx().request_repaint();
+        }
 
         // A healthy listener can still be unreachable, because the host
         // firewall drops the packet first. Probe the port the listener is on,

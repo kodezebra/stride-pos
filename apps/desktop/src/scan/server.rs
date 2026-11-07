@@ -10,29 +10,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use tiny_http::{Header, Request, Response, Server};
 
 use super::ScanEvent;
 use super::protocol::{self, MAX_BODY_BYTES};
 
-/// How often the worker checks whether the app is closing. Short enough that
-/// quitting feels immediate, long enough not to wake the CPU for nothing.
-const POLL: Duration = Duration::from_millis(200);
-
 const TOKEN_HEADER: &str = "X-Till-Token";
 
 pub struct Listener {
     stop: Arc<AtomicBool>,
     port: u16,
+    /// Kept so [`Listener::stop`] can unblock a worker stuck in the blocking
+    /// [`Server::recv`] below, letting it observe `stop` and exit without
+    /// waiting for the next request.
+    server: Arc<Server>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Listener {
     pub fn start(port: u16, token: String, tx: Sender<ScanEvent>) -> Result<Self, String> {
-        let server = Server::http(("0.0.0.0", port))
-            .map_err(|error| format!("Could not listen on port {port}: {error}"))?;
+        let server = Arc::new(
+            Server::http(("0.0.0.0", port))
+                .map_err(|error| format!("Could not listen on port {port}: {error}"))?,
+        );
         let bound = server
             .server_addr()
             .to_ip()
@@ -40,16 +41,18 @@ impl Listener {
             .unwrap_or(port);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let worker_server = Arc::clone(&server);
 
         let worker = thread::Builder::new()
             .name("scan-listener".to_owned())
-            .spawn(move || run(server, token, tx, worker_stop))
+            .spawn(move || run(worker_server, token, tx, worker_stop))
             .map_err(|error| format!("Could not start the scanner listener: {error}"))?;
 
         tracing::info!(port = bound, "barcode listener started");
         Ok(Self {
             stop,
             port: bound,
+            server,
             worker: Some(worker),
         })
     }
@@ -60,6 +63,9 @@ impl Listener {
 
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wake a worker blocked in recv() so it observes `stop` and exits
+        // instead of waiting for the next request (which may never come).
+        self.server.unblock();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -70,18 +76,23 @@ impl Listener {
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.server.unblock();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
 
-fn run(server: Server, token: String, tx: Sender<ScanEvent>, stop: Arc<AtomicBool>) {
+/// Blocks until an HTTP request arrives, so a scan is handled the instant it
+/// reaches the till instead of waiting for a poll interval.
+fn run(server: Arc<Server>, token: String, tx: Sender<ScanEvent>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
-        match server.recv_timeout(POLL) {
-            Ok(Some(request)) => handle(request, &token, &tx),
-            Ok(None) => {}
+        match server.recv() {
+            Ok(request) => handle(request, &token, &tx),
             Err(error) => {
+                // `recv()` returns an error when the server is unblocked
+                // (shutdown) or the socket closes. Only log it when we were
+                // not asked to stop.
                 if !stop.load(Ordering::Relaxed) {
                     tracing::warn!(error = %error, "barcode listener could not receive a request");
                 }
@@ -213,6 +224,7 @@ mod tests {
     use std::io::Write;
     use std::net::TcpStream;
     use std::sync::mpsc::{self, Receiver};
+    use std::time::Duration;
 
     use super::*;
     use crate::scan::ScanAction;
