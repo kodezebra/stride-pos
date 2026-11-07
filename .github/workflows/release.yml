@@ -205,8 +205,8 @@ jobs:
 
             ## Desktop
 
-            - Linux: `stride-pos-*-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}`
-            - Windows: `stride-pos-*-x86_64-pc-windows-msvc.zip`
+            - Linux: `stride-pos-*-linux.{tar.gz,deb,rpm}`
+            - Windows: `stride-pos-*-windows.zip` and `stride-pos-*-windows-setup.exe`
 
             Verify all downloads against `SHA256SUMS.txt`.
           files: |

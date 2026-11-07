@@ -16,7 +16,13 @@ outdir="$3"
 target="$4"
 
 name="stride-pos"
-base="${name}-${version}-${target}"
+# Friendly OS label instead of the full Rust target triple.
+case "$target" in
+  *-linux-gnu)  distro="linux" ;;
+  *-pc-windows-msvc) distro="windows" ;;
+  *)            distro="$target" ;;
+esac
+base="${name}-${version}-${distro}"
 mkdir -p "$outdir"
 
 if [[ "$target" == *-pc-windows-msvc ]]; then
