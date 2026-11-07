@@ -632,6 +632,9 @@ pub struct State {
     /// The business type as typed. Committed by [`State::save_business_type`]
     /// so a half-chosen value is never written to disk.
     pub business_draft: String,
+    /// Whether the operator chose "Other" in the business-type picker and is
+    /// typing a custom value instead of one of the seeded types.
+    pub business_showing_other: bool,
 
     /// The shop's configuration, loaded once at startup and written back when
     /// something in Settings changes.
@@ -760,6 +763,7 @@ impl State {
             receipt_draft,
             tax_draft,
             business_draft,
+            business_showing_other: false,
             settings,
             paths,
             theme,
@@ -874,8 +878,11 @@ impl State {
     /// the seed files; anything else is ignored. The choice only affects which
     /// category names the product form offers as suggestions — it never inserts
     /// categories automatically.
+    ///
+    /// Stored lowercased so "Supermarket" and "supermarket" both match the
+    /// seeded category list.
     pub fn save_business_type(&mut self) {
-        let chosen = self.business_draft.trim().to_owned();
+        let chosen = self.business_draft.trim().to_ascii_lowercase();
         if chosen.is_empty() {
             self.business_draft = String::new();
             if self.settings.business_type.is_some() {

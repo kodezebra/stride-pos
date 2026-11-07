@@ -2301,7 +2301,7 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                                 components::caption(ui, "No other categories yet.");
                             }
                             for name in &suggestions {
-                                if ui.button(name).clicked() {
+                                if ui.selectable_label(false, name).clicked() {
                                     draft.category = name.clone();
                                     ui.close();
                                 }
@@ -4295,13 +4295,19 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
     });
 }
 
+/// The seeded business types the app has category suggestions for, in the
+/// order they appear in the picker. Any value not here is treated as "Other"
+/// and yields no seeded categories — the shop uses its own categories instead.
+const BUSINESS_TYPES: [&str; 3] = ["Supermarket", "Pharmacy", "Stationery"];
+
 /// Which kind of shop this till is. The choice only affects which category
 /// names the product form offers as suggestions: it never inserts categories
 /// automatically, and the shop can rename or add to them at any time.
+///
+/// A dropdown instead of a free-text field, so the operator cannot type a
+/// case variant the seed lookup misses (e.g. "Supermarket" vs "supermarket").
+/// "Other…" opens a custom text field for types the app does not seed.
 fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
-    let dirty = state.business_draft.trim()
-        != state.settings.business_type.as_deref().unwrap_or("");
-
     components::card(ui, |ui| {
         ui.set_min_width(ui.available_width());
         components::caption(
@@ -4316,12 +4322,54 @@ fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.xs);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
-            text_field(ui, &mut state.business_draft, "supermarket", 220.0);
-            components::caption(ui, "e.g. supermarket, pharmacy, stationery");
-            if dirty && actions::primary(ui, "Save").clicked() {
-                state.save_business_type();
-            }
+            egui::ComboBox::from_id_salt("pos_business_type")
+                .width(220.0)
+                .selected_text(if state.business_draft.trim().is_empty() {
+                    "Pick…"
+                } else {
+                    &state.business_draft
+                })
+                .show_ui(ui, |ui| {
+                    ui.set_min_width(200.0);
+                    for kind in BUSINESS_TYPES {
+                        let active = state
+                            .business_draft
+                            .trim()
+                            .eq_ignore_ascii_case(kind);
+                        if ui.selectable_label(active, kind).clicked() {
+                            state.business_draft = kind.to_ascii_lowercase();
+                            state.business_showing_other = false;
+                            ui.close();
+                        }
+                    }
+                    if ui.selectable_label(state.business_showing_other, "Other…").clicked() {
+                        state.business_showing_other = true;
+                        ui.close();
+                    }
+                });
         });
+
+        if state.business_showing_other {
+            ui.add_space(SPACING.xs);
+            ui.horizontal(|ui| {
+                ui.label("Custom type:");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut state.business_draft, "e.g. boutique", 220.0);
+            });
+            components::caption(
+                ui,
+                "No seeded category suggestions for a custom type; the shop's \
+                 own categories are used instead.",
+            );
+        }
+
+        let chosen = state.business_draft.trim();
+        let dirty = !chosen.is_empty()
+            && state.settings.business_type.as_deref() != Some(chosen);
+        ui.add_space(SPACING.xs);
+        if dirty && actions::primary(ui, "Save").clicked() {
+            state.save_business_type();
+        }
 
         ui.add_space(SPACING.xs);
         if dirty {

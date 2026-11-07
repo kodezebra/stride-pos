@@ -22,7 +22,10 @@ const STATIONERY_JSON: &str = seed_file!("/data/categories/stationery.json");
 /// Returns an empty vector for an unknown type so the dropdown falls back to
 /// categories the shop has already created.
 pub fn seed_names(business_type: &str) -> Vec<String> {
-    let json = match business_type {
+    // Case-insensitive so "Supermarket" and "supermarket" both match the
+    // seeded file. The stored value is normalized to lowercase on save, but
+    // older settings files may still hold a mixed-case value.
+    let json = match business_type.to_ascii_lowercase().as_str() {
         "supermarket" => SUPERMARKET_JSON,
         "pharmacy" => PHARMACY_JSON,
         "stationery" => STATIONERY_JSON,
@@ -50,6 +53,13 @@ mod tests {
         assert!(names.contains(&"Bakery".to_owned()));
         assert!(names.contains(&"Beverages".to_owned()));
         assert!(!names.is_empty());
+    }
+
+    #[test]
+    fn supermarket_mixed_case_returns_names() {
+        let names = seed_names("Supermarket");
+        assert!(!names.is_empty());
+        assert!(names.contains(&"Bakery".to_owned()));
     }
 
     #[test]
