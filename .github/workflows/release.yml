@@ -52,8 +52,19 @@ jobs:
         if: matrix.os == 'linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
 
+      - name: Install Inno Setup (Windows)
+        if: matrix.os == 'windows'
+        run: choco install innosetup --yes
+
       - name: Build
         run: cargo build --release --locked -p desktop --target ${{ matrix.target }}
+
+      - name: Stage files for Windows installer
+        if: matrix.os == 'windows'
+        run: |
+          mkdir -p dist/windows
+          cp "target/${{ matrix.target }}/release/desktop.exe" dist/windows/stride-pos.exe
+          cp README.md dist/windows/README.md
 
       - name: Package
         env:
@@ -68,6 +79,12 @@ jobs:
           [ -n "$binary" ] || { echo "::error::No release binary found in $BIN_DIR"; exit 1; }
           chmod +x apps/desktop/package-release.sh
           ./apps/desktop/package-release.sh "$binary" "$VERSION" dist "${{ matrix.target }}"
+
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.os == 'windows'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: iscc /DMyAppVersion=$VERSION apps/desktop/windows/stride-pos.iss
 
       - uses: actions/upload-artifact@v4
         with:
@@ -197,6 +214,7 @@ jobs:
             dist/*.deb
             dist/*.rpm
             dist/*.zip
+            dist/*.exe
             dist/*.apk
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
