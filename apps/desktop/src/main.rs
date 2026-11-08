@@ -38,6 +38,7 @@ mod scan;
 mod settings;
 mod shell;
 mod state;
+mod sync;
 mod theme;
 
 use std::process::ExitCode;
