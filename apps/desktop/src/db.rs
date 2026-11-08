@@ -66,6 +66,8 @@ pub struct SaleLine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSale {
     pub id: i64,
+    /// The row's portable identity: what a peer uses to recognise a replay.
+    pub uid: String,
     /// The exact sum of the lines, tax-inclusive.
     pub total_minor: i64,
     /// The cash adjustment, signed: `paid = total + rounding`.
@@ -516,6 +518,132 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON products (category_id);
         "#,
     },
+    // The bones of till-to-till replication.
+    //
+    // A rowid is only meaningful inside the database that assigned it, so every
+    // row that travels gets a `uid` beside its integer key. Rows written before
+    // this migration keep `uid = NULL`: they are history, and there is no honest
+    // way to invent an identity for them. Every new row is a UUIDv7, which sorts
+    // by creation time without being a clock the peers have to agree on.
+    //
+    // `change_seq` is the local feed's cursor, not a timestamp. It is bumped once
+    // per transaction that creates a replicable sale, so a peer can ask "what
+    // happened after 41?" and a restart or a clock change cannot make it skip or
+    // repeat a row. `origin_device` says which install wrote it; `received_at`
+    // is set only when a peer's sale arrives here.
+    //
+    // A product is archived rather than deleted, because a sale line and a stock
+    // movement both point at it. The barcode index therefore covers only live
+    // products: an archived barcode can be reused, and the operator is not told
+    // "taken" by a product they cannot see.
+    Migration {
+        version: 10,
+        name: "sync_foundation",
+        sql: r#"
+            INSERT INTO meta (key, value) VALUES ('device_id', '')
+                ON CONFLICT(key) DO NOTHING;
+            INSERT INTO meta (key, value) VALUES ('change_seq', '0')
+                ON CONFLICT(key) DO NOTHING;
+            INSERT INTO meta (key, value) VALUES ('catalog_version', '1')
+                ON CONFLICT(key) DO NOTHING;
+
+            ALTER TABLE sales ADD COLUMN uid TEXT;
+            ALTER TABLE sales ADD COLUMN origin_device TEXT;
+            ALTER TABLE sales ADD COLUMN is_offline INTEGER NOT NULL DEFAULT 0
+                CHECK (is_offline IN (0, 1));
+            ALTER TABLE sales ADD COLUMN clock_skew INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sales ADD COLUMN received_at TEXT;
+            ALTER TABLE sales ADD COLUMN change_seq INTEGER;
+
+            ALTER TABLE sale_lines ADD COLUMN uid TEXT;
+            ALTER TABLE payments ADD COLUMN uid TEXT;
+            ALTER TABLE stock_movements ADD COLUMN uid TEXT;
+
+            ALTER TABLE products ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+                CHECK (archived IN (0, 1));
+
+            CREATE UNIQUE INDEX IF NOT EXISTS sales_uid
+                ON sales (uid) WHERE uid IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS sale_lines_uid
+                ON sale_lines (uid) WHERE uid IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS payments_uid
+                ON payments (uid) WHERE uid IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS stock_movements_uid
+                ON stock_movements (uid) WHERE uid IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS sales_change_seq
+                ON sales (change_seq) WHERE change_seq IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS products_archived
+                ON products (archived);
+
+            DROP INDEX IF EXISTS products_barcode;
+            CREATE UNIQUE INDEX IF NOT EXISTS products_barcode
+                ON products (barcode) WHERE barcode IS NOT NULL AND archived = 0;
+
+            CREATE TABLE IF NOT EXISTS sync_peers (
+                id                   TEXT PRIMARY KEY,
+                name                 TEXT NOT NULL DEFAULT '',
+                kind                 TEXT NOT NULL CHECK (kind IN ('till', 'phone')),
+                host                 TEXT,
+                port                 INTEGER,
+                token                TEXT NOT NULL,
+                last_pulled_seq      INTEGER NOT NULL DEFAULT 0,
+                last_catalog_version INTEGER NOT NULL DEFAULT 0,
+                last_seen_at         TEXT,
+                created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_rejects (
+                uid           TEXT PRIMARY KEY,
+                origin_device TEXT,
+                reason        TEXT NOT NULL,
+                payload       TEXT NOT NULL,
+                rejected_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TRIGGER IF NOT EXISTS products_catalog_version_insert
+            AFTER INSERT ON products
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS products_catalog_version_update
+            AFTER UPDATE ON products
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS categories_catalog_version_insert
+            AFTER INSERT ON categories
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS categories_catalog_version_update
+            AFTER UPDATE ON categories
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS users_catalog_version_insert
+            AFTER INSERT ON users
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS users_catalog_version_update
+            AFTER UPDATE ON users
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+        "#,
+    },
 ];
 
 /// Repair a `suppliers` table left behind by an intermediate build of the
@@ -787,6 +915,55 @@ pub fn set_meta(store: &storage::Store, key: &str, value: &str) -> anyhow::Resul
     Ok(())
 }
 
+/// This install's stable name, generated once and kept in `meta`.
+///
+/// It is what `sales.origin_device` records and what a peer uses to tell two
+/// tills apart. Generating it lazily means an upgraded database gains an
+/// identity on the first sale rather than needing a setup screen; the empty
+/// value seeded by migration 10 is not an identity, so it is replaced.
+pub fn ensure_device_id(store: &storage::Store) -> anyhow::Result<String> {
+    if let Some(id) = meta(store, "device_id").filter(|id| !id.is_empty()) {
+        return Ok(id);
+    }
+
+    let id = uuid::Uuid::now_v7().to_string();
+    set_meta(store, "device_id", &id)?;
+    Ok(id)
+}
+
+/// Move the local change feed forward one step and return the new cursor.
+///
+/// Called as the first statement of a transaction that is about to write a
+/// replicable sale. Doing it first matters: SQLite upgrades a deferred
+/// transaction to a write lock on the first write, and bumping the cursor
+/// before reading the catalog avoids discovering a concurrent writer after this
+/// transaction already has a snapshot.
+pub fn bump_change_seq(transaction: &rusqlite::Transaction<'_>) -> anyhow::Result<i64> {
+    let seq = transaction.query_row(
+        "INSERT INTO meta (key, value) VALUES ('change_seq', '1')
+         ON CONFLICT(key) DO UPDATE
+             SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         RETURNING CAST(value AS INTEGER)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(seq)
+}
+
+/// Mark the catalog as changed for peers that compare versions before pulling.
+///
+/// Table writes bump it through triggers in migration 10. Values that live
+/// outside a table — the tax rate and cash step in settings — call this when
+/// they are saved, because the snapshot a phone receives carries them too.
+pub fn bump_catalog_version(store: &storage::Store) -> anyhow::Result<()> {
+    store.conn().execute(
+        "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         WHERE key = 'catalog_version'",
+        [],
+    )?;
+    Ok(())
+}
+
 /// The currency this install prices in, or `None` before first-run setup.
 ///
 /// An unreadable or unknown value is treated as "not chosen yet": the picker
@@ -821,16 +998,20 @@ pub fn has_sales(store: &storage::Store) -> bool {
         .unwrap_or(true)
 }
 
-/// Every product, by name.
+/// Every live product, by name.
 ///
 /// The list is small enough to keep in memory and filter there, which is why
 /// the search box does not run a query per keystroke. A catalog big enough to
 /// change that is a catalog that needs the query, and that is the moment to
 /// move the filter into SQL.
+///
+/// Archived products are excluded here and still reachable by the sync snapshot,
+/// which reads the table directly: the shop hid them, a peer still has to learn
+/// that they are gone.
 pub fn products(store: &storage::Store) -> Vec<Product> {
     let mut statement = match store.conn().prepare(
         "SELECT id, name, price_minor, category, category_id, barcode
-         FROM products ORDER BY name COLLATE NOCASE",
+         FROM products WHERE archived = 0 ORDER BY name COLLATE NOCASE",
     ) {
         Ok(statement) => statement,
         Err(err) => {
@@ -862,10 +1043,10 @@ pub fn products(store: &storage::Store) -> Vec<Product> {
 /// The categories in use, so the sidebar lists the shop's groups rather than a
 /// list the app invented.
 pub fn categories(store: &storage::Store) -> Vec<String> {
-    let mut statement = match store
-        .conn()
-        .prepare("SELECT DISTINCT category FROM products ORDER BY category COLLATE NOCASE")
-    {
+    let mut statement = match store.conn().prepare(
+        "SELECT DISTINCT category FROM products
+         WHERE archived = 0 ORDER BY category COLLATE NOCASE",
+    ) {
         Ok(statement) => statement,
         Err(err) => {
             tracing::warn!(error = %err, "categories prepare failed");
@@ -988,14 +1169,17 @@ pub fn update_product(
     Ok(())
 }
 
-/// Remove a product.
+/// Archive a product.
 ///
-/// Sales do not reference this row: a completed sale keeps the name and price
-/// it was sold at, so deleting a product never rewrites a receipt.
+/// The row stays: sale lines and stock movements point at it, and those are the
+/// record of what happened. "Delete" is what the operator asked for, so the
+/// screen says removed and the catalog list stops showing it; the database
+/// keeps the identity a report or a peer needs.
 pub fn delete_product(store: &storage::Store, id: i64) -> anyhow::Result<()> {
-    store
-        .conn()
-        .execute("DELETE FROM products WHERE id = ?1", [id])?;
+    store.conn().execute(
+        "UPDATE products SET archived = 1 WHERE id = ?1 AND archived = 0",
+        [id],
+    )?;
     Ok(())
 }
 
@@ -1007,7 +1191,10 @@ pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>)
     store
         .conn()
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM products WHERE barcode = ?1 AND id IS NOT ?2)",
+            "SELECT EXISTS(
+                 SELECT 1 FROM products
+                 WHERE barcode = ?1 AND id IS NOT ?2 AND archived = 0
+             )",
             (barcode, except),
             |row| row.get::<_, bool>(0),
         )
@@ -1177,7 +1364,7 @@ pub fn stock(store: &storage::Store) -> Vec<StockItem> {
         "SELECT p.id, p.name, p.category, p.low_stock, COALESCE(SUM(m.delta), 0)
          FROM products p
          LEFT JOIN stock_movements m ON m.product_id = p.id
-         WHERE p.tracked = 1
+         WHERE p.tracked = 1 AND p.archived = 0
          GROUP BY p.id
          ORDER BY p.name COLLATE NOCASE",
     ) {
@@ -1227,21 +1414,24 @@ pub fn track_product(
     let transaction = store.conn().unchecked_transaction()?;
 
     let exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND archived = 0)",
         [product_id],
         |row| row.get(0),
     )?;
     anyhow::ensure!(exists, "that product is no longer in the catalog");
 
     let already: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND tracked = 1)",
+        "SELECT EXISTS(
+             SELECT 1 FROM products WHERE id = ?1 AND tracked = 1 AND archived = 0
+         )",
         [product_id],
         |row| row.get(0),
     )?;
     anyhow::ensure!(!already, "that product is already tracked");
 
     transaction.execute(
-        "UPDATE products SET tracked = 1, low_stock = ?2 WHERE id = ?1",
+        "UPDATE products SET tracked = 1, low_stock = ?2
+         WHERE id = ?1 AND archived = 0",
         (product_id, low_stock),
     )?;
 
@@ -1283,7 +1473,9 @@ pub fn record_stock_movement(
     }
 
     let tracked: bool = store.conn().query_row(
-        "SELECT EXISTS(SELECT 1 FROM products WHERE id = ?1 AND tracked = 1)",
+        "SELECT EXISTS(
+             SELECT 1 FROM products WHERE id = ?1 AND tracked = 1 AND archived = 0
+         )",
         [product_id],
         |row| row.get(0),
     )?;
@@ -1406,21 +1598,43 @@ pub fn record_sale(
     );
     let change_minor = tendered_minor - paid_minor;
 
+    // Read the install identity before opening the transaction: on an upgraded
+    // database this may write `meta`, and the transaction's first write must be
+    // the cursor itself.
+    let origin_device = ensure_device_id(store)?;
+
     // `unchecked_transaction` because `Store` hands out a shared connection: the
     // transaction cannot borrow it mutably, and there is one till per process.
     let transaction = store.conn().unchecked_transaction()?;
 
+    // The cursor moves before anything else is written: it is the first write
+    // of the transaction, and the sale below records the value it returned.
+    let change_seq = bump_change_seq(&transaction)?;
+
+    let sale_uid = uuid::Uuid::now_v7().to_string();
+
     transaction.execute(
-        "INSERT INTO sales (total_minor, rounding_minor, tax_minor, user_id) \
-         VALUES (?1, ?2, ?3, ?4)",
-        (total_minor, rounding_minor, tax_minor, user_id),
+        "INSERT INTO sales
+             (total_minor, rounding_minor, tax_minor, user_id, uid, origin_device, change_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (
+            total_minor,
+            rounding_minor,
+            tax_minor,
+            user_id,
+            sale_uid.as_str(),
+            origin_device.as_str(),
+            change_seq,
+        ),
     )?;
     let id = transaction.last_insert_rowid();
 
     for line in lines {
+        let line_uid = uuid::Uuid::now_v7().to_string();
         transaction.execute(
-            "INSERT INTO sale_lines (sale_id, product_id, name, qty, unit_minor, total_minor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sale_lines
+                 (sale_id, product_id, name, qty, unit_minor, total_minor, uid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 id,
                 line.product_id,
@@ -1428,6 +1642,7 @@ pub fn record_sale(
                 line.qty,
                 line.unit_minor,
                 line.qty * line.unit_minor,
+                line_uid.as_str(),
             ),
         )?;
 
@@ -1447,25 +1662,36 @@ pub fn record_sale(
                 |row| row.get(0),
             )?;
             if tracked {
+                let movement_uid = uuid::Uuid::now_v7().to_string();
                 transaction.execute(
-                    "INSERT INTO stock_movements (product_id, delta, kind, sale_id, user_id)
-                     VALUES (?1, ?2, 'sale', ?3, ?4)",
-                    (product_id, -line.qty, id, user_id),
+                    "INSERT INTO stock_movements
+                         (product_id, delta, kind, sale_id, user_id, uid)
+                     VALUES (?1, ?2, 'sale', ?3, ?4, ?5)",
+                    (product_id, -line.qty, id, user_id, movement_uid.as_str()),
                 )?;
             }
         }
     }
 
+    let payment_uid = uuid::Uuid::now_v7().to_string();
     transaction.execute(
-        "INSERT INTO payments (sale_id, method, amount_minor, tendered_minor, change_minor)
-         VALUES (?1, 'cash', ?2, ?3, ?4)",
-        (id, paid_minor, tendered_minor, change_minor),
+        "INSERT INTO payments
+             (sale_id, method, amount_minor, tendered_minor, change_minor, uid)
+         VALUES (?1, 'cash', ?2, ?3, ?4, ?5)",
+        (
+            id,
+            paid_minor,
+            tendered_minor,
+            change_minor,
+            payment_uid.as_str(),
+        ),
     )?;
 
     transaction.commit()?;
 
     Ok(RecordedSale {
         id,
+        uid: sale_uid,
         total_minor,
         rounding_minor,
         tax_minor,
@@ -2788,6 +3014,13 @@ mod tests {
         insert_product(&store, "Filter", 2_600, "Coffee", None, None).expect("insert");
         insert_product(&store, "Lemonade", 3_000, "Cold", None, None).expect("insert");
 
+        // Archiving frees the barcode: the old product is no longer sellable,
+        // and refusing a live one because of a hidden one is a dead end.
+        delete_product(&store, espresso).expect("archive");
+        assert!(!barcode_taken(&store, "4001", None));
+        insert_product(&store, "Espresso", 2_800, "Coffee", None, Some("4001"))
+            .expect("the archived product's barcode is reusable");
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -3061,11 +3294,12 @@ mod tests {
         assert_eq!(history[0].note.as_deref(), Some("Counted"));
         assert_eq!(history[4].kind, StockKind::Opening);
 
-        // The ledger is operational, not a financial record: it goes with the
-        // product rather than outliving it as orphaned rows.
-        delete_product(&store, soap).expect("delete");
+        // Archiving hides the product but keeps its ledger: the movements are
+        // the history of stock that was really on the shelf, and removing them
+        // would erase the only record of where the count went.
+        delete_product(&store, soap).expect("archive");
         assert!(stock(&store).is_empty());
-        assert!(stock_movements(&store, soap).is_empty());
+        assert_eq!(stock_movements(&store, soap).len(), 5);
 
         let _ = std::fs::remove_file(path);
     }
@@ -3277,8 +3511,8 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_product_does_not_rewrite_its_receipt() {
-        let (store, path) = store("sale-then-delete");
+    fn archiving_a_product_does_not_rewrite_its_receipt() {
+        let (store, path) = store("sale-then-archive");
         let flat_white = insert_product(&store, "Flat white", 3_400, "Coffee", None, None)
             .expect("insert product");
 
@@ -3297,7 +3531,7 @@ mod tests {
         )
         .expect("record");
 
-        delete_product(&store, flat_white).expect("delete");
+        delete_product(&store, flat_white).expect("archive");
 
         let (product_id, name, total_minor): (Option<i64>, String, i64) = store
             .conn()
@@ -3307,9 +3541,122 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("the line survives the product");
-        assert_eq!(product_id, None, "the link is cleared, not the history");
+        assert_eq!(
+            product_id,
+            Some(flat_white),
+            "the link survives, so the report still knows which product it was"
+        );
         assert_eq!(name, "Flat white");
         assert_eq!(total_minor, 3_400);
+        assert!(products(&store).is_empty(), "the catalog hides it");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_sale_is_stamped_with_an_identity_and_moves_the_cursor() {
+        let (store, path) = store("sale-identity");
+        let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("product");
+        track_product(&store, soap, 10, 3, None).expect("track");
+
+        let line = SaleLine {
+            product_id: Some(soap),
+            name: "Soap".to_owned(),
+            qty: 1,
+            unit_minor: 1_000,
+        };
+        let first =
+            record_sale(&store, std::slice::from_ref(&line), 0, 0, 1_000, None).expect("first");
+        let second = record_sale(&store, &[line], 0, 0, 1_000, None).expect("second");
+
+        assert_ne!(first.uid, second.uid);
+        assert!(uuid::Uuid::parse_str(&first.uid).is_ok(), "{}", first.uid);
+        assert!(uuid::Uuid::parse_str(&second.uid).is_ok());
+
+        let device = ensure_device_id(&store).expect("device id");
+        assert_eq!(
+            ensure_device_id(&store).expect("stable"),
+            device,
+            "the install keeps one name"
+        );
+
+        let (origin, seq, received_at, offline): (String, i64, Option<String>, i64) = store
+            .conn()
+            .query_row(
+                "SELECT origin_device, change_seq, received_at, is_offline
+                 FROM sales WHERE id = ?1",
+                [first.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("the sale is stamped");
+        assert_eq!(origin, device);
+        assert_eq!(seq, 1);
+        assert_eq!(
+            received_at, None,
+            "a local sale was not received from a peer"
+        );
+        assert_eq!(offline, 0);
+
+        let second_seq: i64 = store
+            .conn()
+            .query_row(
+                "SELECT change_seq FROM sales WHERE id = ?1",
+                [second.id],
+                |row| row.get(0),
+            )
+            .expect("second cursor");
+        assert_eq!(second_seq, 2, "the cursor counts sales, not seconds");
+
+        let line_uid: String = store
+            .conn()
+            .query_row(
+                "SELECT uid FROM sale_lines WHERE sale_id = ?1",
+                [first.id],
+                |row| row.get(0),
+            )
+            .expect("line uid");
+        assert!(uuid::Uuid::parse_str(&line_uid).is_ok());
+
+        let payment_uid: String = store
+            .conn()
+            .query_row(
+                "SELECT uid FROM payments WHERE sale_id = ?1",
+                [first.id],
+                |row| row.get(0),
+            )
+            .expect("payment uid");
+        assert!(uuid::Uuid::parse_str(&payment_uid).is_ok());
+
+        let movement_uid: String = store
+            .conn()
+            .query_row(
+                "SELECT uid FROM stock_movements WHERE sale_id = ?1",
+                [first.id],
+                |row| row.get(0),
+            )
+            .expect("movement uid");
+        assert!(uuid::Uuid::parse_str(&movement_uid).is_ok());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn catalog_writes_advance_the_catalog_version() {
+        let (store, path) = store("catalog-version");
+        let version = || {
+            meta(&store, "catalog_version")
+                .and_then(|value| value.parse::<i64>().ok())
+                .expect("catalog_version is an integer")
+        };
+
+        let start = version();
+        let product =
+            insert_product(&store, "Soap", 1_000, "Household", None, None).expect("product");
+        let after_insert = version();
+        assert!(after_insert > start, "a peer must see the catalog move");
+
+        update_product(&store, product, "Soap", 1_200, "Household", None, None).expect("rename");
+        assert!(version() > after_insert, "a rename is a catalog change too");
 
         let _ = std::fs::remove_file(path);
     }

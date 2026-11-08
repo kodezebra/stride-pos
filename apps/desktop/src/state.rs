@@ -1746,8 +1746,8 @@ impl State {
             Ok(()) => {
                 self.product_delete = None;
                 self.reload_products();
-                // Deleting a product cascades to its movements; without this,
-                // Inventory would keep painting a row that no longer exists.
+                // Archiving hides the product from the catalog; without this,
+                // Inventory would keep painting its row.
                 self.reload_stock();
                 self.notice = Some("Product removed.".to_owned());
             }
@@ -2923,9 +2923,9 @@ mod tests {
         assert_eq!(history.movements[0].delta, -3);
         assert_eq!(history.movements[0].note.as_deref(), Some("Counted"));
 
-        // The catalog is the source of the name Inventory shows, and deleting a
-        // product takes its ledger with it. Both changes have to reach the list
-        // without a restart.
+        // The catalog is the source of the name Inventory shows, and archiving a
+        // product takes it out of both lists. Both changes have to reach the
+        // lists without a restart.
         let product = state.products[0].clone();
         state.edit_product(&product);
         state.product_editor.as_mut().expect("open").name = "Renamed item".to_owned();

@@ -18,6 +18,7 @@ ui-shell.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 qrcode.workspace = true
+rusqlite.workspace = true
 tiny_http.workspace = true
 tracing.workspace = true
 uuid.workspace = true

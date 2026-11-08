@@ -428,7 +428,15 @@ impl PosShell {
         if self.state.settings_dirty {
             let path = self.state.paths.settings.clone();
             match config::save(&path, &self.state.settings) {
-                Ok(()) => self.state.settings_dirty = false,
+                Ok(()) => {
+                    self.state.settings_dirty = false;
+                    // A phone's catalog snapshot carries the tax rate and the
+                    // cash step, and those live in settings rather than a table.
+                    // Table writes bump this by trigger; this one needs a hand.
+                    if let Err(err) = crate::db::bump_catalog_version(&self.state.store) {
+                        tracing::warn!(error = %err, "could not bump the catalog version");
+                    }
+                }
                 Err(err) => {
                     self.state.settings_dirty = false;
                     tracing::warn!(error = %err, path = %path.display(), "could not save settings");
