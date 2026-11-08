@@ -11,6 +11,7 @@ argon2.workspace = true
 config.workspace = true
 directories.workspace = true
 getrandom.workspace = true
+lan-http.workspace = true
 money.workspace = true
 storage.workspace = true
 ui-kit = { workspace = true, features = ["widgets", "icons"] }
