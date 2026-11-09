@@ -10,6 +10,7 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 
 use crate::scan::ScanConfig;
+use crate::sync::SyncConfig;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +31,9 @@ pub struct Settings {
     /// The phone scanner. Off until the shop turns it on; the token is generated
     /// on first launch so pairing never waits for a "generate" button.
     pub scanner: ScanConfig,
+    /// Tills on the shop's own network. Off until the shop turns it on; the
+    /// token is generated on first launch for the same reason.
+    pub sync: SyncConfig,
     /// Tax rate as a whole percentage: `16` means 16% VAT, `0` means none.
     /// Prices on the till are tax-inclusive: the shelf price is what the
     /// customer pays, and the receipt breaks the tax out underneath the total.

@@ -30,6 +30,7 @@ mod db;
 mod export;
 mod firewall;
 mod import;
+mod lan;
 mod modules;
 mod picker;
 mod prefs;

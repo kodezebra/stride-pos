@@ -486,7 +486,12 @@ struct FakePeer {
 }
 
 impl PeerLink for FakePeer {
-    fn pull(&self, _since_seq: i64, _limit: usize) -> anyhow::Result<PullResponse> {
+    fn pull(
+        &self,
+        _since_seq: i64,
+        _limit: usize,
+        _catalog_version: i64,
+    ) -> anyhow::Result<PullResponse> {
         Ok(self.page.clone())
     }
 

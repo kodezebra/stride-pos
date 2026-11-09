@@ -31,8 +31,6 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use crate::scan::ScanConfig;
-
 /// How the operating system is filtering the scanner's port.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Snapshot {
@@ -132,8 +130,8 @@ impl Service {
     }
 
     /// Probe again when the listener is turned on or moved to another port.
-    pub fn sync(&mut self, config: &ScanConfig) {
-        let port = (config.enabled && config.port != 0).then_some(config.port);
+    pub fn sync(&mut self, port: Option<u16>) {
+        let port = port.filter(|port| *port != 0);
         if self.port == port {
             return;
         }

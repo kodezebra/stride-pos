@@ -15,11 +15,15 @@
 //! Phase 3 wires this into the LAN listener. Until then the headless core is
 //! exercised by its inline tests, so some items are not yet reachable from
 //! `main`; the allow is for that gap, not for permanent dead code.
-#![allow(dead_code)]
-
+pub mod client;
+pub mod config;
 pub mod ingest;
 pub mod protocol;
+pub mod service;
 pub mod worker;
+
+pub use config::SyncConfig;
+pub use service::{Event as SyncEvent, Status as SyncStatus};
 
 #[cfg(test)]
 mod tests;

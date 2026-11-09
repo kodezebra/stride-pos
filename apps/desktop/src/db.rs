@@ -646,6 +646,16 @@ pub const MIGRATIONS: &[Migration] = &[
             END;
         "#,
     },
+    // A peer that refused a pull leaves a reason the owner can read. Kept out of
+    // migration 10 because that migration had already shipped to tills in the
+    // field; editing an applied migration is the one thing this table forbids.
+    Migration {
+        version: 11,
+        name: "sync_peer_errors",
+        sql: r#"
+            ALTER TABLE sync_peers ADD COLUMN last_error TEXT;
+        "#,
+    },
 ];
 
 /// Repair a `suppliers` table left behind by an intermediate build of the
@@ -981,6 +991,135 @@ pub fn currency(store: &storage::Store) -> Option<money::Currency> {
     currency
 }
 
+/// A peer this till pulls from or a phone this till remembers.
+///
+/// The token is the peer's own pairing code. It is stored as the canonical ten
+/// characters so the client can pass it to `lan-http` without normalising on
+/// every request.
+#[derive(Clone, Debug)]
+pub struct SyncPeer {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub token: String,
+    pub last_pulled_seq: i64,
+    pub last_catalog_version: i64,
+    pub last_seen_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl SyncPeer {
+    /// What the peer list prints as the address, or why it cannot be dialled.
+    pub fn address(&self) -> String {
+        match (&self.host, self.port) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            _ => "No address".to_owned(),
+        }
+    }
+
+    pub fn display_name(&self) -> &str {
+        let name = self.name.trim();
+        if name.is_empty() {
+            &self.id
+        } else {
+            name
+        }
+    }
+}
+
+/// Every peer, oldest first so the list does not reshuffle as rows are touched.
+pub fn sync_peers(store: &storage::Store) -> anyhow::Result<Vec<SyncPeer>> {
+    let mut statement = store.conn().prepare(
+        "SELECT id, name, kind, host, port, token,
+                last_pulled_seq, last_catalog_version, last_seen_at, last_error
+         FROM sync_peers
+         ORDER BY created_at, name COLLATE NOCASE",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let port: Option<i64> = row.get(4)?;
+        Ok(SyncPeer {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            kind: row.get(2)?,
+            host: row.get(3)?,
+            port: port.and_then(|port| u16::try_from(port).ok()),
+            token: row.get(5)?,
+            last_pulled_seq: row.get(6)?,
+            last_catalog_version: row.get(7)?,
+            last_seen_at: row.get(8)?,
+            last_error: row.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Add a till to pull from.
+///
+/// The address and token are checked here rather than in the form so the same
+/// rule serves the UI and any future import. A malformed token is rejected
+/// instead of being stored and failing at the next sync with a client error.
+pub fn add_sync_peer(
+    store: &storage::Store,
+    name: &str,
+    host: &str,
+    port: u16,
+    token: &str,
+) -> anyhow::Result<()> {
+    let host = host.trim();
+    anyhow::ensure!(!host.is_empty(), "Enter the other till's address.");
+    anyhow::ensure!(port != 0, "Enter a port between 1 and 65535.");
+    let token = lan_http::pairing::normalize(token)
+        .ok_or_else(|| anyhow::anyhow!("That is not a pairing code."))?;
+
+    store.conn().execute(
+        "INSERT INTO sync_peers (id, name, kind, host, port, token)
+         VALUES (?1, ?2, 'till', ?3, ?4, ?5)",
+        rusqlite::params![
+            uuid::Uuid::now_v7().to_string(),
+            name.trim(),
+            host,
+            i64::from(port),
+            token
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_sync_peer(store: &storage::Store, id: &str) -> anyhow::Result<()> {
+    store
+        .conn()
+        .execute("DELETE FROM sync_peers WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Remember how far this till has read a peer, and that the peer answered.
+pub fn save_sync_cursor(
+    store: &storage::Store,
+    id: &str,
+    since_seq: i64,
+    catalog_version: i64,
+) -> anyhow::Result<()> {
+    store.conn().execute(
+        "UPDATE sync_peers
+         SET last_pulled_seq = ?2, last_catalog_version = ?3,
+             last_seen_at = datetime('now'), last_error = NULL
+         WHERE id = ?1",
+        rusqlite::params![id, since_seq, catalog_version],
+    )?;
+    Ok(())
+}
+
+/// Remember why a peer could not be reached, without moving its cursor.
+pub fn set_sync_error(store: &storage::Store, id: &str, error: &str) -> anyhow::Result<()> {
+    store.conn().execute(
+        "UPDATE sync_peers SET last_error = ?2 WHERE id = ?1",
+        rusqlite::params![id, error],
+    )?;
+    Ok(())
+}
+
 /// Store the install's currency, replacing a previous choice.
 pub fn set_currency(store: &storage::Store, currency: money::Currency) -> anyhow::Result<()> {
     set_meta(store, "currency", currency.code())
@@ -1005,7 +1144,6 @@ struct PulledSale {
 /// Child rows are fetched per sale. At a page size of one hundred this is a
 /// handful of indexed lookups, and it keeps the function readable; it is not
 /// the checkout path.
-#[allow(dead_code)] // Phase 3 serves this over the LAN listener; tested here until then.
 pub fn pull_sales(
     store: &storage::Store,
     since: i64,
@@ -1132,7 +1270,6 @@ pub fn pull_sales(
 /// desktop replica deliberately does not write these rows into `users`: a login
 /// is local policy, and inventing a password hash so a remote person can exist
 /// in the table would be a security bug dressed as a feature.
-#[allow(dead_code)] // Phase 3 serves this over the LAN listener; tested here until then.
 pub fn catalog_snapshot(
     store: &storage::Store,
     tax_rate_percent: i64,
@@ -1210,7 +1347,6 @@ pub fn catalog_snapshot(
 ///
 /// The transaction covers the whole snapshot, so a peer sees either the old
 /// catalog or the new one, never half a price change.
-#[allow(dead_code)] // Phase 3 serves this over the LAN listener; tested here until then.
 pub fn apply_catalog_snapshot(
     store: &storage::Store,
     snapshot: &sync_proto::CatalogSnapshot,

@@ -34,7 +34,12 @@ pub trait Replica {
 
 /// The remote side: a peer that can serve a page and its catalog.
 pub trait PeerLink {
-    fn pull(&self, since_seq: i64, limit: usize) -> Result<PullResponse>;
+    fn pull(
+        &self,
+        since_seq: i64,
+        limit: usize,
+        catalog_version: i64,
+    ) -> Result<PullResponse>;
     fn catalog(&self) -> Result<CatalogSnapshot>;
 }
 
@@ -61,10 +66,15 @@ pub fn sync_once(
     cursor: &mut PeerCursor,
 ) -> Result<()> {
     loop {
-        let page = peer.pull(cursor.since_seq, PAGE_SIZE)?;
+        let page = peer.pull(cursor.since_seq, PAGE_SIZE, cursor.catalog_version)?;
         ensure_protocol(page.protocol)?;
 
-        if page.catalog_version != cursor.catalog_version {
+        // Only the catalog author may rewrite a replica's products. A peer
+        // with `catalog_owner = false` is still a source of sales, and its
+        // catalog version is ignored rather than copied: otherwise promoting
+        // that till to owner later would leave this replica believing it had
+        // already applied the owner's catalog.
+        if page.catalog_owner && page.catalog_version != cursor.catalog_version {
             let snapshot = peer.catalog()?;
             ensure_protocol(snapshot.protocol)?;
             replica

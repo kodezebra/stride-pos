@@ -14,12 +14,10 @@
 //! [`State::receive_scan`]: crate::state::State::receive_scan
 
 pub mod protocol;
-mod server;
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver, Sender};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,97 +101,6 @@ pub enum ScanStatus {
         port: u16,
     },
     Error(String),
-}
-
-/// The long-lived side of phone scanning.
-///
-/// The listener runs for the life of the till process while enabled, not per
-/// scan: starting a thread for every barcode would add latency to the one action
-/// a queue cannot afford to make slow.
-pub struct Service {
-    tx: Sender<ScanEvent>,
-    rx: Receiver<ScanEvent>,
-    listener: Option<server::Listener>,
-    /// The configuration the listener was started with. `None` before the first
-    /// frame; equal configs do not restart a healthy listener.
-    config: Option<ScanConfig>,
-    status: ScanStatus,
-}
-
-impl Default for Service {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Service {
-    pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self {
-            tx,
-            rx,
-            listener: None,
-            config: None,
-            status: ScanStatus::Off,
-        }
-    }
-
-    /// Bring the listener in line with Settings. Cheap when nothing changed.
-    pub fn sync(&mut self, config: &ScanConfig) {
-        if self.config.as_ref() == Some(config) {
-            return;
-        }
-
-        self.stop_listener();
-        self.config = Some(config.clone());
-
-        if !config.enabled {
-            self.status = ScanStatus::Off;
-            return;
-        }
-        if config.port == 0 {
-            self.status = ScanStatus::Error("Choose a port between 1 and 65535.".to_owned());
-            return;
-        }
-        if !valid_token(&config.token) {
-            self.status = ScanStatus::Error(
-                "The pairing token is missing. Turn the listener off and on again.".to_owned(),
-            );
-            return;
-        }
-
-        match server::Listener::start(config.port, config.token.clone(), self.tx.clone()) {
-            Ok(listener) => {
-                let port = listener.port();
-                self.listener = Some(listener);
-                self.status = ScanStatus::Listening { port };
-            }
-            Err(error) => {
-                self.status = ScanStatus::Error(error);
-            }
-        }
-    }
-
-    /// Take every scan that arrived since the last frame.
-    pub fn drain(&mut self) -> Vec<ScanEvent> {
-        self.rx.try_iter().collect()
-    }
-
-    pub fn status(&self) -> &ScanStatus {
-        &self.status
-    }
-
-    fn stop_listener(&mut self) {
-        if let Some(listener) = self.listener.take() {
-            listener.stop();
-        }
-    }
-}
-
-impl Drop for Service {
-    fn drop(&mut self) {
-        self.stop_listener();
-    }
 }
 
 /// The machine's address on the shop network, as a phone should type it.

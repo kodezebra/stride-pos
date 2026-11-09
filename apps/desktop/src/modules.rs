@@ -3902,12 +3902,8 @@ impl Module for Settings {
                 }
             }
             "Tax" => tax_card(ui, state),
-            _ => components::empty_state_card(
-                ui,
-                "Not connected",
-                "This till runs alone. A hub or cloud endpoint can be configured once sync exists.",
-                160.0,
-            ),
+            "Sync" => sync_card(ui, state),
+            _ => {}
         }
     }
 }
@@ -4017,6 +4013,263 @@ fn scanner_card(ui: &mut egui::Ui, state: &mut State) {
             firewall_note(ui, state, config.port);
         }
     });
+}
+
+/// Till-to-till sync: one switch, this till's identity, and the list of peers
+/// it exchanges with.
+///
+/// Every till keeps its own database and sells offline. Pairing two tills is a
+/// choice about who reads whose history, not a hierarchy: the only asymmetry is
+/// the catalog owner, because two tills editing products is two catalogs, and a
+/// shop wants one.
+fn sync_card(ui: &mut egui::Ui, state: &mut State) {
+    let config = state.settings.sync.clone();
+    let status = state.sync_status.clone();
+    let palette = theme::current(ui.ctx());
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Sales travel between tills on the shop's Wi-Fi. Each till keeps \
+             selling on its own database, and everything it records shows up \
+             on the others the next time they talk.",
+        );
+        ui.add_space(SPACING.md);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            if config.enabled {
+                if actions::secondary_compact(ui, "Turn off").clicked() {
+                    state.set_sync_enabled(false);
+                }
+            } else if actions::secondary_compact(ui, "Turn on").clicked() {
+                state.set_sync_enabled(true);
+            }
+            let (text, color) = sync_status_text(&status, &palette);
+            ui.label(egui::RichText::new(text).size(TYPE.small).color(color));
+        });
+
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            "A till that cannot reach the others keeps working. Sales are \
+             exchanged later, in any order, without duplicating.",
+        );
+    });
+
+    if !config.enabled {
+        return;
+    }
+
+    ui.add_space(SPACING.lg);
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "What other tills call this one. The name is only a label; the \
+             database keeps its own identity, so renaming it does not lose \
+             history or a peer's place in the feed.",
+        );
+        ui.add_space(SPACING.md);
+
+        let dirty = state.sync_name_draft.trim() != config.device_name.trim();
+        components::field_label(ui, "Till name");
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            text_field(ui, &mut state.sync_name_draft, "Till", 320.0);
+            if dirty && actions::primary(ui, "Save").clicked() {
+                state.save_sync_device_name();
+            }
+        });
+        ui.add_space(SPACING.xs);
+        components::caption(ui, if dirty { "Not saved yet." } else { "Saved." });
+
+        ui.add_space(SPACING.md);
+        let mut owner = config.catalog_owner;
+        if ui
+            .checkbox(&mut owner, "This till authors the product catalog")
+            .changed()
+        {
+            state.set_catalog_owner(owner);
+        }
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            "Exactly one till should claim this. Replicas replace their products \
+             and categories with the owner's the next time they sync; a till \
+             that does not claim it never publishes a catalog.",
+        );
+    });
+
+    ui.add_space(SPACING.lg);
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::caption(
+            ui,
+            "Another till pulls this till's sales with the address, port and \
+             code below. Give them only to a till you trust: the code also \
+             reads every sale kept here.",
+        );
+        ui.add_space(SPACING.md);
+
+        let Some(address) = crate::scan::local_ip() else {
+            components::empty_state_card(
+                ui,
+                "No network address",
+                "Connect this till to the shop Wi-Fi, then open Settings again.",
+                140.0,
+            );
+            return;
+        };
+        let host = address.to_string();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.lg;
+            info_row(ui, "Address", &host);
+            info_row(ui, "Port", &state.settings.scanner.port.to_string());
+            let shown_token = crate::scan::spaced_token(&config.sync_token);
+            info_row(ui, "Code", &shown_token);
+            if actions::secondary_compact(ui, "Copy code").clicked() {
+                ui.ctx().copy_text(shown_token);
+            }
+        });
+    });
+
+    ui.add_space(SPACING.lg);
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            components::section_title(ui, "Other tills");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if actions::secondary_compact(ui, "Sync now").clicked()
+                    && !state.sync_peers.is_empty()
+                {
+                    state.sync_now_requested = true;
+                }
+            });
+        });
+        ui.add_space(SPACING.sm);
+
+        if state.sync_peers.is_empty() {
+            components::caption(
+                ui,
+                "No tills paired yet. Enter another till's address and code below.",
+            );
+        } else {
+            // Copy so the row can ask to remove a peer without holding a borrow
+            // on the list the removal rewrites.
+            let peers = state.sync_peers.clone();
+            for peer in &peers {
+                let mut remove = false;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(components::semibold(peer.display_name()).size(TYPE.body));
+                        let (detail, color) = match (&peer.last_error, &peer.last_seen_at) {
+                            (Some(error), _) => (error.clone(), palette.danger),
+                            (None, Some(seen)) => (format!("Last read {seen}"), palette.text_muted),
+                            (None, None) => ("Not contacted yet.".to_owned(), palette.text_muted),
+                        };
+                        components::caption(ui, &peer.address());
+                        ui.label(egui::RichText::new(detail).size(TYPE.small).color(color));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if actions::quiet_compact(ui, "Remove").clicked() {
+                            remove = true;
+                        }
+                    });
+                });
+                if remove {
+                    state.remove_sync_peer(&peer.id);
+                }
+                ui.add_space(SPACING.sm);
+            }
+        }
+
+        ui.add_space(SPACING.sm);
+        components::field_label(ui, "Pair another till");
+        ui.add_space(SPACING.xs);
+        egui::Grid::new("sync_peer_fields")
+            .num_columns(2)
+            .spacing([SPACING.sm, SPACING.sm])
+            .show(ui, |ui| {
+                text_field(
+                    ui,
+                    &mut state.sync_peer_draft.name,
+                    "Name (optional)",
+                    220.0,
+                );
+                text_field(ui, &mut state.sync_peer_draft.host, "Address", 220.0);
+                ui.end_row();
+                text_field(ui, &mut state.sync_peer_draft.port, "Port", 120.0);
+                text_field(ui, &mut state.sync_peer_draft.token, "Pairing code", 220.0);
+                ui.end_row();
+            });
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            if actions::primary(ui, "Pair").clicked() {
+                state.add_sync_peer();
+            }
+            components::caption(
+                ui,
+                "Both tills must be on the same network and have sync turned on.",
+            );
+        });
+
+        if let Some(error) = state.sync_peer_error.clone() {
+            ui.add_space(SPACING.xs);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(palette.danger),
+            );
+        }
+    });
+}
+
+/// One line about what sync is doing right now.
+fn sync_status_text(
+    status: &crate::sync::SyncStatus,
+    palette: &ui_kit::tokens::Palette,
+) -> (String, egui::Color32) {
+    if !status.enabled {
+        return (
+            "Off. Nothing is being exchanged.".to_owned(),
+            palette.text_muted.into(),
+        );
+    }
+    if let Some(error) = &status.error {
+        return (error.clone(), palette.danger.into());
+    }
+    if status.syncing {
+        return (
+            format!("Talking to {} till(s)…", status.peers),
+            palette.text_muted.into(),
+        );
+    }
+    match status.last_synced {
+        Some(last) => {
+            let seconds = last.elapsed().as_secs();
+            let when = if seconds < 60 {
+                format!("{seconds} s ago")
+            } else if seconds < 3600 {
+                format!("{} min ago", seconds / 60)
+            } else {
+                format!("{} h ago", seconds / 3600)
+            };
+            (format!("Last synced {when}."), palette.success.into())
+        }
+        None if status.peers == 0 => (
+            "No other tills paired yet.".to_owned(),
+            palette.text_muted.into(),
+        ),
+        None => (
+            "Waiting for the next pass.".to_owned(),
+            palette.text_muted.into(),
+        ),
+    }
 }
 
 /// Whether the computer's firewall will let a phone reach the listening port.
