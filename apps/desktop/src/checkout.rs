@@ -187,11 +187,7 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
         components::receipt_line(ui, "Subtotal", &subtotal);
         if tax_minor > 0 {
             components::receipt_line(ui, "Pre-tax", &pre_tax);
-            components::receipt_line(
-                ui,
-                &format!("Tax (@ {}%)", tax_rate),
-                &tax_amount,
-            );
+            components::receipt_line(ui, &format!("Tax (@ {}%)", tax_rate), &tax_amount);
         }
         if rounding_minor != 0 {
             // Named by the direction the drawer moved, not by the mechanism: a

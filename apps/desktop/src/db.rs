@@ -1394,10 +1394,7 @@ pub fn record_sale(
             .context("the sale total does not fit in 64 bits")
     })?;
 
-    anyhow::ensure!(
-        tax_minor <= total_minor,
-        "tax cannot exceed the sale total"
-    );
+    anyhow::ensure!(tax_minor <= total_minor, "tax cannot exceed the sale total");
 
     let paid_minor = total_minor
         .checked_add(rounding_minor)
@@ -2772,8 +2769,8 @@ mod tests {
     #[test]
     fn a_barcode_belongs_to_one_product() {
         let (store, path) = store("barcodes");
-        let espresso =
-            insert_product(&store, "Espresso", 2_800, "Coffee", None, Some("4001")).expect("insert");
+        let espresso = insert_product(&store, "Espresso", 2_800, "Coffee", None, Some("4001"))
+            .expect("insert");
 
         assert!(barcode_taken(&store, "4001", None));
         assert!(
@@ -2974,8 +2971,8 @@ mod tests {
     #[test]
     fn a_sale_writes_its_lines_and_its_payment() {
         let (store, path) = store("record-sale");
-        let espresso =
-            insert_product(&store, "Espresso", 2_800, "Coffee", None, None).expect("insert product");
+        let espresso = insert_product(&store, "Espresso", 2_800, "Coffee", None, None)
+            .expect("insert product");
 
         let lines = [
             SaleLine {
@@ -3282,8 +3279,8 @@ mod tests {
     #[test]
     fn deleting_a_product_does_not_rewrite_its_receipt() {
         let (store, path) = store("sale-then-delete");
-        let flat_white =
-            insert_product(&store, "Flat white", 3_400, "Coffee", None, None).expect("insert product");
+        let flat_white = insert_product(&store, "Flat white", 3_400, "Coffee", None, None)
+            .expect("insert product");
 
         let sale = record_sale(
             &store,

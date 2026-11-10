@@ -8,9 +8,7 @@
 /// All seed files, keyed by business type. Loaded at compile time with
 /// `include_str!` so the binary is self-contained.
 macro_rules! seed_file {
-    ($path:expr) => {{
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), $path))
-    }};
+    ($path:expr) => {{ include_str!(concat!(env!("CARGO_MANIFEST_DIR"), $path)) }};
 }
 
 const SUPERMARKET_JSON: &str = seed_file!("/data/categories/supermarket.json");
