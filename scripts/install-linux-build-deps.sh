@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Install everything a Linux release build needs, on a bare Ubuntu/Debian image.
+#
+# Used by .github/workflows/release.yml (inside the ubuntu:22.04 container) and
+# by scripts/docker-build-linux-release.sh. Idempotent: rerunning is cheap.
+set -euo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+    sudo=""
+else
+    sudo="sudo"
+fi
+
+$sudo apt-get update -qq
+DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    pkg-config \
+    rpm \
+    zip \
+    zstd
+
+# rustup installs the toolchain rust-toolchain.toml pins, on first `cargo` use.
+# The default toolchain is left unset so nothing is downloaded twice.
+if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain none
+fi
+
+# shellcheck disable=SC1091
+. "${CARGO_HOME:-$HOME/.cargo}/env" 2>/dev/null || true
+cargo --version

@@ -1,6 +1,6 @@
-# Tracks the installed stable channel rather than a frozen version, so this
-# file documents intent without forcing a toolchain download on a machine that
-# already has stable. Replace "stable" with "1.99.0" once CI needs bit-exact
-# reproducibility.
 [toolchain]
-channel = "stable"
+# Pinned, not "stable": a Rust upgrade can change what the released binary
+# needs from the system (1.99 added weak `pidfd_spawnp`/`pidfd_getpid`
+# references that want glibc 2.39). Move this deliberately, then re-run
+# scripts/check-glibc-baseline.sh on the release artifact.
+channel = "1.99.0"

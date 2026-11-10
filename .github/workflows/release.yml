@@ -29,20 +29,62 @@ jobs:
             exit 1
           fi
 
-  desktop:
-    name: Desktop packages
+  desktop-linux:
+    name: Desktop package (Linux, glibc 2.35)
     needs: verify
-    runs-on: ${{ matrix.runs-on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-latest
-            os: linux
-          - target: x86_64-pc-windows-msvc
-            runs-on: windows-latest
-            os: windows
+    runs-on: ubuntu-24.04
+    # The binary keeps the glibc of the machine that links it. Build on Ubuntu
+    # 22.04 (glibc 2.35) so the packages load on Debian 12 and newer; a
+    # `-latest` runner raises that floor silently and breaks older shops.
+    # See DEVELOPMENT.md, "Release compatibility".
+    container:
+      image: ubuntu:22.04
+    steps:
+      # The image is bare, and checkout needs git.
+      - name: Install git for checkout
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ./scripts/install-linux-build-deps.sh
+
+      # Distinct cache key: artifacts built against the runner's newer glibc
+      # must never be reused here, or the check below would pass on a stale
+      # binary.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-glibc-2.35
+
+      - name: Version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#pos-v}" >> "$GITHUB_OUTPUT"
+
+      # Builds, packages deb/rpm/tar.gz, fails if anything needs glibc newer
+      # than 2.35, and refuses a binary that cannot resolve its libraries.
+      - name: Build, package and check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/build-linux-release.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-windows:
+    name: Desktop package (Windows)
+    needs: verify
+    runs-on: windows-2022
+    env:
+      # Static C runtime, so the till needs nothing installed on the shop PC.
+      # Without this the exe wants vcruntime140.dll from the VC++ Redistributable,
+      # which is not part of Windows. Set per job so the cache key sees it.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
 
@@ -52,40 +94,41 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#pos-v}" >> "$GITHUB_OUTPUT"
 
-      - name: Install packaging tools (Linux)
-        if: matrix.os == 'linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
-
-      - name: Install Inno Setup (Windows)
-        if: matrix.os == 'windows'
+      - name: Install Inno Setup
         run: choco install innosetup --yes
 
       - name: Build
-        run: cargo build --release --locked -p desktop --target ${{ matrix.target }}
+        run: cargo build --release --locked -p desktop --target x86_64-pc-windows-msvc
+
+      - name: Assert no VC++ runtime dependency
+        shell: pwsh
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/desktop.exe"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $dumpbin = Get-ChildItem (Join-Path $vs "VC\Tools\MSVC") -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -like '*Hostx64\x64*' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          & $dumpbin /nologo /dependents $exe
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed on $exe" }
+          $bad = & $dumpbin /nologo /dependents $exe |
+            Select-String -Pattern 'VCRUNTIME|MSVCP|ucrtbase|api-ms-win-crt'
+          if ($bad) { throw "Binary still imports the VC++ runtime: $bad" }
 
       - name: Stage files for Windows installer
-        if: matrix.os == 'windows'
         run: |
           mkdir -p dist/windows
-          cp "target/${{ matrix.target }}/release/desktop.exe" dist/windows/stride-pos.exe
+          cp "target/x86_64-pc-windows-msvc/release/desktop.exe" dist/windows/stride-pos.exe
           cp README.md dist/windows/README.md
 
       - name: Package
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          BIN_DIR="target/${{ matrix.target }}/release"
-          binary=""
-          for b in desktop desktop.exe pos pos.exe; do
-            if [ -f "$BIN_DIR/$b" ]; then binary="$BIN_DIR/$b"; break; fi
-          done
-          [ -n "$binary" ] || { echo "::error::No release binary found in $BIN_DIR"; exit 1; }
-          chmod +x apps/desktop/package-release.sh
-          ./apps/desktop/package-release.sh "$binary" "$VERSION" dist "${{ matrix.target }}"
+        run: ./apps/desktop/package-release.sh "target/x86_64-pc-windows-msvc/release/desktop.exe" "$VERSION" dist x86_64-pc-windows-msvc
 
       - name: Build Windows installer (Inno Setup)
-        if: matrix.os == 'windows'
         shell: cmd
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -99,7 +142,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-${{ matrix.target }}
+          name: desktop-x86_64-pc-windows-msvc
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -188,7 +231,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [desktop, android]
+    needs: [desktop-linux, desktop-windows, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

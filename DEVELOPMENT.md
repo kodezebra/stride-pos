@@ -202,6 +202,27 @@ secrets are `STRIDE_SCAN_KEYSTORE_BASE64`, `STRIDE_SCAN_STORE_PASSWORD`,
 `STRIDE_SCAN_KEY_ALIAS`, and `STRIDE_SCAN_KEY_PASSWORD`; without them the APK is
 signed with the debug key and is still installable by sideloading.
 
+## Release compatibility
+
+A Linux binary keeps the glibc of the machine that links it. Build the `.deb`,
+`.rpm` and tarball on a newer distro than the shop runs and the loader stops at
+start-up with `version 'GLIBC_2.39' not found`, because it resolves symbols
+against the shop's `libc.so.6`. Windows has the same failure with the MSVC C
+runtime: without the VC++ Redistributable the exe wants `vcruntime140.dll`,
+which is not part of Windows.
+
+So the rule is: **the oldest supported distro builds the artifact, and the
+toolchain is pinned.**
+
+| What | How |
+|---|---|
+| Linux packages | Built in `ubuntu:22.04` (glibc 2.35), which covers Debian 12+ and Ubuntu 22.04+. Never the host, never a `-latest` runner. |
+| Local build | `scripts/docker-build-linux-release.sh 0.1.0` — same image, works from any host distro. |
+| Gate | `scripts/check-glibc-baseline.sh 2.35 <binary>` fails if any dependency starts requiring a newer glibc. Runs in `ci.yml` and `release.yml`. |
+| Declared floor | The `.deb` carries `Depends: libc6 (>= 2.35)`, the `.rpm` `Requires: glibc >= 2.35`. |
+| Windows | `RUSTFLAGS=-C target-feature=+crt-static` for `x86_64-pc-windows-msvc`; the release job checks with `dumpbin /dependents` that no VC++ runtime is imported. |
+| Rust | `rust-toolchain.toml` pins the version. A toolchain bump can raise the floor on its own, so move it deliberately and let the gate re-check. |
+
 ## Staff
 
 `auth.rs` holds the roles, the credential rules, the lockout, the lock screen,
