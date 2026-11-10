@@ -86,14 +86,16 @@ jobs:
 
       - name: Build Windows installer (Inno Setup)
         if: matrix.os == 'windows'
+        shell: cmd
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          iscc_bin="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
-          [ -x "$iscc_bin" ] || iscc_bin="/c/Program Files/Inno Setup 6/ISCC.exe"
-          [ -x "$iscc_bin" ] || iscc_bin="iscc"
-          "$iscc_bin" "--define=MyAppVersion=$VERSION" apps/desktop/windows/stride-pos.iss
-          rm -rf dist/windows
+          set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+          if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+          if not exist "%ISCC%" set "ISCC=iscc"
+          "%ISCC%" /DMyAppVersion=%VERSION% apps\desktop\windows\stride-pos.iss
+          if errorlevel 1 exit /b 1
+          if exist dist\windows rmdir /s /q dist\windows
 
       - uses: actions/upload-artifact@v4
         with:
