@@ -4,3 +4,7 @@
 # references that want glibc 2.39). Move this deliberately, then re-run
 # scripts/check-glibc-baseline.sh on the release artifact.
 channel = "1.99.0"
+# A pinned toolchain is installed with the minimal profile, so rustup would not
+# provide these two; CI runs fmt and clippy against the pin, not the runner's
+# preinstalled stable.
+components = ["rustfmt", "clippy"]
