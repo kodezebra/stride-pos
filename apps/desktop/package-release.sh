@@ -27,23 +27,23 @@ mkdir -p "$outdir"
 
 if [[ "$target" == *-pc-windows-msvc ]]; then
     # Windows: ship the executable and README in a zip.
-    root="dist/${base}"
+    root="${outdir}/${base}"
     rm -rf "$root"
     mkdir -p "$root"
     cp "$binary" "$root/stride-pos.exe"
     cp README.md "$root/README.md"
     if command -v zip >/dev/null 2>&1; then
-        (cd dist && zip -r "${base}.zip" "$base")
+        (cd "$outdir" && zip -r "${base}.zip" "$base")
     else
         powershell.exe -NoProfile -Command \
-            "Compress-Archive -Path 'dist\\${base}' -DestinationPath 'dist\\${base}.zip' -Force"
+            "Compress-Archive -Path '${outdir}\\${base}' -DestinationPath '${outdir}\\${base}.zip' -Force"
     fi
     rm -rf "$root"
     exit 0
 fi
 
 # Linux: tar.gz, .deb (Debian/Ubuntu) and .rpm (Fedora/RHEL).
-root="dist/${base}"
+root="${outdir}/${base}"
 rm -rf "$root"
 mkdir -p "$root/usr/bin" "$root/usr/share/doc/${name}"
 install -m 0755 "$binary" "$root/usr/bin/${name}"
@@ -63,6 +63,7 @@ Version: ${version}
 Section: utils
 Priority: optional
 Architecture: amd64
+Depends: libc6 (>= 2.35), libgcc-s1
 Maintainer: Stride POS <packaging@stride.example>
 Description: Stride point-of-sale desktop till
  Stride POS is a local-first point-of-sale till for retail shops.
@@ -88,6 +89,7 @@ Summary:        Stride point-of-sale desktop till
 License:        Proprietary
 BuildArch:      x86_64
 Source0:        ${name}
+Requires:       glibc >= 2.35
 
 %description
 Stride POS is a local-first point-of-sale till for retail shops.

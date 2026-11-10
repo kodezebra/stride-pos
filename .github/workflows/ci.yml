@@ -67,3 +67,35 @@ jobs:
             echo "No lint text report was produced."
             find app/build -name 'lint-results-*' -print 2>/dev/null || true
           fi
+
+  # Proves the release path still produces a binary Debian 12 can load. The
+  # main `rust` job runs on the runner's own (newer) glibc, so it cannot catch a
+  # dependency that quietly raises the floor.
+  linux-compat:
+    name: Linux glibc floor (2.35)
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install git for checkout
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ./scripts/install-linux-build-deps.sh
+
+      # Distinct cache key: artifacts compiled against the runner's newer glibc
+      # must not leak into this job, or the floor check would pass on a stale
+      # binary.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-glibc-2.35
+
+      - name: Build
+        run: cargo build --locked -p desktop
+
+      - name: Check glibc floor
+        run: ./scripts/check-glibc-baseline.sh 2.35 target/debug/desktop
