@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use money::{Currency, Money};
 use ui_kit::theme::Theme;
+use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
 use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
@@ -645,6 +646,9 @@ pub struct State {
     pub paths: Paths,
     /// The theme currently installed on the context.
     pub theme: Theme,
+    /// The brand accent installed over that theme, or `None` for the palette's
+    /// built-in accent.
+    pub brand_accent: Option<Rgb>,
     /// Set when the theme changed and the context still needs reinstalling.
     /// The shell owns `install`, so the screen only records the intent.
     pub theme_dirty: bool,
@@ -702,6 +706,11 @@ impl State {
         needs_currency: bool,
     ) -> Self {
         let theme = settings.theme();
+        let brand_accent = settings.brand_accent();
+        // Startup installs the static palette before the first frame. If a
+        // brand accent was saved, reinstall on that first frame so the very
+        // first paint is the one the shop chose.
+        let theme_dirty = brand_accent.is_some();
         let shop_draft = settings.shop_name.trim().to_owned();
         let receipt_draft = settings.receipt.clone();
         let tax_draft = settings.tax_rate_percent.to_string();
@@ -767,7 +776,8 @@ impl State {
             settings,
             paths,
             theme,
-            theme_dirty: false,
+            brand_accent,
+            theme_dirty,
             settings_dirty: scanner_token_created,
             currency,
             needs_currency,
@@ -820,6 +830,17 @@ impl State {
         if self.theme != theme {
             self.theme = theme;
             self.settings.set_theme(theme);
+            self.theme_dirty = true;
+            self.settings_dirty = true;
+        }
+    }
+
+    /// Switch the one brand accent. The shell derives the palette on the next
+    /// frame; screens never touch global visuals.
+    pub fn set_brand_accent(&mut self, accent: Option<Rgb>) {
+        if self.brand_accent != accent {
+            self.brand_accent = accent;
+            self.settings.set_brand_accent(accent);
             self.theme_dirty = true;
             self.settings_dirty = true;
         }

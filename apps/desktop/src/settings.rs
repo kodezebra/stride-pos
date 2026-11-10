@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use ui_kit::theme::Theme;
+use ui_kit::tokens::Rgb;
 
 use crate::scan::ScanConfig;
 
@@ -16,6 +17,9 @@ pub struct Settings {
     /// `"light"` or `"dark"`. `None` means "never chosen", which resolves to the
     /// default theme rather than pinning a value the user did not pick.
     pub theme: Option<String>,
+    /// The one brand accent, as `#RRGGBB`. `None` keeps the palette's built-in
+    /// emerald. An unreadable or mistyped value is ignored rather than guessed.
+    pub brand_accent: Option<String>,
     /// What prints at the top of every receipt. Empty means "not set yet" and
     /// falls back to the app name, so a fresh till still prints something rather
     /// than a blank letterhead.
@@ -109,6 +113,16 @@ impl Settings {
         self.theme = Some(theme.name().to_owned());
     }
 
+    /// The brand accent to derive the palette from. An unknown value is ignored:
+    /// a typo must leave the till usable rather than fail to paint.
+    pub fn brand_accent(&self) -> Option<Rgb> {
+        self.brand_accent.as_deref().and_then(Rgb::parse_hex)
+    }
+
+    pub fn set_brand_accent(&mut self, accent: Option<Rgb>) {
+        self.brand_accent = accent.map(|accent| format!("#{:06x}", accent.to_hex()));
+    }
+
     /// The merchant as a receipt should print it.
     ///
     /// One resolver because the receipt, the preview and the clipboard all need
@@ -145,6 +159,32 @@ mod tests {
         settings.set_theme(Theme::Dark);
         assert_eq!(settings.theme.as_deref(), Some("dark"));
         assert_eq!(settings.theme(), Theme::Dark);
+    }
+
+    #[test]
+    fn brand_accent_round_trips_and_rejects_a_typo() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.brand_accent(), None);
+
+        let accent = Rgb::hex(0x6d_28_d9);
+        settings.set_brand_accent(Some(accent));
+        assert_eq!(settings.brand_accent.as_deref(), Some("#6d28d9"));
+        assert_eq!(settings.brand_accent(), Some(accent));
+
+        settings.set_brand_accent(None);
+        assert_eq!(settings.brand_accent, None);
+
+        let typo = Settings {
+            brand_accent: Some("#6d28d".to_owned()),
+            ..Settings::default()
+        };
+        assert_eq!(typo.brand_accent(), None);
+    }
+
+    #[test]
+    fn a_settings_file_without_a_brand_accent_keeps_the_product_default() {
+        let loaded: Settings = serde_json::from_str("{}").expect("empty settings load");
+        assert_eq!(loaded.brand_accent(), None);
     }
 
     #[test]
