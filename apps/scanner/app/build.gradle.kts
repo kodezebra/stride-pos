@@ -96,4 +96,8 @@ dependencies {
     // On-device barcode decoding. Nothing leaves the phone; the model ships in
     // the APK.
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
+
+    // The money and payload logic is plain Kotlin on purpose; these tests run
+    // on the JVM, with no emulator and no Android stub in the way.
+    testImplementation("junit:junit:4.13.2")
 }

@@ -509,8 +509,10 @@ dependencies = [
  "config",
  "directories",
  "getrandom 0.3.4",
+ "lan-http",
  "money",
  "qrcode",
+ "rusqlite",
  "serde",
  "serde_json",
  "storage",
@@ -1477,6 +1479,15 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "lan-http"
+version = "0.1.0"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
+dependencies = [
+ "getrandom 0.3.4",
+ "tiny_http",
 ]
 
 [[package]]

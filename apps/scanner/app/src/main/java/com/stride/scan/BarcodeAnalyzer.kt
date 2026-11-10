@@ -7,14 +7,15 @@ import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 
-enum class Mode { NONE, PAIRING, SCANNING }
+enum class Mode { NONE, PAIRING, SCANNING, EMERGENCY }
 
 /**
  * Reads the camera and hands the first usable code to the activity.
  *
  * The frame is closed only when ML Kit is done with it; closing it earlier is
- * the classic way to make the preview freeze. Pairing mode accepts QR codes,
- * scanning mode accepts product barcodes. Nothing here talks to the till.
+ * the classic way to make the preview freeze. Pairing mode accepts QR codes;
+ * scanning and emergency mode accept product barcodes. Nothing here talks to
+ * the till.
  */
 class BarcodeAnalyzer(
     private val scanner: BarcodeScanner,

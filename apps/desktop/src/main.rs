@@ -30,6 +30,7 @@ mod db;
 mod export;
 mod firewall;
 mod import;
+mod lan;
 mod modules;
 mod picker;
 mod prefs;
@@ -38,6 +39,7 @@ mod scan;
 mod settings;
 mod shell;
 mod state;
+mod sync;
 mod theme;
 
 use std::process::ExitCode;

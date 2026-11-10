@@ -45,9 +45,12 @@ pub struct PosShell {
     commands_role: Option<Role>,
     palette: Palette,
     prefs_path: PathBuf,
-    /// The phone scanner's worker. Owned by the frame, not by Settings: the
-    /// listener must keep running while the operator is on any other screen.
-    scan: crate::scan::Service,
+    /// The shop's one LAN listener. Owned by the frame, not by Settings: it
+    /// must keep running while the operator is on any other screen.
+    lan: crate::lan::Service,
+    /// The background loop that pulls from other tills. Same lifetime, same
+    /// reason: sync is a property of the process, not of the card that set it.
+    sync: crate::sync::service::Service,
     /// Whether the host firewall is dropping the port the listener is on, and
     /// the privileged step that opens it. Owned here for the same reason.
     firewall: crate::firewall::Service,
@@ -55,6 +58,9 @@ pub struct PosShell {
 
 impl PosShell {
     pub fn new(state: State, prefs_path: PathBuf) -> Self {
+        // One database, two extra connections: the listener and the worker each
+        // open their own so neither can hold up checkout.
+        let db_path = state.paths.data.join("pos.db");
         Self {
             state,
             modules: modules::all(),
@@ -62,7 +68,8 @@ impl PosShell {
             commands_role: Some(Role::Cashier),
             palette: Palette::default(),
             prefs_path,
-            scan: crate::scan::Service::new(),
+            lan: crate::lan::Service::new(db_path.clone()),
+            sync: crate::sync::service::Service::new(db_path),
             firewall: crate::firewall::Service::new(),
         }
     }
@@ -87,28 +94,61 @@ impl PosShell {
         // puts the till on the lock screen.
         self.state.tick(ui.ctx());
 
-        // The phone scanner lives for the process, not for the screen that
-        // enabled it. Sync first so a switch flipped on the Settings page takes
-        // effect on the next frame, then hand every scan to the same routing a
-        // keyboard scan uses.
-        self.scan.sync(&self.state.settings.scanner);
-        let events = self.scan.drain();
+        // The phone scanner and till-to-till sync live for the process, not for
+        // the screen that enabled them. Sync first so a switch flipped on the
+        // Settings page takes effect on the next frame, then hand every scan to
+        // the same routing a keyboard scan uses.
+        self.lan.sync(
+            &self.state.settings.scanner,
+            &self.state.settings.sync,
+            self.state.settings.tax_rate_percent,
+        );
+        let events = self.lan.drain();
         let had_scan = !events.is_empty();
         for event in events {
             self.state.receive_scan(event);
         }
-        self.state.scanner_status = self.scan.status().clone();
-        // A scan that arrived while the till was idle still lands within a
-        // single frame: ask egui to repaint immediately so the cart updates
-        // instead of waiting for the next touch or mouse move.
-        if had_scan {
+        self.state.scanner_status = self.lan.status().clone();
+
+        // The worker parks when sync is off and is woken by the toggle. "Sync
+        // now" from the card is a one-shot request, not a mode.
+        self.sync.set_enabled(self.state.settings.sync.enabled);
+        if std::mem::take(&mut self.state.sync_now_requested) {
+            self.sync.now();
+        }
+        let sync_events = self.sync.drain();
+        let had_sync = !sync_events.is_empty();
+        for event in &sync_events {
+            self.sync.observe(event);
+            if let crate::sync::SyncEvent::CatalogSettings(catalog) = event
+                && self.state.settings.tax_rate_percent != catalog.tax_rate_percent
+            {
+                // Settings change on the UI thread only; the worker hands the
+                // value over instead of writing the file itself.
+                self.state.settings.tax_rate_percent = catalog.tax_rate_percent;
+                self.state.settings_dirty = true;
+            }
+        }
+        if had_sync {
+            // The worker records per-peer errors and last-seen times; a pass
+            // that just finished is the moment to show them.
+            self.state.reload_sync_peers();
+        }
+        self.state.sync_status = self.sync.status().clone();
+        // A scan or a peer that arrived while the till was idle still lands
+        // within a single frame: ask egui to repaint immediately so the cart
+        // and the card update instead of waiting for the next touch.
+        if had_scan || had_sync {
             ui.ctx().request_repaint();
         }
 
         // A healthy listener can still be unreachable, because the host
         // firewall drops the packet first. Probe the port the listener is on,
-        // and let Settings ask for it to be opened.
-        self.firewall.sync(&self.state.settings.scanner);
+        // and let Settings ask for it to be opened. The port is shared, so one
+        // probe covers scanning and sync.
+        let port = (self.state.settings.scanner.enabled || self.state.settings.sync.enabled)
+            .then_some(self.state.settings.scanner.port);
+        self.firewall.sync(port);
         if std::mem::take(&mut self.state.firewall_allow_requested) {
             self.firewall.allow();
         }
@@ -428,7 +468,15 @@ impl PosShell {
         if self.state.settings_dirty {
             let path = self.state.paths.settings.clone();
             match config::save(&path, &self.state.settings) {
-                Ok(()) => self.state.settings_dirty = false,
+                Ok(()) => {
+                    self.state.settings_dirty = false;
+                    // A phone's catalog snapshot carries the tax rate and the
+                    // cash step, and those live in settings rather than a table.
+                    // Table writes bump this by trigger; this one needs a hand.
+                    if let Err(err) = crate::db::bump_catalog_version(&self.state.store) {
+                        tracing::warn!(error = %err, "could not bump the catalog version");
+                    }
+                }
                 Err(err) => {
                     self.state.settings_dirty = false;
                     tracing::warn!(error = %err, path = %path.display(), "could not save settings");
@@ -440,11 +488,25 @@ impl PosShell {
 
 fn status_bar(ui: &mut egui::Ui, state: &mut State) {
     let muted = ui.visuals().weak_text_color();
+    let palette = ui_kit::theme::current(ui.ctx());
 
-    // Left cluster: what the terminal knows about itself. "local only" is the
-    // truth today — there is no hub and no cloud — and it is what the operator
-    // needs to see before they trust the queue depth that will sit next to it.
-    regions::status_item(ui, Icon::UNSYNCED, "local only", muted);
+    // Left cluster: what the terminal knows about itself. A till that syncs still
+    // sells alone; this segment says whether it is currently keeping company.
+    let sync = &state.sync_status;
+    let (sync_icon, sync_text, sync_color) = if !state.settings.sync.enabled {
+        (Icon::UNSYNCED, "local only".to_owned(), muted)
+    } else if sync.error.is_some() {
+        (
+            Icon::OFFLINE,
+            "sync error".to_owned(),
+            egui::Color32::from(palette.danger),
+        )
+    } else if sync.syncing {
+        (Icon::ONLINE, "syncing…".to_owned(), muted)
+    } else {
+        (Icon::ONLINE, format!("{} till(s)", sync.peers), muted)
+    };
+    regions::status_item(ui, sync_icon, &sync_text, sync_color);
 
     let cart = format!(
         "{} item(s) - {}",

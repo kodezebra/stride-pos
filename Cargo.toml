@@ -25,6 +25,7 @@ storage = { git = "https://github.com/kodezebra/stride-libs", rev = "c53ee9d5270
 config = { git = "https://github.com/kodezebra/stride-libs", rev = "c53ee9d5270407f0525d3105e38ebc1f682be139" }
 app-boot = { git = "https://github.com/kodezebra/stride-libs", rev = "c53ee9d5270407f0525d3105e38ebc1f682be139" }
 money = { git = "https://github.com/kodezebra/stride-libs", rev = "c53ee9d5270407f0525d3105e38ebc1f682be139" }
+lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "c53ee9d5270407f0525d3105e38ebc1f682be139" }
 
 # ---- third-party ---------------------------------------------------------
 # Versions are pinned to what is already cached in ~/.cargo/registry, so a
