@@ -45,11 +45,7 @@ impl SyncConfig {
     /// The name a peer sees. A blank name is still a till, not an empty column.
     pub fn name(&self) -> &str {
         let trimmed = self.device_name.trim();
-        if trimmed.is_empty() {
-            "Till"
-        } else {
-            trimmed
-        }
+        if trimmed.is_empty() { "Till" } else { trimmed }
     }
 }
 

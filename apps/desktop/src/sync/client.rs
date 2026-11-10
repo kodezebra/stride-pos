@@ -32,23 +32,21 @@ impl HttpPeer {
 
     fn post(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>> {
         let request = Request::post(path, body).with_token(self.token.clone());
-        let response = self.client.request(&self.endpoint, &request).with_context(|| {
-            format!(
-                "asking {}:{} for {path}",
-                self.endpoint.host, self.endpoint.port
-            )
-        })?;
+        let response = self
+            .client
+            .request(&self.endpoint, &request)
+            .with_context(|| {
+                format!(
+                    "asking {}:{} for {path}",
+                    self.endpoint.host, self.endpoint.port
+                )
+            })?;
         Ok(response.body)
     }
 }
 
 impl PeerLink for HttpPeer {
-    fn pull(
-        &self,
-        since_seq: i64,
-        limit: usize,
-        catalog_version: i64,
-    ) -> Result<PullResponse> {
+    fn pull(&self, since_seq: i64, limit: usize, catalog_version: i64) -> Result<PullResponse> {
         let body = serde_json::to_vec(&PullRequest {
             protocol: PROTOCOL,
             since_seq,

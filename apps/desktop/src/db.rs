@@ -1021,11 +1021,7 @@ impl SyncPeer {
 
     pub fn display_name(&self) -> &str {
         let name = self.name.trim();
-        if name.is_empty() {
-            &self.id
-        } else {
-            name
-        }
+        if name.is_empty() { &self.id } else { name }
     }
 }
 

@@ -34,12 +34,7 @@ pub trait Replica {
 
 /// The remote side: a peer that can serve a page and its catalog.
 pub trait PeerLink {
-    fn pull(
-        &self,
-        since_seq: i64,
-        limit: usize,
-        catalog_version: i64,
-    ) -> Result<PullResponse>;
+    fn pull(&self, since_seq: i64, limit: usize, catalog_version: i64) -> Result<PullResponse>;
     fn catalog(&self) -> Result<CatalogSnapshot>;
 }
 
