@@ -46,6 +46,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         set -euo pipefail
         git config --global --add safe.directory /src
         ./scripts/install-linux-build-deps.sh
+        ./scripts/install-rust-toolchain.sh
         ./scripts/build-linux-release.sh "$VERSION"
         chown -R "${HOST_UID}:${HOST_GID}" /src/dist
     '
