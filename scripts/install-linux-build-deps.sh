@@ -29,6 +29,12 @@ if ! command -v cargo >/dev/null 2>&1; then
         | sh -s -- -y --profile minimal --default-toolchain none
 fi
 
-# shellcheck disable=SC1091
-. "${CARGO_HOME:-$HOME/.cargo}/env" 2>/dev/null || true
+cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+export PATH="$cargo_bin:$PATH"
+# A GitHub Actions step is its own process, so an export here would die with
+# this script; publish the directory to the following steps instead.
+if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$cargo_bin" >> "$GITHUB_PATH"
+fi
+
 cargo --version

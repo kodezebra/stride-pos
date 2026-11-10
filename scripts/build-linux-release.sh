@@ -22,6 +22,14 @@ outdir="${OUTDIR:-dist}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# Callers may have installed rustup after this shell started (the CI container
+# and the docker wrapper both do), so resolve cargo before giving up on it.
+# Not `$CARGO_HOME/env`: that file hardcodes `$HOME/.cargo/bin`, and the
+# container points CARGO_HOME at /cargo.
+if ! command -v cargo >/dev/null 2>&1; then
+    export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+fi
+
 cargo build --release --locked -p desktop --target "$target"
 
 bin_dir="target/${target}/release"
