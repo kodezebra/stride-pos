@@ -2,7 +2,9 @@
 ; Compile with: iscc stride-pos.iss
 
 #define MyAppName "Stride POS"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Stride POS"
 #define MyAppExeName "stride-pos.exe"
 
@@ -11,10 +13,11 @@ AppId={{C4F1A2D3-5E6B-4C7D-8E9F-0A1B2C3D4E5F}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autpf}\{#MyAppName}
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-LicenseFile=
+; Paths below are relative to the repo root, where the release step runs iscc.
+SourceDir=..\..\..
 OutputDir=dist
 OutputBaseFilename=stride-pos-{#MyAppVersion}-windows-setup
 Compression=lzma
@@ -34,7 +37,7 @@ Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
