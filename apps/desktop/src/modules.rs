@@ -349,7 +349,7 @@ fn sell_view_toggle(ui: &mut egui::Ui, view: &mut SellView) {
                     let text = egui::RichText::new(label).size(TYPE.small);
                     let text = if selected {
                         text.family(theme::semibold())
-                            .color(egui::Color32::from(palette.accent))
+                            .color(egui::Color32::from(palette.accent_ink()))
                     } else {
                         text.color(egui::Color32::from(palette.text_muted))
                     };
@@ -3866,6 +3866,16 @@ impl Module for Settings {
                         state.set_theme(theme::Theme::Dark);
                     }
                 });
+                ui.add_space(SPACING.md);
+                components::caption(
+                    ui,
+                    "One brand accent, with text and focus colours derived for contrast. \
+                     The canvas and status colours stay the shop's.",
+                );
+                ui.add_space(SPACING.sm);
+                if let Some(accent) = components::brand_selector(ui, state.brand_accent) {
+                    state.set_brand_accent(accent);
+                }
             });
             ui.add_space(SPACING.lg);
         }

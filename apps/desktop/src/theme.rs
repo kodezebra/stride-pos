@@ -23,7 +23,7 @@ pub const DARK: Palette = Palette {
     accent_soft: Rgb::hex(0x16_4e_4b),
     border: Rgb::hex(0x33_41_55),
     border_strong: Rgb::hex(0x64_74_8b),
-    danger: Rgb::hex(0xef_44_44),
+    danger: Rgb::hex(0xf8_71_71),
     success: Rgb::hex(0x34_d3_99),
     warning: Rgb::hex(0xf5_9e_0b),
 };
@@ -44,10 +44,10 @@ pub const LIGHT: Palette = Palette {
     accent_text: Rgb::hex(0xff_ff_ff),
     accent_soft: Rgb::hex(0xdc_fce7),
     border: Rgb::hex(0xd6_d3_ce),
-    border_strong: Rgb::hex(0xb9_b4_ac),
+    border_strong: Rgb::hex(0x7a_71_68),
     danger: Rgb::hex(0xc0_39_2b),
-    success: Rgb::hex(0x84cc16),
-    warning: Rgb::hex(0xd9_77_06),
+    success: Rgb::hex(0x4d_7c_0f),
+    warning: Rgb::hex(0xb4_53_09),
 };
 
 /// The palette for the given theme side of the switch.
@@ -55,5 +55,80 @@ pub fn palette_for(theme: ui_kit::theme::Theme) -> (&'static Palette, bool) {
     match theme {
         ui_kit::theme::Theme::Light => (&LIGHT, false),
         ui_kit::theme::Theme::Dark => (&DARK, true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ui_kit::tokens::BRANDS;
+
+    /// Status and body text sit on the canvas or a card. Both are checked so a
+    /// vivid role cannot pass on the page and disappear inside a card.
+    #[test]
+    fn static_text_roles_clear_aa_on_canvas_and_surface() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            for (role, color) in [
+                ("text", palette.text),
+                ("muted", palette.text_muted),
+                ("danger", palette.danger),
+                ("success", palette.success),
+                ("warning", palette.warning),
+            ] {
+                for (surface, background) in [("canvas", palette.bg), ("surface", palette.surface)]
+                {
+                    assert!(
+                        color.contrast_ratio(background) >= 4.5,
+                        "{name} {role} on {surface} is below 4.5:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `border_strong` is the visible edge of inputs and focusable controls.
+    /// WCAG treats it as a non-text boundary, so 3:1 is the bar.
+    #[test]
+    fn the_strong_border_is_visible_on_both_surfaces() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            for (surface, background) in [("canvas", palette.bg), ("surface", palette.surface)] {
+                assert!(
+                    palette.border_strong.contrast_ratio(background) >= 3.0,
+                    "{name} strong border on {surface} is below 3:1"
+                );
+            }
+        }
+    }
+
+    /// A brand may change the accent but not whether a selected row or a
+    /// primary button can be read.
+    #[test]
+    fn every_brand_accent_derives_readable_text() {
+        for (name, palette, dark) in [("light", LIGHT, false), ("dark", DARK, true)] {
+            let mut palettes = vec![palette.with_accent(palette.accent, dark)];
+            palettes.extend(
+                BRANDS
+                    .iter()
+                    .map(|brand| palette.with_accent(brand.accent, dark)),
+            );
+
+            for palette in palettes {
+                assert!(
+                    palette.accent_text.contrast_ratio(palette.accent) >= 4.49,
+                    "{name} accent text on the brand fill is below 4.5:1"
+                );
+                for background in [
+                    palette.bg,
+                    palette.surface,
+                    palette.surface_alt,
+                    palette.accent_soft,
+                ] {
+                    assert!(
+                        palette.accent_ink().contrast_ratio(background) >= 4.49,
+                        "{name} accent ink is below 4.5:1"
+                    );
+                }
+            }
+        }
     }
 }

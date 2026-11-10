@@ -75,7 +75,11 @@ impl PosShell {
         // own — ui-kit never invents brand colors.
         if self.state.theme_dirty {
             let (palette, dark) = palette_for(self.state.theme);
-            ui_kit::theme::install(ui.ctx(), palette, dark);
+            if let Some(accent) = self.state.brand_accent {
+                ui_kit::theme::install_accent(ui.ctx(), palette, accent, dark);
+            } else {
+                ui_kit::theme::install(ui.ctx(), palette, dark);
+            }
             self.state.theme_dirty = false;
         }
 
