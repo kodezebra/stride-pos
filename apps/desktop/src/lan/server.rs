@@ -16,6 +16,8 @@
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use std::thread;
+use std::time::Duration;
 
 use lan_http::server::{Incoming, Reply, Server};
 use storage::Store;
@@ -34,6 +36,13 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// The most sales one pull page may carry, whatever the peer asks for.
 const MAX_PAGE: usize = 1000;
+
+/// A wrong token is cheap to try, so the listener makes each further wrong one
+/// wait. Three free attempts tolerate a mistyped phone; after that, guessing a
+/// 40-bit code slows to about two a second. A correctly paired device resets
+/// the count and never waits.
+const FREE_FAILURES: u32 = 3;
+const FAILURE_DELAY: Duration = Duration::from_millis(400);
 
 /// What the listener was started with.
 pub struct Routes {
@@ -67,6 +76,7 @@ impl Listener {
             routes,
             scans,
             device_id: None,
+            failures: 0,
         };
 
         let server = Server::bind(port, MAX_BODY_BYTES, move |incoming| {
@@ -96,6 +106,8 @@ struct Handler {
     /// `meta` holds the device id; reading it once is enough for the life of
     /// this listener, which restarts when Settings change anyway.
     device_id: Option<String>,
+    /// Consecutive refusals since the last accepted token.
+    failures: u32,
 }
 
 impl Handler {
@@ -246,18 +258,29 @@ impl Handler {
         }
     }
 
-    fn authorized(&self, incoming: &Incoming, scope: Scope) -> bool {
-        let Some(supplied) = incoming.header(TOKEN_HEADER) else {
-            return false;
-        };
-        match scope {
-            Scope::Scanner => lan_http::token::matches(&self.routes.scanner_token, supplied),
-            Scope::Sync => lan_http::token::matches(&self.routes.sync_token, supplied),
-            Scope::Either => {
-                lan_http::token::matches(&self.routes.scanner_token, supplied)
-                    || lan_http::token::matches(&self.routes.sync_token, supplied)
-            }
+    fn authorized(&mut self, incoming: &Incoming, scope: Scope) -> bool {
+        let allowed = incoming
+            .header(TOKEN_HEADER)
+            .is_some_and(|supplied| match scope {
+                Scope::Scanner => lan_http::token::matches(&self.routes.scanner_token, supplied),
+                Scope::Sync => lan_http::token::matches(&self.routes.sync_token, supplied),
+                Scope::Either => {
+                    lan_http::token::matches(&self.routes.scanner_token, supplied)
+                        || lan_http::token::matches(&self.routes.sync_token, supplied)
+                }
+            });
+
+        if allowed {
+            self.failures = 0;
+            return true;
         }
+
+        self.failures = self.failures.saturating_add(1);
+        let delay = refusal_delay(self.failures);
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        false
     }
 
     fn device_id(&mut self) -> String {
@@ -295,6 +318,16 @@ fn open_store(path: &Path) -> Result<Store, String> {
         .execute_batch("PRAGMA busy_timeout = 500; PRAGMA synchronous = FULL;")
         .map_err(|error| format!("Could not configure the listener database: {error}"))?;
     Ok(store)
+}
+
+/// The pause a refused request earns. Pure so the policy can be tested without
+/// making a timing assertion against a real socket.
+fn refusal_delay(failures: u32) -> Duration {
+    if failures > FREE_FAILURES {
+        FAILURE_DELAY
+    } else {
+        Duration::ZERO
+    }
 }
 
 fn check_protocol(protocol: i64) -> Result<(), &'static str> {
@@ -519,5 +552,46 @@ mod tests {
         let (_fixture, _listener, _rx, port) = start();
         let (status, _) = request(port, "/v1/admin", Some(SYNC), "");
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn only_a_repeated_refusal_earns_a_pause() {
+        assert_eq!(refusal_delay(1), Duration::ZERO);
+        assert_eq!(refusal_delay(FREE_FAILURES), Duration::ZERO);
+        assert_eq!(refusal_delay(FREE_FAILURES + 1), FAILURE_DELAY);
+        assert_eq!(refusal_delay(u32::MAX), FAILURE_DELAY);
+    }
+
+    #[test]
+    fn a_wrong_token_is_still_refused_after_a_pause() {
+        let (_fixture, _listener, _rx, port) = start();
+        for _ in 0..FREE_FAILURES {
+            let (status, _) = request(port, "/v1/ping", Some("WRONGTOKEN"), "");
+            assert_eq!(status, 401);
+        }
+
+        let paused = std::time::Instant::now();
+        let (status, _) = request(port, "/v1/ping", Some("WRONGTOKEN"), "");
+        assert_eq!(status, 401);
+        assert!(
+            paused.elapsed() >= Duration::from_millis(300),
+            "the fourth wrong token should wait"
+        );
+    }
+
+    #[test]
+    fn a_correct_token_is_never_slowed_by_earlier_mistakes() {
+        let (_fixture, _listener, _rx, port) = start();
+        for _ in 0..FREE_FAILURES {
+            let (status, _) = request(port, "/v1/ping", Some("WRONGTOKEN"), "");
+            assert_eq!(status, 401);
+        }
+
+        // A valid token clears the count, so a phone that mistyped once is
+        // not punished for the rest of the day.
+        let (status, _) = request(port, "/v1/ping", Some(SCANNER), "");
+        assert_eq!(status, 200);
+        let (status, _) = request(port, "/v1/ping", Some(SCANNER), "");
+        assert_eq!(status, 200);
     }
 }
