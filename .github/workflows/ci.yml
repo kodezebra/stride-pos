@@ -27,6 +27,22 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # Nothing else compiles the Windows-only choices: `ui-shell` swaps glow for
+  # wgpu under `cfg(windows)`, and the release workflow only runs on a tag. A
+  # tag is a poor place to find out the till no longer builds there.
+  windows:
+    name: Windows (build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: Build
+        run: cargo build --locked -p desktop
+
   android:
     name: Android (debug APK)
     runs-on: ubuntu-latest
