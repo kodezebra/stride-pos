@@ -32,4 +32,51 @@
     <string name="error_connect">Could not reach the till.</string>
     <string name="error_send">Could not send the scan.</string>
     <string name="error_camera">Could not open the camera.</string>
+    <string name="error_sync">Could not refresh from the till.</string>
+
+    <string name="sync_online">Till online</string>
+    <string name="sync_checking">Checking the till…</string>
+    <string name="sync_offline">Till offline — sales stay on this phone</string>
+    <string name="sync_pending">%1$d queued</string>
+    <string name="sync_rejected">%1$d need attention</string>
+
+    <string name="emergency_open">Power cut? Take cash on the phone</string>
+    <string name="emergency_back">Back</string>
+    <string name="emergency_title">Blackout till</string>
+    <string name="emergency_cashier_unset">Cashier: Unassigned — tap to choose</string>
+    <string name="emergency_cashier">Cashier: %1$s</string>
+    <string name="emergency_cashier_title">Who is taking cash?</string>
+    <string name="emergency_unassigned">Unassigned</string>
+    <string name="emergency_empty">No items yet. Search the catalogue, scan a barcode, or add an item by name.</string>
+    <string name="emergency_total">Total</string>
+    <string name="emergency_rounding">Cash rounding</string>
+    <string name="emergency_tax">Tax included</string>
+    <string name="emergency_due">To pay</string>
+    <string name="emergency_search_title">Search the catalogue</string>
+    <string name="emergency_search_hint">Name or barcode</string>
+    <string name="emergency_search">Search</string>
+    <string name="emergency_scan_item">Scan an item</string>
+    <string name="emergency_scan_hint">Point the camera at a product barcode.</string>
+    <string name="emergency_scan_total">In cart: %1$s</string>
+    <string name="emergency_scan_done">Done scanning</string>
+    <string name="emergency_manual_title">Add an item the catalogue does not have</string>
+    <string name="emergency_manual_name">Item name</string>
+    <string name="emergency_manual_price">Price</string>
+    <string name="emergency_manual_add">Add item</string>
+    <string name="emergency_tendered">Cash received (blank = exact)</string>
+    <string name="emergency_take_cash">Take cash</string>
+    <string name="emergency_saved">Sale saved on the phone. It will reach the till when it is back.</string>
+    <string name="emergency_not_saved">Could not save the sale. Keep the app open and try again.</string>
+    <string name="emergency_bad_tender">Cash is less than the amount due.</string>
+    <string name="emergency_bad_price">Enter a price greater than zero.</string>
+    <string name="emergency_bad_name">Give the item a name.</string>
+    <string name="emergency_not_in_catalog">That barcode is not in the catalogue. Add the item by name.</string>
+    <string name="emergency_no_match">Nothing matched. Add the item by name.</string>
+    <string name="emergency_added">Added %1$s.</string>
+    <string name="emergency_no_catalog">No catalogue yet. Add items by name and price; the catalogue is fetched when the till is reachable.</string>
+    <string name="emergency_rejected_title">Sales the till refused</string>
+    <string name="emergency_retry">Try again</string>
+    <string name="emergency_close">Close</string>
+    <string name="emergency_rejected_button">%1$d sale(s) refused — review</string>
+    <string name="emergency_queued">%1$d sale(s) waiting for the till</string>
 </resources>

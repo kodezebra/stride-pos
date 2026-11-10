@@ -158,6 +158,10 @@ pub struct CatalogSnapshot {
     pub protocol: i64,
     pub version: i64,
     pub currency: String,
+    /// Decimal places the currency is written with: `0` for UGX, `2` for KES.
+    /// The phone needs it to show a cached price and to read a manual one.
+    #[serde(default)]
+    pub currency_exponent: i64,
     pub cash_step_minor: i64,
     pub tax_rate_percent: i64,
     pub products: Vec<ProductDto>,

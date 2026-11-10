@@ -1328,6 +1328,9 @@ pub fn catalog_snapshot(
         protocol: sync_proto::PROTOCOL,
         version,
         currency: tender.map(|c| c.code().to_owned()).unwrap_or_default(),
+        currency_exponent: tender
+            .map(|c| i64::from(c.exponent().unwrap_or(0)))
+            .unwrap_or(0),
         cash_step_minor: tender.map(crate::currencies::cash_step).unwrap_or(1),
         tax_rate_percent,
         products,

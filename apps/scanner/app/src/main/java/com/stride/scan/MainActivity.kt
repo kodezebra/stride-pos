@@ -1,22 +1,30 @@
 package com.stride.scan
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -24,6 +32,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.Lifecycle
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
@@ -31,22 +40,28 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import org.json.JSONObject
 
 /**
  * One screen, two jobs: pair the phone with a till, then scan for it.
  *
  * There is no account and no cloud session. The only state that outlives the
- * activity is [Pairing] in private preferences and the Sell/Add choice.
+ * activity is [Pairing] in private preferences, the Sell/Add choice, and the
+ * cashier picked for a blackout sale. The blackout till itself is local: a
+ * catalogue copy, a cart, and an outbox that retries when the till returns.
  */
 class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var scanner: BarcodeScanner
+    private lateinit var db: TillDb
 
     private lateinit var previewView: PreviewView
     private lateinit var topBar: View
     private lateinit var endpointText: TextView
     private lateinit var statusText: TextView
+    private lateinit var syncBadge: TextView
     private lateinit var scanControls: View
     private lateinit var modeGroup: RadioGroup
     private lateinit var modeSell: RadioButton
@@ -63,9 +78,43 @@ class MainActivity : ComponentActivity() {
     private lateinit var pairingHint: View
     private lateinit var pairingHintText: TextView
 
+    private lateinit var emergencyButton: Button
+    private lateinit var emergencyPanel: View
+    private lateinit var emergencyBack: Button
+    private lateinit var emergencyCashier: Button
+    private lateinit var emergencyNotice: TextView
+    private lateinit var cartEmpty: TextView
+    private lateinit var cartItems: LinearLayout
+    private lateinit var emergencyTotal: TextView
+    private lateinit var emergencyRounding: TextView
+    private lateinit var emergencyTax: TextView
+    private lateinit var emergencyDue: TextView
+    private lateinit var productSearch: EditText
+    private lateinit var searchButton: Button
+    private lateinit var searchResults: LinearLayout
+    private lateinit var emergencyScanButton: Button
+    private lateinit var manualName: EditText
+    private lateinit var manualPrice: EditText
+    private lateinit var addManualButton: Button
+    private lateinit var emergencyStatus: TextView
+    private lateinit var rejectedButton: Button
+    private lateinit var tenderedInput: EditText
+    private lateinit var takeCashButton: Button
+    private lateinit var emergencyScanBar: View
+    private lateinit var emergencyScanStatus: TextView
+    private lateinit var emergencyScanTotal: TextView
+    private lateinit var emergencyScanCancel: Button
+
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var provider: ProcessCameraProvider? = null
     private var client: TillClient? = null
+    private var outbox: Outbox? = null
+    private var emergencyTill: EmergencyTill? = null
+
+    private val syncHandler = Handler(Looper.getMainLooper())
+    private var syncing = false
+    private var lastReachable: Boolean? = null
+    private var lastSyncError: String? = null
 
     private var screen = Screen.PAIR
 
@@ -88,6 +137,29 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val syncTick = object : Runnable {
+        override fun run() {
+            runCatching { runSyncTick() }
+            syncHandler.postDelayed(this, SYNC_TICK_MS)
+        }
+    }
+
+    private val backCallback = object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+            when (screen) {
+                Screen.EMERGENCY_SCAN -> resumeEmergencyPanel()
+                Screen.EMERGENCY -> showScanner()
+                Screen.PAIR ->
+                    if (pairingHint.visibility == View.VISIBLE) {
+                        showPairPanel()
+                    } else {
+                        finish()
+                    }
+                Screen.SCAN -> finish()
+            }
+        }
+    }
+
     private val cameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             askingForCamera = false
@@ -99,6 +171,8 @@ class MainActivity : ComponentActivity() {
                 pendingCameraUse = null
                 if (screen == Screen.SCAN) {
                     setScanStatus(getString(R.string.camera_needed), true)
+                } else if (screen == Screen.EMERGENCY_SCAN) {
+                    resumeEmergencyPanel(getString(R.string.camera_needed))
                 } else {
                     showPairPanel()
                     setPairError(getString(R.string.camera_needed))
@@ -109,6 +183,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        db = TillDb(applicationContext)
         setContentView(R.layout.activity_main)
         bind()
         scanner = BarcodeScanning.getClient(
@@ -116,6 +191,7 @@ class MainActivity : ComponentActivity() {
                 .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
                 .build(),
         )
+        onBackPressedDispatcher.addCallback(this, backCallback)
 
         val saved = Pairing.load(prefs)
         if (saved == null) showPairPanel() else showScan(saved)
@@ -128,22 +204,29 @@ class MainActivity : ComponentActivity() {
             screen == Screen.SCAN -> requireCamera {
                 if (screen == Screen.SCAN) startCamera()
             }
+            screen == Screen.EMERGENCY_SCAN -> requireCamera {
+                if (screen == Screen.EMERGENCY_SCAN) startCamera()
+            }
             pairingHint.visibility == View.VISIBLE -> requireCamera {
                 if (pairingHint.visibility == View.VISIBLE) startCamera()
             }
         }
+        if (screen != Screen.PAIR) startSyncPolling()
     }
 
     override fun onStop() {
         stopCamera()
+        stopSyncPolling()
         super.onStop()
     }
 
     override fun onDestroy() {
         stopCamera()
+        stopSyncPolling()
         cameraExecutor.shutdown()
         scanner.close()
         client?.close()
+        db.close()
         super.onDestroy()
     }
 
@@ -152,10 +235,12 @@ class MainActivity : ComponentActivity() {
         topBar = findViewById(R.id.topBar)
         endpointText = findViewById(R.id.endpointText)
         statusText = findViewById(R.id.statusText)
+        syncBadge = findViewById(R.id.syncBadge)
         scanControls = findViewById(R.id.scanControls)
         modeGroup = findViewById(R.id.modeGroup)
         modeSell = findViewById(R.id.modeSell)
         modeAdd = findViewById(R.id.modeAdd)
+        emergencyButton = findViewById(R.id.emergencyButton)
 
         setupPanel = findViewById(R.id.setupPanel)
         hostInput = findViewById(R.id.hostInput)
@@ -168,10 +253,64 @@ class MainActivity : ComponentActivity() {
         pairingHint = findViewById(R.id.pairingHint)
         pairingHintText = findViewById(R.id.pairingHintText)
 
+        emergencyPanel = findViewById(R.id.emergencyPanel)
+        emergencyBack = findViewById(R.id.emergencyBack)
+        emergencyCashier = findViewById(R.id.emergencyCashier)
+        emergencyNotice = findViewById(R.id.emergencyNotice)
+        cartEmpty = findViewById(R.id.cartEmpty)
+        cartItems = findViewById(R.id.cartItems)
+        emergencyTotal = findViewById(R.id.emergencyTotal)
+        emergencyRounding = findViewById(R.id.emergencyRounding)
+        emergencyTax = findViewById(R.id.emergencyTax)
+        emergencyDue = findViewById(R.id.emergencyDue)
+        productSearch = findViewById(R.id.productSearch)
+        searchButton = findViewById(R.id.searchButton)
+        searchResults = findViewById(R.id.searchResults)
+        emergencyScanButton = findViewById(R.id.emergencyScanButton)
+        manualName = findViewById(R.id.manualName)
+        manualPrice = findViewById(R.id.manualPrice)
+        addManualButton = findViewById(R.id.addManualButton)
+        emergencyStatus = findViewById(R.id.emergencyStatus)
+        rejectedButton = findViewById(R.id.rejectedButton)
+        tenderedInput = findViewById(R.id.tenderedInput)
+        takeCashButton = findViewById(R.id.takeCashButton)
+        emergencyScanBar = findViewById(R.id.emergencyScanBar)
+        emergencyScanStatus = findViewById(R.id.emergencyScanStatus)
+        emergencyScanTotal = findViewById(R.id.emergencyScanTotal)
+        emergencyScanCancel = findViewById(R.id.emergencyScanCancel)
+
         findViewById<Button>(R.id.repairButton).setOnClickListener { showPairPanel() }
         scanQrButton.setOnClickListener { beginPairingScan() }
         connectButton.setOnClickListener { connectManually() }
         cancelPairButton.setOnClickListener { showPairPanel() }
+
+        emergencyButton.setOnClickListener { showEmergency() }
+        emergencyBack.setOnClickListener { showScanner() }
+        emergencyCashier.setOnClickListener { chooseCashier() }
+        searchButton.setOnClickListener { searchProducts() }
+        emergencyScanButton.setOnClickListener { beginEmergencyScan() }
+        addManualButton.setOnClickListener { addManual() }
+        takeCashButton.setOnClickListener { takeCash() }
+        rejectedButton.setOnClickListener { showRejectedDialog() }
+        emergencyScanCancel.setOnClickListener { resumeEmergencyPanel() }
+
+        productSearch.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                searchProducts()
+                true
+            } else {
+                false
+            }
+        }
+        manualPrice.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                addManual()
+                true
+            } else {
+                false
+            }
+        }
+        tenderedInput.doAfterTextChanged { updatePayableState() }
 
         modeGroup.setOnCheckedChangeListener { _, checked ->
             prefs.edit()
@@ -183,6 +322,7 @@ class MainActivity : ComponentActivity() {
         } else {
             modeSell.isChecked = true
         }
+        updateSyncBadge()
     }
 
     private fun showPairPanel() {
@@ -190,14 +330,18 @@ class MainActivity : ComponentActivity() {
         screen = Screen.PAIR
         cameraMode = Mode.NONE
         stopCamera()
+        stopSyncPolling()
 
         client?.close()
         client = null
+        outbox = null
 
         setupPanel.visibility = View.VISIBLE
         pairingHint.visibility = View.GONE
         topBar.visibility = View.GONE
         scanControls.visibility = View.GONE
+        emergencyPanel.visibility = View.GONE
+        emergencyScanBar.visibility = View.GONE
         pairStatus.visibility = View.GONE
         setPairBusy(false)
 
@@ -214,6 +358,8 @@ class MainActivity : ComponentActivity() {
         fillPairing(pairing)
         setupPanel.visibility = View.GONE
         pairingHint.visibility = View.GONE
+        emergencyPanel.visibility = View.GONE
+        emergencyScanBar.visibility = View.GONE
         topBar.visibility = View.VISIBLE
         scanControls.visibility = View.VISIBLE
         endpointText.text = pairing.endpoint
@@ -222,7 +368,10 @@ class MainActivity : ComponentActivity() {
 
         client?.close()
         client = TillClient(pairing)
+        outbox = Outbox(db, client!!)
         setScanStatus(getString(R.string.ready), false)
+        updateSyncBadge()
+        startSyncPolling()
 
         requireCamera {
             if (screen == Screen.SCAN) startCamera()
@@ -319,13 +468,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleBarcode(raw: String) {
-        if (screen != Screen.SCAN) return
-
         val now = SystemClock.elapsedRealtime()
         if (raw == lastBarcode && now - lastScanAt < DUPLICATE_WINDOW_MS) return
         lastBarcode = raw
         lastScanAt = now
 
+        when (screen) {
+            Screen.SCAN -> sendScan(raw)
+            Screen.EMERGENCY_SCAN -> addScanned(raw)
+            else -> Unit
+        }
+    }
+
+    private fun sendScan(raw: String) {
         val add = modeAdd.isChecked
         val action = if (add) "add" else "sell"
         setScanStatus(getString(R.string.sending, raw), false)
@@ -348,6 +503,538 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // ---- blackout till -------------------------------------------------
+
+    private fun showEmergency() {
+        if (screen != Screen.SCAN) return
+
+        val till = emergencyTill ?: EmergencyTill(db).also {
+            emergencyTill = it
+            it.cashier = loadCashier()
+        }
+        till.refresh()
+
+        screen = Screen.EMERGENCY
+        cameraMode = Mode.NONE
+        stopCamera()
+        topBar.visibility = View.GONE
+        scanControls.visibility = View.GONE
+        emergencyScanBar.visibility = View.GONE
+        emergencyPanel.visibility = View.VISIBLE
+        emergencyStatus.visibility = View.GONE
+
+        renderEmergency()
+        runSyncTick()
+    }
+
+    private fun showScanner() {
+        screen = Screen.SCAN
+        cameraMode = Mode.SCANNING
+        stopCamera()
+        emergencyPanel.visibility = View.GONE
+        emergencyScanBar.visibility = View.GONE
+        topBar.visibility = View.VISIBLE
+        scanControls.visibility = View.VISIBLE
+        lastBarcode = ""
+        lastScanAt = 0
+        setScanStatus(getString(R.string.ready), false)
+        updateSyncBadge()
+        startSyncPolling()
+
+        requireCamera {
+            if (screen == Screen.SCAN) startCamera()
+        }
+    }
+
+    private fun beginEmergencyScan() {
+        if (screen != Screen.EMERGENCY) return
+        screen = Screen.EMERGENCY_SCAN
+        cameraMode = Mode.EMERGENCY
+        emergencyPanel.visibility = View.GONE
+        emergencyScanBar.visibility = View.VISIBLE
+        emergencyScanStatus.text = getString(R.string.emergency_scan_hint)
+        renderScanBar()
+        lastBarcode = ""
+        lastScanAt = 0
+
+        requireCamera {
+            if (screen == Screen.EMERGENCY_SCAN) startCamera()
+        }
+    }
+
+    private fun resumeEmergencyPanel(message: String? = null) {
+        if (screen != Screen.EMERGENCY_SCAN && screen != Screen.EMERGENCY) return
+        screen = Screen.EMERGENCY
+        cameraMode = Mode.NONE
+        stopCamera()
+        emergencyScanBar.visibility = View.GONE
+        emergencyPanel.visibility = View.VISIBLE
+        message?.let { setEmergencyStatus(it, true) }
+        renderEmergency()
+    }
+
+    private fun addScanned(raw: String) {
+        val till = emergencyTill ?: return
+        thump()
+
+        val product = runCatching { db.productByBarcode(raw) }.getOrNull()
+        if (product == null) {
+            emergencyScanStatus.text = getString(R.string.emergency_not_in_catalog)
+            return
+        }
+
+        till.addProduct(product)
+        emergencyScanStatus.text = getString(R.string.emergency_added, product.name)
+        renderScanBar()
+    }
+
+    private fun renderScanBar() {
+        emergencyScanTotal.text = getString(
+            R.string.emergency_scan_total,
+            money(emergencyTill?.totalMinor() ?: 0),
+        )
+    }
+
+    private fun renderEmergency() {
+        renderCart()
+        updateCashierButton()
+        updateRejectedButton()
+        renderEmergencyNotice()
+        updateSyncBadge()
+    }
+
+    private fun renderCart() {
+        val till = emergencyTill ?: return
+        cartItems.removeAllViews()
+
+        val items = till.cart.items
+        cartEmpty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+        for (line in items) cartItems.addView(cartRow(line, till))
+
+        emergencyTotal.text = money(till.totalMinor())
+        emergencyRounding.text = signedMoney(till.roundingMinor())
+        emergencyTax.text = money(till.taxMinor())
+        emergencyDue.text = money(till.dueMinor())
+        updatePayableState()
+        renderScanBar()
+    }
+
+    private fun cartRow(line: CartLine, till: EmergencyTill): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(6))
+        }
+
+        val name = TextView(this).apply {
+            text = line.name
+            textSize = 14f
+            maxLines = 2
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.stride_ink))
+        }
+        row.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        row.addView(
+            smallButton("\u2212") {
+                till.cart.change(line.uid, -1)
+                renderCart()
+            },
+        )
+        val qty = TextView(this).apply {
+            text = line.qty.toString()
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.stride_ink))
+        }
+        row.addView(qty, LinearLayout.LayoutParams(dp(28), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(
+            smallButton("+") {
+                till.cart.change(line.uid, 1)
+                renderCart()
+            },
+        )
+
+        val total = TextView(this).apply {
+            text = money(line.totalMinor)
+            textSize = 14f
+            gravity = Gravity.END
+            setPadding(dp(8), 0, 0, 0)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.stride_ink))
+        }
+        row.addView(total, LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT))
+        return row
+    }
+
+    private fun smallButton(label: String, action: () -> Unit): Button =
+        Button(this, null, android.R.attr.borderlessButtonStyle).apply {
+            text = label
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(10), 0, dp(10), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(36),
+            )
+            setOnClickListener { action() }
+        }
+
+    private fun updatePayableState() {
+        val till = emergencyTill
+        if (till == null) {
+            takeCashButton.isEnabled = false
+            return
+        }
+        val raw = tenderedInput.text.toString().trim()
+        val due = till.dueMinor()
+        val cash = if (raw.isEmpty()) due else MoneyText.parse(raw, till.settings.exponent)
+        takeCashButton.isEnabled = !till.cart.isEmpty && cash != null && cash >= due
+    }
+
+    private fun searchProducts() {
+        val term = productSearch.text.toString().trim()
+        searchResults.removeAllViews()
+        if (term.isEmpty()) return
+
+        val results = runCatching { db.searchProducts(term) }.getOrDefault(emptyList())
+        if (results.isEmpty()) {
+            searchResults.addView(
+                resultLabel(getString(R.string.emergency_no_match)),
+            )
+            return
+        }
+
+        for (product in results) {
+            val button = Button(this, null, android.R.attr.borderlessButtonStyle).apply {
+                text = "${product.name}  ${money(product.priceMinor)}"
+                isAllCaps = false
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.stride_ink))
+                setOnClickListener {
+                    emergencyTill?.addProduct(product)
+                    productSearch.setText("")
+                    searchResults.removeAllViews()
+                    setEmergencyStatus(getString(R.string.emergency_added, product.name), false)
+                    renderCart()
+                }
+            }
+            searchResults.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+    }
+
+    private fun resultLabel(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.stride_muted))
+    }
+
+    private fun addManual() {
+        val till = emergencyTill ?: return
+        val name = manualName.text.toString().trim()
+        if (name.isEmpty()) {
+            setEmergencyStatus(getString(R.string.emergency_bad_name), true)
+            return
+        }
+
+        val price = MoneyText.parse(manualPrice.text.toString(), till.settings.exponent)
+        if (price == null || price <= 0) {
+            setEmergencyStatus(getString(R.string.emergency_bad_price), true)
+            return
+        }
+
+        till.addManual(name, price)
+        manualName.setText("")
+        manualPrice.setText("")
+        setEmergencyStatus(getString(R.string.emergency_added, name), false)
+        renderCart()
+    }
+
+    private fun takeCash() {
+        val till = emergencyTill ?: return
+        if (till.cart.isEmpty) return
+
+        val raw = tenderedInput.text.toString().trim()
+        val tendered = if (raw.isEmpty()) null else MoneyText.parse(raw, till.settings.exponent)
+        if (raw.isNotEmpty() && tendered == null) {
+            setEmergencyStatus(getString(R.string.emergency_bad_tender), true)
+            return
+        }
+
+        val due = till.dueMinor()
+        if ((tendered ?: due) < due) {
+            setEmergencyStatus(getString(R.string.emergency_bad_tender), true)
+            return
+        }
+
+        val draft = try {
+            till.checkout(tendered)
+        } catch (error: IllegalArgumentException) {
+            setEmergencyStatus(error.message ?: getString(R.string.emergency_bad_tender), true)
+            return
+        }
+
+        val saved = runCatching {
+            db.insertOfflineSale(draft.uid, SaleJson.encode(draft), draft.occurredAt)
+        }
+        if (saved.isFailure) {
+            setEmergencyStatus(getString(R.string.emergency_not_saved), true)
+            return
+        }
+
+        till.cart.clear()
+        tenderedInput.setText("")
+        setEmergencyStatus(getString(R.string.emergency_saved), false)
+        thump()
+        renderCart()
+        updateRejectedButton()
+        renderEmergencyNotice()
+
+        outbox?.retrySoon()
+        flushOutbox()
+    }
+
+    private fun chooseCashier() {
+        val till = emergencyTill ?: return
+        val staff = runCatching { db.staff() }.getOrDefault(emptyList())
+        val names = ArrayList<String>(staff.size + 1)
+        names.add(getString(R.string.emergency_unassigned))
+        for (member in staff) names.add(member.name)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.emergency_cashier_title)
+            .setItems(names.toTypedArray()) { _, index ->
+                val picked = if (index == 0) {
+                    Cashier.unassigned
+                } else {
+                    val member = staff[index - 1]
+                    Cashier(member.id, member.name)
+                }
+                till.cashier = picked
+                persistCashier(picked)
+                updateCashierButton()
+            }
+            .setNegativeButton(R.string.emergency_close, null)
+            .show()
+    }
+
+    private fun updateCashierButton() {
+        val cashier = emergencyTill?.cashier ?: Cashier.unassigned
+        emergencyCashier.text = if (cashier.id == null) {
+            getString(R.string.emergency_cashier_unset)
+        } else {
+            getString(R.string.emergency_cashier, cashier.name)
+        }
+    }
+
+    private fun persistCashier(cashier: Cashier) {
+        val editor = prefs.edit()
+        if (cashier.id == null) {
+            editor.remove(KEY_CASHIER_ID).remove(KEY_CASHIER_NAME)
+        } else {
+            editor.putString(KEY_CASHIER_ID, cashier.id).putString(KEY_CASHIER_NAME, cashier.name)
+        }
+        editor.apply()
+    }
+
+    private fun loadCashier(): Cashier {
+        val name = prefs.getString(KEY_CASHIER_NAME, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: return Cashier.unassigned
+        val id = prefs.getString(KEY_CASHIER_ID, null)?.takeIf { it.isNotBlank() }
+        return Cashier(id, name)
+    }
+
+    private fun showRejectedDialog() {
+        val sales = runCatching { db.rejectedSales(20) }.getOrDefault(emptyList())
+        if (sales.isEmpty()) return
+
+        val body = sales.joinToString("\n\n") { "${it.occurredAt}\n${it.reason}" }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.emergency_rejected_title)
+            .setMessage(body)
+            .setPositiveButton(R.string.emergency_retry) { _, _ ->
+                runCatching { db.retryRejected() }
+                outbox?.retrySoon()
+                flushOutbox()
+                updateRejectedButton()
+                renderEmergencyNotice()
+                setEmergencyStatus(
+                    getString(R.string.emergency_queued, runCatching { db.pendingCount() }.getOrDefault(0)),
+                    false,
+                )
+            }
+            .setNegativeButton(R.string.emergency_close, null)
+            .show()
+    }
+
+    private fun setEmergencyStatus(message: String, error: Boolean) {
+        emergencyStatus.text = message
+        emergencyStatus.setTextColor(
+            ContextCompat.getColor(this, if (error) R.color.stride_bad else R.color.stride_ink),
+        )
+        emergencyStatus.visibility = View.VISIBLE
+    }
+
+    private fun renderEmergencyNotice() {
+        val till = emergencyTill ?: return
+        val pending = runCatching { db.pendingCount() }.getOrDefault(0)
+        val rejected = runCatching { db.rejectedCount() }.getOrDefault(0)
+
+        val parts = ArrayList<String>()
+        if (till.settings.currency.isBlank()) parts.add(getString(R.string.emergency_no_catalog))
+        if (pending > 0) parts.add(getString(R.string.emergency_queued, pending))
+        if (rejected > 0) parts.add(getString(R.string.sync_rejected, rejected))
+        lastSyncError?.let { parts.add(it) }
+
+        emergencyNotice.text = parts.joinToString("\n")
+        emergencyNotice.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
+        emergencyNotice.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (rejected > 0 || lastSyncError != null) R.color.stride_bad else R.color.stride_muted,
+            ),
+        )
+    }
+
+    private fun updateRejectedButton() {
+        val rejected = runCatching { db.rejectedCount() }.getOrDefault(0)
+        rejectedButton.visibility = if (rejected > 0) View.VISIBLE else View.GONE
+        if (rejected > 0) {
+            rejectedButton.text = getString(R.string.emergency_rejected_button, rejected)
+        }
+    }
+
+    // ---- sync ----------------------------------------------------------
+
+    private fun startSyncPolling() {
+        syncHandler.removeCallbacks(syncTick)
+        syncHandler.postDelayed(syncTick, FIRST_SYNC_DELAY_MS)
+    }
+
+    private fun stopSyncPolling() {
+        syncHandler.removeCallbacks(syncTick)
+    }
+
+    /**
+     * One tick does at most one useful network job.
+     *
+     * Queued sales come first: they are money sitting on a phone. When the
+     * outbox is empty, the catalogue is refreshed only if it is stale. Nothing
+     * here runs on the sale path.
+     */
+    private fun runSyncTick() {
+        val till = client ?: return
+
+        val pending = runCatching { db.pendingCount() }.getOrDefault(0)
+        if (pending > 0) {
+            if (outbox?.due() == true) flushOutbox()
+            return
+        }
+
+        if (System.currentTimeMillis() - db.lastCatalogAt() < CATALOG_FRESH_MS) return
+        if (syncing) return
+        syncing = true
+
+        till.info { infoResult ->
+            runOnUiThread {
+                infoResult.onSuccess { info ->
+                    info.serverTime?.let(Clock::parse)?.let { server ->
+                        db.putClockOffset(server - System.currentTimeMillis())
+                        emergencyTill?.refresh()
+                    }
+                    lastReachable = true
+                    updateSyncBadge()
+
+                    till.fetchCatalog { catalogResult ->
+                        runOnUiThread {
+                            catalogResult.onSuccess { body ->
+                                val applied = runCatching { db.replaceCatalog(JSONObject(body)) }
+                                if (applied.isSuccess) {
+                                    lastSyncError = null
+                                    emergencyTill?.refresh()
+                                    if (screen == Screen.EMERGENCY) renderEmergency()
+                                } else {
+                                    setSyncError(getString(R.string.error_sync))
+                                }
+                            }.onFailure { error ->
+                                setSyncError(error.message ?: getString(R.string.error_sync))
+                            }
+                            syncing = false
+                            updateSyncBadge()
+                        }
+                    }
+                }.onFailure { error ->
+                    lastReachable = false
+                    syncing = false
+                    setSyncError(error.message ?: getString(R.string.sync_offline))
+                }
+            }
+        }
+    }
+
+    private fun flushOutbox() {
+        val box = outbox ?: return
+        box.flush { result ->
+            runOnUiThread {
+                if (result.busy) return@runOnUiThread
+
+                if (result.error != null) {
+                    lastSyncError = result.error
+                    lastReachable = false
+                } else if (result.accepted > 0 || result.rejected > 0) {
+                    lastSyncError = null
+                    lastReachable = true
+                }
+                if (result.accepted > 0) thump()
+
+                updateSyncBadge()
+                updateRejectedButton()
+                if (screen == Screen.EMERGENCY) {
+                    renderEmergencyNotice()
+                    if (result.accepted > 0) {
+                        setEmergencyStatus(getString(R.string.emergency_saved), false)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun setSyncError(message: String) {
+        lastSyncError = message
+        updateSyncBadge()
+        if (screen == Screen.EMERGENCY) renderEmergencyNotice()
+    }
+
+    private fun updateSyncBadge() {
+        val pending = runCatching { db.pendingCount() }.getOrDefault(0)
+        val rejected = runCatching { db.rejectedCount() }.getOrDefault(0)
+
+        val text = when {
+            rejected > 0 -> getString(R.string.sync_rejected, rejected)
+            pending > 0 -> getString(R.string.sync_pending, pending)
+            lastReachable == null -> getString(R.string.sync_checking)
+            lastReachable == false -> getString(R.string.sync_offline)
+            else -> getString(R.string.sync_online)
+        }
+        val color = when {
+            rejected > 0 -> R.color.stride_bad_light
+            lastReachable == false -> R.color.stride_bad_light
+            else -> R.color.white
+        }
+        syncBadge.text = text
+        syncBadge.setTextColor(ContextCompat.getColor(this, color))
+        syncBadge.visibility = View.VISIBLE
+    }
+
+    // ---- camera and helpers -------------------------------------------
 
     private fun requireCamera(action: () -> Unit) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
@@ -404,11 +1091,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cameraError(message: String) {
-        if (screen == Screen.SCAN) {
-            setScanStatus(message, true)
-        } else {
-            showPairPanel()
-            setPairError(message)
+        when (screen) {
+            Screen.SCAN -> setScanStatus(message, true)
+            Screen.EMERGENCY_SCAN -> resumeEmergencyPanel(message)
+            else -> {
+                showPairPanel()
+                setPairError(message)
+            }
         }
     }
 
@@ -446,6 +1135,17 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun money(minor: Long): String =
+        MoneyText.format(minor, emergencyTill?.settings?.exponent ?: 0)
+
+    private fun signedMoney(minor: Long): String = when {
+        minor > 0 -> "+" + money(minor)
+        minor < 0 -> "-" + money(abs(minor))
+        else -> money(0)
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
     @Suppress("DEPRECATION")
     private fun thump() {
         val vibrator = getSystemService(VIBRATOR_SERVICE) as? Vibrator ?: return
@@ -458,11 +1158,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private enum class Screen { PAIR, SCAN }
+    private enum class Screen { PAIR, SCAN, EMERGENCY, EMERGENCY_SCAN }
 
     private companion object {
         const val PREFS = "stride-scan"
         const val KEY_MODE = "scan.mode"
+        const val KEY_CASHIER_ID = "cashier.id"
+        const val KEY_CASHIER_NAME = "cashier.name"
         const val DUPLICATE_WINDOW_MS = 1_500L
+        const val FIRST_SYNC_DELAY_MS = 600L
+        const val SYNC_TICK_MS = 30_000L
+        const val CATALOG_FRESH_MS = 5 * 60_000L
     }
 }
