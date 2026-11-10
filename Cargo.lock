@@ -73,7 +73,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "app-boot"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "anyhow",
  "directories",
@@ -400,7 +400,7 @@ dependencies = [
 [[package]]
 name = "config"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "anyhow",
  "serde",
@@ -1640,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "money"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "iso_currency",
 ]
@@ -2795,7 +2795,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "storage"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -3090,7 +3090,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "ui-kit"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "egui",
  "egui-lucide",
@@ -3100,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "ui-shell"
 version = "0.1.0"
-source = "git+https://github.com/kodezebra/stride-libs?rev=154735d6497dc1ff49d3bed4998e27d7ef4e6366#154735d6497dc1ff49d3bed4998e27d7ef4e6366"
+source = "git+https://github.com/kodezebra/stride-libs?rev=c53ee9d5270407f0525d3105e38ebc1f682be139#c53ee9d5270407f0525d3105e38ebc1f682be139"
 dependencies = [
  "eframe",
  "egui",
