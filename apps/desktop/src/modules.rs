@@ -4332,17 +4332,17 @@ fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
                 .show_ui(ui, |ui| {
                     ui.set_min_width(200.0);
                     for kind in BUSINESS_TYPES {
-                        let active = state
-                            .business_draft
-                            .trim()
-                            .eq_ignore_ascii_case(kind);
+                        let active = state.business_draft.trim().eq_ignore_ascii_case(kind);
                         if ui.selectable_label(active, kind).clicked() {
                             state.business_draft = kind.to_ascii_lowercase();
                             state.business_showing_other = false;
                             ui.close();
                         }
                     }
-                    if ui.selectable_label(state.business_showing_other, "Other…").clicked() {
+                    if ui
+                        .selectable_label(state.business_showing_other, "Other…")
+                        .clicked()
+                    {
                         state.business_showing_other = true;
                         ui.close();
                     }
@@ -4364,8 +4364,7 @@ fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
         }
 
         let chosen = state.business_draft.trim();
-        let dirty = !chosen.is_empty()
-            && state.settings.business_type.as_deref() != Some(chosen);
+        let dirty = !chosen.is_empty() && state.settings.business_type.as_deref() != Some(chosen);
         ui.add_space(SPACING.xs);
         if dirty && actions::primary(ui, "Save").clicked() {
             state.save_business_type();

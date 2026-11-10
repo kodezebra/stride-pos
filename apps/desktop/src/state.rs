@@ -2396,7 +2396,8 @@ mod tests {
         store.migrate(crate::db::MIGRATIONS).expect("migrate");
         // A cart only ever holds real products — `sale_lines.product_id` is a
         // foreign key — so the first row is the one `line()` points at.
-        crate::db::insert_product(&store, "Test item", 100, "Test", None, None).expect("seed product");
+        crate::db::insert_product(&store, "Test item", 100, "Test", None, None)
+            .expect("seed product");
         let mut state = State::new(
             store,
             0,

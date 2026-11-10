@@ -109,8 +109,6 @@ impl Settings {
         self.theme = Some(theme.name().to_owned());
     }
 
-
-
     /// The merchant as a receipt should print it.
     ///
     /// One resolver because the receipt, the preview and the clipboard all need

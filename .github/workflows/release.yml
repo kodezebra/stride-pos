@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   verify:
     name: Tag is on main
@@ -84,7 +88,12 @@ jobs:
         if: matrix.os == 'windows'
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: iscc /DMyAppVersion=$VERSION apps/desktop/windows/stride-pos.iss
+        run: |
+          iscc_bin="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -x "$iscc_bin" ] || iscc_bin="/c/Program Files/Inno Setup 6/ISCC.exe"
+          [ -x "$iscc_bin" ] || iscc_bin="iscc"
+          "$iscc_bin" "--define=MyAppVersion=$VERSION" apps/desktop/windows/stride-pos.iss
+          rm -rf dist/windows
 
       - uses: actions/upload-artifact@v4
         with:
@@ -189,7 +198,8 @@ jobs:
         run: |
           set -eu
           cd dist
-          sha256sum * > SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' \
+            | sort | xargs sha256sum > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:

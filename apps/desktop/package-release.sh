@@ -69,12 +69,14 @@ Description: Stride point-of-sale desktop till
 EOF
 install -m 0755 "$binary" "$debroot/usr/bin/${name}"
 cp README.md "$debroot/usr/share/doc/${name}/README.md"
-dpkg-deb --build "$debroot" "dist/${base}.deb" >/dev/null
+dpkg-deb --root-owner-group --build "$debroot" "dist/${base}.deb" >/dev/null
 rm -rf "$debroot"
 
 # Fedora / Red Hat package.
 if command -v rpmbuild >/dev/null 2>&1; then
-    topdir="dist/rpmbuild-${target}"
+    # rpmbuild changes directory into BUILD, so a relative _topdir would make
+    # %{SOURCE0} point at the wrong place. Keep it absolute.
+    topdir="$(cd "$outdir" && pwd)/rpmbuild-${target}"
     rm -rf "$topdir"
     mkdir -p "$topdir"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
     cp "$binary" "$topdir/SOURCES/${name}"
