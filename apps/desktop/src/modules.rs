@@ -2166,11 +2166,12 @@ fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
 
 /// The edit glyph for a catalogue row.
 ///
-/// `settings-2` is in the Lucide set but not yet in `ui-kit`'s vocabulary, so
-/// it is resolved by name — the same lookup a settings file uses. The fallback
-/// means a renamed glyph costs a different icon, never a missing button.
+/// A pencil is the edit affordance the rest of the desktop uses. It is in the
+/// Lucide set but not yet in `ui-kit`'s vocabulary, so it is resolved by name —
+/// the same lookup a settings file uses. The fallback means a renamed glyph
+/// costs a different icon, never a missing button.
 fn edit_icon() -> Icon {
-    Icon::named("settings-2").unwrap_or(Icon::SETTINGS)
+    Icon::named("pencil").unwrap_or(Icon::SETTINGS)
 }
 
 enum ProductAction {
