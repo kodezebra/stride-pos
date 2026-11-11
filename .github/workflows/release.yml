@@ -51,9 +51,6 @@ jobs:
       - name: Install build dependencies
         run: ./scripts/install-linux-build-deps.sh
 
-      - name: Install Rust toolchain
-        run: ./scripts/install-rust-toolchain.sh
-
       # Distinct cache key: artifacts built against the runner's newer glibc
       # must never be reused here, or the check below would pass on a stale
       # binary.
@@ -90,9 +87,6 @@ jobs:
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        run: ./scripts/install-rust-toolchain.sh
 
       - uses: Swatinem/rust-cache@v2
 
