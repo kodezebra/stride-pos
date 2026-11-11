@@ -4037,7 +4037,9 @@ fn sync_card(ui: &mut egui::Ui, state: &mut State) {
         );
         ui.add_space(SPACING.md);
 
-        ui.horizontal(|ui| {
+        // The status can be a long error. Let it wrap to a second line instead
+        // of pushing the card past the page's right edge.
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
             if config.enabled {
                 if actions::secondary_compact(ui, "Turn off").clicked() {
@@ -4124,16 +4126,18 @@ fn sync_card(ui: &mut egui::Ui, state: &mut State) {
             return;
         };
         let host = address.to_string();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.lg;
-            info_row(ui, "Address", &host);
-            info_row(ui, "Port", &state.settings.scanner.port.to_string());
-            let shown_token = crate::scan::spaced_token(&config.sync_token);
-            info_row(ui, "Code", &shown_token);
-            if actions::secondary_compact(ui, "Copy code").clicked() {
-                ui.ctx().copy_text(shown_token);
-            }
-        });
+        let shown_token = crate::scan::spaced_token(&config.sync_token);
+        // `info_row` already lays its value against the card's right edge, so
+        // stacking the rows keeps the address, port and code inside the page.
+        // Three of them side by side made each row claim the whole width and
+        // pushed the port out of the viewport.
+        info_row(ui, "Address", &host);
+        info_row(ui, "Port", &state.settings.scanner.port.to_string());
+        info_row(ui, "Code", &shown_token);
+        ui.add_space(SPACING.sm);
+        if actions::secondary_compact(ui, "Copy code").clicked() {
+            ui.ctx().copy_text(shown_token);
+        }
     });
 
     ui.add_space(SPACING.lg);
@@ -4190,33 +4194,40 @@ fn sync_card(ui: &mut egui::Ui, state: &mut State) {
         ui.add_space(SPACING.sm);
         components::field_label(ui, "Pair another till");
         ui.add_space(SPACING.xs);
-        egui::Grid::new("sync_peer_fields")
-            .num_columns(2)
-            .spacing([SPACING.sm, SPACING.sm])
-            .show(ui, |ui| {
-                text_field(
-                    ui,
-                    &mut state.sync_peer_draft.name,
-                    "Name (optional)",
-                    220.0,
-                );
-                text_field(ui, &mut state.sync_peer_draft.host, "Address", 220.0);
-                ui.end_row();
-                text_field(ui, &mut state.sync_peer_draft.port, "Port", 120.0);
-                text_field(ui, &mut state.sync_peer_draft.token, "Pairing code", 220.0);
-                ui.end_row();
-            });
-        ui.add_space(SPACING.xs);
+        // The fields used fixed widths. On a 945 px window the two 220 px
+        // columns and their gap were wider than the card, so the address and
+        // pairing-code fields ran past the page edge. Derive the widths from
+        // the card instead; the two rows always add up to its inner width.
+        let gap = SPACING.sm;
+        let full = ui.available_width();
+        let half = ((full - gap) / 2.0).max(0.0);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.sm;
-            if actions::primary(ui, "Pair").clicked() {
-                state.add_sync_peer();
-            }
-            components::caption(
+            ui.spacing_mut().item_spacing.x = gap;
+            text_field(ui, &mut state.sync_peer_draft.name, "Name (optional)", half);
+            text_field(ui, &mut state.sync_peer_draft.host, "Address", half);
+        });
+        ui.add_space(SPACING.sm);
+        let port_width = 120.0_f32.min((full - gap).max(0.0));
+        let token_width = (full - port_width - gap).max(0.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            text_field(ui, &mut state.sync_peer_draft.port, "Port", port_width);
+            text_field(
                 ui,
-                "Both tills must be on the same network and have sync turned on.",
+                &mut state.sync_peer_draft.token,
+                "Pairing code",
+                token_width,
             );
         });
+        ui.add_space(SPACING.sm);
+        if actions::primary(ui, "Pair").clicked() {
+            state.add_sync_peer();
+        }
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            "Both tills must be on the same network and have sync turned on.",
+        );
 
         if let Some(error) = state.sync_peer_error.clone() {
             ui.add_space(SPACING.xs);
