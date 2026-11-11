@@ -30,6 +30,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+export PATH="$cargo_bin:$PATH"
 # A GitHub Actions step is its own process, so an export here would die with
 # this script; publish the directory to the following steps instead.
 if [ -n "${GITHUB_PATH:-}" ]; then

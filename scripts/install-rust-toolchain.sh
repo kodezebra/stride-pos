@@ -13,6 +13,10 @@ set -euo pipefail
 
 channel="${1:-1.99.0}"
 
+if ! command -v rustup >/dev/null 2>&1; then
+    export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+fi
+
 rustup toolchain install "$channel" \
     --profile minimal \
     --component rustfmt \
