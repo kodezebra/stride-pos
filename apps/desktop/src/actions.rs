@@ -37,6 +37,12 @@ pub fn primary(ui: &mut egui::Ui, label: &str) -> egui::Response {
     components::primary_button(ui, label)
 }
 
+/// The same claim in a pinned toolbar, where a 44 px action would fill the
+/// strip edge to edge. It is still the primary action; only the height changes.
+pub fn primary_compact(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    components::primary_action(ui, label, COMPACT)
+}
+
 /// An alternate or dismissive action, at dialog weight.
 pub fn secondary(ui: &mut egui::Ui, label: &str) -> egui::Response {
     text_button(ui, label, MAIN, false)
@@ -57,18 +63,25 @@ pub fn quiet_compact(ui: &mut egui::Ui, label: &str) -> egui::Response {
     text_button(ui, label, COMPACT, true)
 }
 
-/// A menu trigger that carries secondary weight beside a primary action.
-///
-/// egui gives menus their own button; this wrapper matches its height and label
-/// to the rest of the footer/header actions so a "More" does not read as a
-/// different kind of control from the button next to it.
-pub fn menu_button(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    let button = egui::Button::new(
-        egui::RichText::new(label)
-            .size(TYPE.button)
-            .family(theme::semibold()),
+/// A toolbar flyout: one glyph for the family, one word for the destination,
+/// and a menu for the variants. A menu is a container, not an action, so it
+/// keeps its word even though its neighbours are icon-only.
+pub fn toolbar_menu(
+    ui: &mut egui::Ui,
+    icon: ui_kit::icons::Icon,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let palette = theme::current(ui.ctx());
+    let text = egui::RichText::new(label)
+        .size(TYPE.button)
+        .family(theme::semibold())
+        .color(egui::Color32::from(palette.text));
+    let button = egui::Button::image_and_text(
+        icon.image(18.0, egui::Color32::from(palette.text_muted)),
+        text,
     )
-    .min_size(egui::vec2(0.0, MAIN))
+    .min_size(egui::vec2(0.0, COMPACT))
     .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
 
     let _ = egui::containers::menu::MenuButton::from_button(button).ui(ui, add);

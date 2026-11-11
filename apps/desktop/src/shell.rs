@@ -435,6 +435,9 @@ impl PosShell {
             // hides the bottom of itself. Sell opts out — its cart is pinned to
             // the pane, and an unbounded height would un-pin it.
             let module = &mut modules[active];
+            // Pinned actions sit outside the scroll area: a long list must not
+            // take "New product" or "Export" past the fold with it.
+            module.toolbar(ui, state);
             if module.scrolls() {
                 egui::ScrollArea::vertical()
                     .id_salt(("page", active))
