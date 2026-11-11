@@ -816,6 +816,21 @@ impl Module for Dashboard {
         }
     }
 
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let mut all_sales = false;
+        action_bar(ui, state::range_caption(state.range), |ui| {
+            if components::icon_button(ui, Icon::RECEIPT, 32.0)
+                .on_hover_text("Open all sales in this range")
+                .clicked()
+            {
+                all_sales = true;
+            }
+        });
+        if all_sales {
+            state.select(SALES);
+        }
+    }
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         // The scope borrows the session, but the sections below borrow the state
         // mutably to open a sale; take an owned copy of both halves up front.
@@ -830,9 +845,9 @@ impl Module for Dashboard {
         let previous_units = crate::db::previous_items_sold(&state.store, state.range, user);
         let peak = crate::db::peak_hour(&state.store, state.range, user);
 
-        components::section_title(ui, state::range_caption(state.range));
-        // The comparison is stated once, under the title: a caption on every
-        // card would repeat it four times and squeeze the figures.
+        // The range is the toolbar title now. The comparison is stated once,
+        // under it: a caption on every card would repeat it four times and
+        // squeeze the figures.
         components::caption(ui, comparison_caption(state.range, shop));
         ui.add_space(SPACING.sm);
 
