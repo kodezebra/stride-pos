@@ -439,7 +439,13 @@ impl PosShell {
                 egui::ScrollArea::vertical()
                     .id_salt(("page", active))
                     .auto_shrink([false, false])
-                    .show(ui, |ui| module.workspace(ui, state));
+                    .show(ui, |ui| {
+                        module.workspace(ui, state);
+                        // The panel margin frames the viewport, not the end of
+                        // the page. Without this, a long list finishes flush
+                        // against the bottom edge and looks cut off.
+                        ui.add_space(SPACING.lg);
+                    });
             } else {
                 module.workspace(ui, state);
             }
