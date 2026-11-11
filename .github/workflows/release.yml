@@ -32,20 +32,14 @@ jobs:
   desktop-linux:
     name: Desktop package (Linux, glibc 2.35)
     needs: verify
-    runs-on: ubuntu-24.04
-    # The binary keeps the glibc of the machine that links it. Build on Ubuntu
-    # 22.04 (glibc 2.35) so the packages load on Debian 12 and newer; a
-    # `-latest` runner raises that floor silently and breaks older shops.
+    # The binary keeps the glibc of the machine that links it. Build on the
+    # pinned Ubuntu 22.04 runner (glibc 2.35) so the packages load on Debian 12
+    # and newer; a `-latest` runner raises that floor silently and breaks older
+    # shops. The host image already has git and a working archive network, so
+    # it does not need the bare-container bootstrap.
     # See DEVELOPMENT.md, "Release compatibility".
-    container:
-      image: ubuntu:22.04
+    runs-on: ubuntu-22.04
     steps:
-      # The image is bare, and checkout needs git.
-      - name: Install git for checkout
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
-
       - uses: actions/checkout@v4
 
       - name: Install build dependencies

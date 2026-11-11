@@ -89,15 +89,11 @@ jobs:
   # dependency that quietly raises the floor.
   linux-compat:
     name: Linux glibc floor (2.35)
-    runs-on: ubuntu-24.04
-    container:
-      image: ubuntu:22.04
+    # The pinned 22.04 image is glibc 2.35. A container is not needed, and its
+    # nested network has repeatedly failed to resolve the Ubuntu archive before
+    # checkout could even start.
+    runs-on: ubuntu-22.04
     steps:
-      - name: Install git for checkout
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
-
       - uses: actions/checkout@v4
 
       - name: Install build dependencies

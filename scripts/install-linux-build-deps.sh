@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install everything a Linux release build needs, on a bare Ubuntu/Debian image.
 #
-# Used by .github/workflows/release.yml (inside the ubuntu:22.04 container) and
-# by scripts/docker-build-linux-release.sh. Idempotent: rerunning is cheap.
+# Used by .github/workflows/release.yml (on the Ubuntu 22.04 runner) and by
+# scripts/docker-build-linux-release.sh. Idempotent: rerunning is cheap.
 set -euo pipefail
 
 if [ "$(id -u)" -eq 0 ]; then
