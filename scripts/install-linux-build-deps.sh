@@ -22,8 +22,8 @@ DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq \
     zip \
     zstd
 
-# rustup installs the toolchain rust-toolchain.toml pins, on first `cargo` use.
-# The default toolchain is left unset so nothing is downloaded twice.
+# rustup only; the compiler itself is installed afterwards by
+# scripts/install-rust-toolchain.sh, so a build never inherits the runner's.
 if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain none
@@ -37,4 +37,6 @@ if [ -n "${GITHUB_PATH:-}" ]; then
     echo "$cargo_bin" >> "$GITHUB_PATH"
 fi
 
-cargo --version
+# `cargo --version` is not a safe smoke test any more: rustup has no default
+# toolchain until install-rust-toolchain.sh runs, and the proxy exits non-zero.
+rustup --version

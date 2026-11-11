@@ -50,11 +50,11 @@ install -m 0755 "$binary" "$root/usr/bin/${name}"
 cp README.md "$root/usr/share/doc/${name}/README.md"
 
 # Source tarball.
-(cd dist && tar -czf "${base}.tar.gz" "$base")
+(cd "$outdir" && tar -czf "${base}.tar.gz" "$base")
 rm -rf "$root"
 
 # Debian package.
-debroot="dist/${base}-deb"
+debroot="${outdir}/${base}-deb"
 rm -rf "$debroot"
 mkdir -p "$debroot/DEBIAN" "$debroot/usr/bin" "$debroot/usr/share/doc/${name}"
 cat > "$debroot/DEBIAN/control" <<EOF
@@ -70,7 +70,7 @@ Description: Stride point-of-sale desktop till
 EOF
 install -m 0755 "$binary" "$debroot/usr/bin/${name}"
 cp README.md "$debroot/usr/share/doc/${name}/README.md"
-dpkg-deb --root-owner-group --build "$debroot" "dist/${base}.deb" >/dev/null
+dpkg-deb --root-owner-group --build "$debroot" "${outdir}/${base}.deb" >/dev/null
 rm -rf "$debroot"
 
 # Fedora / Red Hat package.
@@ -106,6 +106,6 @@ install -m 0755 %{SOURCE0} %{buildroot}/usr/bin/${name}
 - Initial release
 EOF
     rpmbuild -bb --define "_topdir $topdir" "$topdir/SPECS/${name}.spec" >/dev/null
-    cp "$topdir/RPMS/x86_64"/*.rpm "dist/${base}.rpm"
+    cp "$topdir/RPMS/x86_64"/*.rpm "${outdir}/${base}.rpm"
     rm -rf "$topdir"
 fi
