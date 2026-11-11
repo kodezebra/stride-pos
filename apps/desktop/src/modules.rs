@@ -61,6 +61,11 @@ const TILE_HEIGHT: f32 = 96.0;
 const TILE_MIN: f32 = 140.0;
 /// Height of one table row, including its breathing room.
 const ROW_HEIGHT: f32 = 40.0;
+/// Height of a module's pinned action strip.
+///
+/// It matches the main button height, so a compact action does not look like a
+/// different class of control just because it left the page body.
+const TOOLBAR_HEIGHT: f32 = 44.0;
 /// Height of the daily-revenue chart, axis labels and date strip included.
 const CHART_HEIGHT: f32 = 232.0;
 /// Steps in the chart's value axis.
@@ -99,7 +104,52 @@ pub trait Module {
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State);
 
+    /// The pinned action strip above a scrolling page.
+    ///
+    /// Only actions that must stay reachable while the list scrolls belong
+    /// here. A page with no such action leaves the strip empty; the shell calls
+    /// this before the scroll area, so the content still owns the vertical
+    /// rhythm. Modules with nothing to pin simply do not override it.
+    fn toolbar(&mut self, _ui: &mut egui::Ui, _state: &mut State) {}
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State);
+}
+
+/// Lay out one module's pinned action strip.
+///
+/// The title is the left cell, so the page keeps the same heading position
+/// whether or not it has pinned actions. The actions run right to left, like a
+/// dialog footer: the first action added is the rightmost one. The strip draws
+/// its own hairline and the gap before the page.
+fn action_bar(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let palette = theme::current(ui.ctx());
+    let full = ui.available_rect_before_wrap();
+    let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_HEIGHT));
+
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    bar.spacing_mut().item_spacing.x = SPACING.sm;
+    bar.label(
+        egui::RichText::new(title)
+            .family(theme::semibold())
+            .size(TYPE.heading)
+            .color(egui::Color32::from(palette.text)),
+    );
+    bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = SPACING.sm;
+        add(ui);
+    });
+
+    ui.advance_cursor_after_rect(rect);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        egui::Stroke::new(1.0_f32, palette.border),
+    );
+    ui.add_space(SPACING.sm);
 }
 
 /// Every module, in stable index order. Must stay in sync with the index
@@ -1718,6 +1768,17 @@ fn weekday_name(weekday: u8) -> &'static str {
     WEEKDAYS[(weekday as usize).min(WEEKDAYS.len() - 1)]
 }
 
+/// The import glyph, resolved by name because the shared vocabulary does not
+/// carry a file-transfer icon yet. The fallback costs a different picture, never
+/// a missing action.
+fn import_icon() -> Icon {
+    Icon::named("upload").unwrap_or(Icon::DOCUMENT)
+}
+
+fn export_icon() -> Icon {
+    Icon::named("download").unwrap_or(Icon::DOCUMENT)
+}
+
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
@@ -1746,55 +1807,49 @@ impl Module for Products {
         components::search_field(ui, &mut state.search, "Name or barcode");
     }
 
-    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        if !state.permits(crate::auth::Permission::ChangePrice) {
-            return locked_card(ui, crate::auth::Permission::ChangePrice);
-        }
-
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let can_manage = state.permits(crate::auth::Permission::ChangePrice);
         let mut new = false;
         let mut import = false;
         let mut export_visible = false;
         let mut export_all = false;
-        ui.horizontal(|ui| {
-            components::section_title(ui, "Catalog");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if actions::primary(ui, "New product").clicked() {
-                    new = true;
+        action_bar(ui, "Catalog", |ui| {
+            if !can_manage {
+                return;
+            }
+            if actions::primary_compact(ui, "New product").clicked() {
+                new = true;
+            }
+            // Import and both exports are setup actions, not everyday ones.
+            // The flyout keeps them one click away without letting them compete
+            // with the catalog's primary action for the strip's width.
+            actions::toolbar_menu(ui, export_icon(), "Export", |ui| {
+                ui.set_min_width(190.0);
+                if ui
+                    .button("This view")
+                    .on_hover_text("Save the products on screen with the columns the import reads")
+                    .clicked()
+                {
+                    export_visible = true;
+                    ui.close();
                 }
-                // Import and the two exports live behind one menu: they are
-                // occasional setup actions, and three buttons beside the
-                // catalog's only everyday action crowded the header.
-                actions::menu_button(ui, "More", |ui| {
-                    ui.set_min_width(190.0);
-                    if ui
-                        .button("Import CSV")
-                        .on_hover_text("Read name, category, price and barcode from a CSV file")
-                        .clicked()
-                    {
-                        import = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button("Export CSV")
-                        .on_hover_text(
-                            "Save the products on screen with the columns the import reads",
-                        )
-                        .clicked()
-                    {
-                        export_visible = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button("Export all")
-                        .on_hover_text("Save every product with the columns the import reads")
-                        .clicked()
-                    {
-                        export_all = true;
-                        ui.close();
-                    }
-                });
+                if ui
+                    .button("All products")
+                    .on_hover_text("Save every product with the columns the import reads")
+                    .clicked()
+                {
+                    export_all = true;
+                    ui.close();
+                }
             });
+            if components::icon_button(ui, import_icon(), 32.0)
+                .on_hover_text("Import CSV — read name, category, price and barcode")
+                .clicked()
+            {
+                import = true;
+            }
         });
+
         if new {
             state.start_product();
         }
@@ -1806,6 +1861,12 @@ impl Module for Products {
         }
         if export_all {
             state.start_export(ExportKind::AllProducts);
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ChangePrice) {
+            return locked_card(ui, crate::auth::Permission::ChangePrice);
         }
 
         let needle = state.search.trim().to_lowercase();
@@ -2853,22 +2914,25 @@ impl Module for Suppliers {
         );
     }
 
-    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        if !state.permits(crate::auth::Permission::ManageSuppliers) {
-            return locked_card(ui, crate::auth::Permission::ManageSuppliers);
-        }
-
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let can_manage = state.permits(crate::auth::Permission::ManageSuppliers);
         let mut new = false;
-        ui.horizontal(|ui| {
-            components::section_title(ui, "Suppliers");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if actions::primary(ui, "New supplier").clicked() {
-                    new = true;
-                }
-            });
+        action_bar(ui, "Suppliers", |ui| {
+            if !can_manage {
+                return;
+            }
+            if actions::primary_compact(ui, "New supplier").clicked() {
+                new = true;
+            }
         });
         if new {
             state.start_supplier();
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ManageSuppliers) {
+            return locked_card(ui, crate::auth::Permission::ManageSuppliers);
         }
 
         components::caption(
@@ -3124,24 +3188,27 @@ impl Module for Inventory {
         );
     }
 
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+        let mut track = false;
+        action_bar(ui, "Inventory", |ui| {
+            if !can_manage {
+                return;
+            }
+            if actions::primary_compact(ui, "Track stock").clicked() {
+                track = true;
+            }
+        });
+        if track {
+            state.start_tracking();
+        }
+    }
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         // Seeing stock is part of selling; changing it is not. A cashier who is
         // asked "do you have any?" must be able to answer, and the screen says
         // who can record a movement instead of hiding the list outright.
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
-
-        let mut track = false;
-        ui.horizontal(|ui| {
-            components::section_title(ui, "Inventory");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if can_manage && actions::primary(ui, "Track stock").clicked() {
-                    track = true;
-                }
-            });
-        });
-        if track {
-            state.start_tracking();
-        }
 
         components::caption(
             ui,
@@ -3719,40 +3786,38 @@ impl Module for Sales {
         }
     }
 
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let title = if state.report_scope().is_shop() {
+            "Transactions"
+        } else {
+            "Your transactions"
+        };
+        let mut export = false;
+        action_bar(ui, title, |ui| {
+            if components::icon_button(ui, export_icon(), 32.0)
+                .on_hover_text(
+                    "Export sales as sale_id, when, cashier, total, rounding, paid, method",
+                )
+                .clicked()
+            {
+                export = true;
+            }
+        });
+        if export {
+            state.start_export(ExportKind::Sales);
+        }
+    }
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let scope = state.report_scope();
         let shop = scope.is_shop();
         let user = scope.user().map(str::to_owned);
         let user = user.as_deref();
 
-        let mut export = false;
-        ui.horizontal(|ui| {
-            components::section_title(
-                ui,
-                if shop {
-                    "Transactions"
-                } else {
-                    "Your transactions"
-                },
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if actions::secondary(ui, "Export CSV")
-                    .on_hover_text(
-                        "Export sales as sale_id, when, cashier, total, rounding, paid, method",
-                    )
-                    .clicked()
-                {
-                    export = true;
-                }
-            });
-        });
         if !shop {
             // The export reads the same scope as the list, so the caption
             // promises the same thing about both.
             components::caption(ui, "Only your sales · the export matches this list");
-        }
-        if export {
-            state.start_export(ExportKind::Sales);
         }
         file_feedback(ui, state);
 
