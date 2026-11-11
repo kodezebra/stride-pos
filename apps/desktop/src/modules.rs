@@ -1843,7 +1843,10 @@ impl Module for Products {
                 }
             });
             if components::icon_button(ui, import_icon(), 32.0)
-                .on_hover_text("Import CSV — read name, category, price and barcode")
+                .on_hover_text(
+                    "Import CSV — read name, category, price and barcode. A barcode \
+                     that starts with 0 may need a text column in Excel.",
+                )
                 .clicked()
             {
                 import = true;
@@ -1872,12 +1875,6 @@ impl Module for Products {
         let needle = state.search.trim().to_lowercase();
         let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
-        components::caption(
-            ui,
-            "Exports use the same columns the import reads, so a file that went out \
-             can come back in. Barcodes that start with 0 may need a text column in \
-             Excel.",
-        );
         file_feedback(ui, state);
 
         if state.products.is_empty() {
@@ -2207,15 +2204,25 @@ fn product_row(
 
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
-        ui.vertical(|ui| {
-            ui.label(components::semibold(&product.name).size(TYPE.body));
-            let mut detail = product.category.clone();
-            if let Some(barcode) = &product.barcode {
-                detail.push_str(" · ");
-                detail.push_str(barcode);
-            }
-            components::caption(ui, &detail);
-        });
+
+        // Keep the name clear of the price and row actions. A fixed reserve is
+        // enough for the money column and two icon buttons, and it lets a long
+        // name wrap instead of running underneath them.
+        const ACTIONS_WIDTH: f32 = 190.0;
+        let text_width = (ui.available_width() - ACTIONS_WIDTH).max(120.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(text_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.label(components::semibold(&product.name).size(TYPE.body));
+                let mut detail = product.category.clone();
+                if let Some(barcode) = &product.barcode {
+                    detail.push_str(" · ");
+                    detail.push_str(barcode);
+                }
+                components::caption(ui, &detail);
+            },
+        );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(components::numeric(state.money(product.price_minor)).size(TYPE.body));
