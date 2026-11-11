@@ -3386,8 +3386,8 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
         .response;
     badge.on_hover_text(hint);
     if can_manage
-        && actions::secondary_compact(ui, "Move stock")
-            .on_hover_text("Receive, return, waste or adjust this product")
+        && components::icon_button(ui, move_icon(), 32.0)
+            .on_hover_text("Move stock: receive, return, waste or adjust")
             .clicked()
     {
         action = Some(StockAction::Move {
@@ -3407,6 +3407,12 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
     }
 
     action
+}
+
+/// The movement glyph. Two arrows say "in or out"; the tooltip names the four
+/// reasons a movement can have.
+fn move_icon() -> Icon {
+    Icon::named("arrow-right-left").unwrap_or(Icon::BOXES)
 }
 
 /// The history glyph, resolved by name like the directory's archive icon: the
