@@ -3906,6 +3906,16 @@ impl Module for Settings {
         }
     }
 
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The section name is the page title. It stays even when the section
+        // below is locked, so the chrome never depends on a permission.
+        let section = state::SETTINGS_SECTIONS
+            .get(state.settings_section)
+            .copied()
+            .unwrap_or("Terminal");
+        action_bar(ui, section, |_ui| {});
+    }
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         if !state.permits(crate::auth::Permission::EditSettings) {
             return locked_card(ui, crate::auth::Permission::EditSettings);
@@ -3967,8 +3977,6 @@ impl Module for Settings {
             });
             ui.add_space(SPACING.lg);
         }
-
-        components::section_title(ui, section);
 
         match section {
             "Receipt" => receipt_preview(ui, state),
