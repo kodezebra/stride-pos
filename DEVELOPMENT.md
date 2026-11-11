@@ -211,8 +211,8 @@ against the shop's `libc.so.6`. Windows has the same failure with the MSVC C
 runtime: without the VC++ Redistributable the exe wants `vcruntime140.dll`,
 which is not part of Windows.
 
-So the rule is: **the oldest supported distro builds the artifact, and CI pins
-the toolchain.**
+So the rule is: **the oldest supported distro builds the artifact,** and the
+gate refuses anything that would not load there.
 
 | What | How |
 |---|---|
@@ -221,7 +221,7 @@ the toolchain.**
 | Gate | `scripts/check-glibc-baseline.sh 2.35 <binary>` fails if any dependency starts requiring a newer glibc. Runs in `ci.yml` and `release.yml`. |
 | Declared floor | The `.deb` carries `Depends: libc6 (>= 2.35)`, the `.rpm` `Requires: glibc >= 2.35`. |
 | Windows | `RUSTFLAGS=-C target-feature=+crt-static` for `x86_64-pc-windows-msvc`; the release job checks with `dumpbin /dependents` that no VC++ runtime is imported. |
-| Rust | CI installs `1.99.0` through `scripts/install-rust-toolchain.sh`. A toolchain bump can raise the floor on its own, so move it deliberately and let the gate re-check. It is not a `rust-toolchain.toml`: rustup matches that file by name, so a developer whose `stable` already is `1.99.0` would be made to download a second copy of the same compiler. |
+| Rust | Nothing is pinned. CI installs the current stable inside the build image, and the gate below fails the release if a compiler upgrade raises the floor. No `rust-toolchain.toml`: rustup matches that file by name, so it would make every developer download whatever version it names. |
 
 ## Staff
 

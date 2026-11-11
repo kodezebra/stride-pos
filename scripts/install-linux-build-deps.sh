@@ -22,11 +22,12 @@ DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq \
     zip \
     zstd
 
-# rustup only; the compiler itself is installed afterwards by
-# scripts/install-rust-toolchain.sh, so a build never inherits the runner's.
+# The container has no Rust of its own; let rustup install its current stable.
+# The glibc gate run on the artifact is what guarantees the release, not the
+# compiler version, so there is nothing to pin here.
 if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain none
+        | sh -s -- -y --profile minimal
 fi
 
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -37,6 +38,4 @@ if [ -n "${GITHUB_PATH:-}" ]; then
     echo "$cargo_bin" >> "$GITHUB_PATH"
 fi
 
-# `cargo --version` is not a safe smoke test any more: rustup has no default
-# toolchain until install-rust-toolchain.sh runs, and the proxy exits non-zero.
-rustup --version
+cargo --version

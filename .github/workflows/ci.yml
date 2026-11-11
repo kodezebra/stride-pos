@@ -19,9 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        run: ./scripts/install-rust-toolchain.sh
-
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
@@ -38,10 +35,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        shell: bash
-        run: ./scripts/install-rust-toolchain.sh
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -109,9 +102,6 @@ jobs:
 
       - name: Install build dependencies
         run: ./scripts/install-linux-build-deps.sh
-
-      - name: Install Rust toolchain
-        run: ./scripts/install-rust-toolchain.sh
 
       # Distinct cache key: artifacts compiled against the runner's newer glibc
       # must not leak into this job, or the floor check would pass on a stale
