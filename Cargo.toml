@@ -19,13 +19,13 @@ rust-version = "1.95"
 # ---- shared crates -------------------------------------------------------
 # Pinned to one exact stride-libs commit. Move every line together; see
 # stride-libs/AGENTS.md, "How a shared change reaches the products".
-ui-kit = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-ui-shell = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-storage = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-config = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-app-boot = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-money = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
-lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "322adf548971f6125cbf4194f24a175720451833" }
+ui-kit = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+ui-shell = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+storage = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+config = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+app-boot = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+money = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
+lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "ff83c13b0f6190ca37492a7e765db087c54fba30" }
 
 # ---- third-party ---------------------------------------------------------
 # Versions are pinned to what is already cached in ~/.cargo/registry, so a
