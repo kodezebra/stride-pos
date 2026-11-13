@@ -18,7 +18,7 @@ use std::path::Path;
 use ui_kit::components;
 use ui_kit::icons::Icon;
 use ui_kit::theme;
-use ui_kit::tokens::{RADII, SPACING, TYPE};
+use ui_kit::tokens::{BRANDS, RADII, Rgb, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions;
 
@@ -3932,59 +3932,8 @@ impl Module for Settings {
             .copied()
             .unwrap_or("Terminal");
 
-        // Appearance belongs to the terminal, not to the shop: it is a property
-        // of the screen in front of the person. On Staff or Sync it would be an
-        // unrelated card at the top of an unrelated page.
-        if section == "Terminal" {
-            components::section_title(ui, "Appearance");
-            components::card(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                components::caption(
-                    ui,
-                    "Light is the default: a till sits under shop lighting and is read from \
-                     the customer's side of the counter. Dark suits a dim back office.",
-                );
-                ui.add_space(SPACING.md);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = SPACING.sm;
-                    if components::choice_card(
-                        ui,
-                        Icon::SUN,
-                        theme::Theme::Light.label(),
-                        state.theme == theme::Theme::Light,
-                        132.0,
-                    )
-                    .clicked()
-                    {
-                        state.set_theme(theme::Theme::Light);
-                    }
-                    if components::choice_card(
-                        ui,
-                        Icon::MOON,
-                        theme::Theme::Dark.label(),
-                        state.theme == theme::Theme::Dark,
-                        132.0,
-                    )
-                    .clicked()
-                    {
-                        state.set_theme(theme::Theme::Dark);
-                    }
-                });
-                ui.add_space(SPACING.md);
-                components::caption(
-                    ui,
-                    "One brand accent, with text and focus colours derived for contrast. \
-                     The canvas and status colours stay the shop's.",
-                );
-                ui.add_space(SPACING.sm);
-                if let Some(accent) = components::brand_selector(ui, state.brand_accent) {
-                    state.set_brand_accent(accent);
-                }
-            });
-            ui.add_space(SPACING.lg);
-        }
-
         match section {
+            "Appearance" => appearance_card(ui, state),
             "Receipt" => receipt_preview(ui, state),
             "Terminal" => {
                 shop_card(ui, state);
@@ -4008,6 +3957,330 @@ impl Module for Settings {
             _ => {}
         }
     }
+}
+
+/// The appearance controls: one card, two rows.
+///
+/// The toolbar already names the section, so the card starts with the first
+/// setting instead of repeating the title. Both choices apply immediately and
+/// are written to settings by `State`.
+fn appearance_card(ui: &mut egui::Ui, state: &mut State) {
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+
+        setting_row(
+            ui,
+            "Theme",
+            "Light or dark, across the whole till.",
+            THEME_CONTROL_WIDTH,
+            |ui| {
+                if let Some(chosen) = theme_segmented(ui, state.theme) {
+                    state.set_theme(chosen);
+                }
+            },
+        );
+
+        components::divider(ui);
+
+        setting_row(
+            ui,
+            "Accent colour",
+            "Tints buttons, links and highlights.",
+            ACCENT_CONTROL_WIDTH,
+            |ui| {
+                if let Some(accent) = accent_picker(ui, state.brand_accent) {
+                    state.set_brand_accent(accent);
+                }
+            },
+        );
+    });
+}
+
+/// The width of one accent circle, and of the quiet "Default" chip beside them.
+const SWATCH_SIZE: f32 = 40.0;
+const DEFAULT_CHIP_WIDTH: f32 = 78.0;
+
+/// Exact widths let [`setting_row`] reserve the right column before the control
+/// is drawn, so the title and hint never reflow when a control changes state.
+const THEME_CONTROL_WIDTH: f32 = 208.0;
+const ACCENT_CONTROL_WIDTH: f32 =
+    BRANDS.len() as f32 * SWATCH_SIZE + BRANDS.len() as f32 * SPACING.sm + DEFAULT_CHIP_WIDTH;
+
+/// How much room a hint needs before the row is worth splitting in two. Below
+/// this the title, hint and control stack, because a hint squeezed narrower
+/// than this wraps and stops being a hint.
+const ROW_TEXT_MIN_WIDTH: f32 = 240.0;
+
+/// One settings row: a title and a short hint on the left, its control on the
+/// right.
+///
+/// The control gets a fixed-width column so the row cannot depend on how wide
+/// the widget happens to measure. Below a small window width the pair stacks
+/// instead of squeezing the hint into a column too narrow to read.
+fn setting_row<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    hint: &str,
+    control_width: f32,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let height = 46.0;
+    if ui.available_width() < control_width + ROW_TEXT_MIN_WIDTH {
+        ui.label(components::semibold(title).size(TYPE.body));
+        ui.add_space(SPACING.xs);
+        components::caption(ui, hint);
+        ui.add_space(SPACING.sm);
+        return control(ui);
+    }
+
+    let full = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(full, height), egui::Sense::hover());
+    let text_width = (full - control_width - SPACING.lg).max(0.0);
+
+    let mut label_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(text_width, height),
+            ))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    label_ui.label(components::semibold(title).size(TYPE.body));
+    label_ui.add_space(SPACING.xs);
+    components::caption(&mut label_ui, hint);
+
+    let mut control_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - control_width, rect.min.y),
+                egui::vec2(control_width, height),
+            ))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    control(&mut control_ui)
+}
+
+/// A two-way switch with an icon and a word per side.
+///
+/// Selected is drawn the same way a selected navigation row is: a pale accent
+/// wash with accent ink. The track is a well, so the control reads as one
+/// object rather than two buttons that happen to be adjacent.
+fn theme_segmented(ui: &mut egui::Ui, selected: theme::Theme) -> Option<theme::Theme> {
+    let palette = theme::current(ui.ctx());
+    let options = [
+        (theme::Theme::Light, Icon::SUN, theme::Theme::Light.label()),
+        (theme::Theme::Dark, Icon::MOON, theme::Theme::Dark.label()),
+    ];
+    let height = 40.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(THEME_CONTROL_WIDTH, height),
+        egui::Sense::hover(),
+    );
+    let inset = 3.0;
+    let gap = 2.0;
+    let segment_width = (rect.width() - inset * 2.0 - gap) / 2.0;
+    let mut choice = None;
+
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(RADII.pill as u8),
+            palette.surface_alt,
+            egui::Stroke::new(1.0_f32, palette.border),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    for (index, (side, icon, label)) in options.into_iter().enumerate() {
+        let segment = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.min.x + inset + index as f32 * (segment_width + gap),
+                rect.min.y + inset,
+            ),
+            egui::vec2(segment_width, height - inset * 2.0),
+        );
+        let response = ui.interact(
+            segment,
+            ui.id().with(("appearance_theme", index)),
+            egui::Sense::click(),
+        );
+        if response.clicked() {
+            choice = Some(side);
+        }
+
+        if ui.is_rect_visible(segment) {
+            let active = side == selected;
+            if active || response.hovered() {
+                ui.painter().rect(
+                    segment,
+                    egui::CornerRadius::same(RADII.pill as u8),
+                    if active {
+                        palette.accent_soft
+                    } else {
+                        palette.surface
+                    },
+                    egui::Stroke::new(
+                        1.0_f32,
+                        if active {
+                            palette.accent_ink()
+                        } else {
+                            palette.border
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            let color = if active {
+                palette.accent_ink()
+            } else {
+                palette.text
+            };
+            let galley = ui.painter().layout_no_wrap(
+                label.to_owned(),
+                egui::FontId::new(TYPE.small, theme::semibold()),
+                color.into(),
+            );
+            let glyph = 16.0;
+            let glyph_gap = SPACING.xs + 2.0;
+            let content_width = glyph + glyph_gap + galley.size().x;
+            let start = segment.center().x - content_width * 0.5;
+
+            icon.image(glyph, color.into()).paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(start + glyph * 0.5, segment.center().y),
+                    egui::Vec2::splat(glyph),
+                ),
+            );
+            ui.painter().galley(
+                egui::pos2(
+                    start + glyph + glyph_gap,
+                    segment.center().y - galley.size().y * 0.5,
+                ),
+                galley,
+                color.into(),
+            );
+        }
+
+        let _ = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+
+    choice
+}
+
+/// Four brand accents, plus a way back to the theme's own accent.
+///
+/// `Some(None)` means the default was chosen, `Some(Some(accent))` a brand, and
+/// `None` that nothing was clicked. The caller owns the state write so the
+/// comparison after the call still sees the old value.
+fn accent_picker(ui: &mut egui::Ui, selected: Option<Rgb>) -> Option<Option<Rgb>> {
+    let mut choice = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACING.sm;
+        for brand in BRANDS {
+            let active = selected == Some(brand.accent);
+            if accent_swatch(ui, brand.accent, brand.name, active).clicked() {
+                choice = Some(Some(brand.accent));
+            }
+        }
+        if default_chip(ui, selected.is_none()).clicked() {
+            choice = Some(None);
+        }
+    });
+    choice
+}
+
+fn accent_swatch(ui: &mut egui::Ui, accent: Rgb, label: &str, selected: bool) -> egui::Response {
+    let palette = theme::current(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::Vec2::splat(SWATCH_SIZE), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let center = rect.center();
+        let outer = SWATCH_SIZE * 0.5;
+        if selected {
+            ui.painter().circle_stroke(
+                center,
+                outer - 3.0,
+                egui::Stroke::new(2.0_f32, palette.accent_ink()),
+            );
+        } else if response.hovered() {
+            ui.painter().circle_stroke(
+                center,
+                outer - 3.0,
+                egui::Stroke::new(1.0_f32, palette.border_strong),
+            );
+        }
+        ui.painter()
+            .circle_filled(center, outer - 7.0, egui::Color32::from(accent));
+
+        if selected {
+            Icon::CHECK.image(14.0, accent.best_ink().into()).paint_at(
+                ui,
+                egui::Rect::from_center_size(center, egui::Vec2::splat(14.0)),
+            );
+        }
+    }
+
+    response
+        .on_hover_text(label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The quiet option at the end of the swatch row: drop the brand override.
+fn default_chip(ui: &mut egui::Ui, selected: bool) -> egui::Response {
+    let palette = theme::current(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(DEFAULT_CHIP_WIDTH, 32.0), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let fill: egui::Color32 = if selected {
+            palette.accent_soft.into()
+        } else if hovered {
+            palette.surface_alt.into()
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let stroke = if selected {
+            egui::Stroke::new(1.0_f32, palette.accent_ink())
+        } else if hovered {
+            egui::Stroke::new(1.0_f32, palette.border_strong)
+        } else {
+            egui::Stroke::NONE
+        };
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(RADII.pill as u8),
+            fill,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+
+        let color = if selected {
+            palette.accent_ink()
+        } else {
+            palette.text_muted
+        };
+        let galley = ui.painter().layout_no_wrap(
+            "Default".to_owned(),
+            egui::FontId::new(TYPE.small, theme::semibold()),
+            color.into(),
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            color.into(),
+        );
+    }
+
+    response
+        .on_hover_text("Use the theme's own accent")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The phone scanner: one switch, the address to type, and a QR code that
@@ -4637,7 +4910,6 @@ fn terminal_card(ui: &mut egui::Ui, state: &mut State) {
             "Database schema",
             &format!("v{}", state.store.user_version().unwrap_or(-1)),
         );
-        info_row(ui, "Theme", state.theme.label());
         info_row(
             ui,
             "Currency",
