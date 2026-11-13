@@ -10,8 +10,9 @@
 //! [`rail_order`] for the roles that should see it. Everything else — rail
 //! entry, tooltip, palette entry, persistence index — follows from those edits.
 //!
-//! F8 is Purchases, the restocking trips. It is documented here and nowhere
-//! else so the key cannot drift.
+//! Purchases is F7 and Settings is F8, so the rail reads top to bottom in key
+//! order with Settings last. This is documented here and nowhere else so the
+//! pair cannot drift.
 
 use std::path::Path;
 
@@ -176,9 +177,8 @@ pub fn all() -> Vec<Box<dyn Module>> {
 ///
 /// Indices stay stable across releases; only this presentation order changes.
 /// Keep the order aligned with the F-keys: the first item is F1, the next F2,
-/// and so on. Settings stays before Purchases so its F7 does not move; the
-/// newest screen takes the last key rather than renumbering the ones the shop
-/// has learned.
+/// and so on. Settings sits last because it is a back-office screen, so
+/// Purchases takes F7 and Settings takes F8.
 ///
 /// A cashier sees only the screens their work needs. Hiding Products,
 /// Suppliers and Settings is not the permission boundary — [`open`] is — but a
@@ -187,7 +187,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
 pub fn rail_order(role: crate::auth::Role) -> &'static [usize] {
     const CASHIER: [usize; 4] = [SELL, SALES, INVENTORY, DASHBOARD];
     const MANAGER: [usize; 8] = [
-        SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, SETTINGS, PURCHASES,
+        SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, PURCHASES, SETTINGS,
     ];
 
     if role >= crate::auth::Role::Manager {
@@ -2946,11 +2946,13 @@ impl Module for Purchases {
     }
 
     fn icon(&self) -> Icon {
-        Icon::PACKAGE
+        // A basket, not the cart. Sell already owns the cart, and Products owns
+        // the parcel; the basket is the one icon that reads as "buying stock".
+        Icon::named("shopping-basket").unwrap_or(Icon::PACKAGE)
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F8
+        egui::Key::F7
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -4825,7 +4827,7 @@ impl Module for Settings {
     }
 
     fn hotkey(&self) -> egui::Key {
-        egui::Key::F7
+        egui::Key::F8
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -6169,12 +6171,14 @@ mod tests {
 
         let mut keys: Vec<u8> = modules.iter().map(|module| module.hotkey() as u8).collect();
         let f1 = egui::Key::F1 as u8;
+        let f7 = egui::Key::F7 as u8;
         let f8 = egui::Key::F8 as u8;
 
         for key in &keys {
             assert!((*key >= f1) && (*key <= f8), "hotkeys live in F1-F8");
         }
-        assert!(keys.contains(&f8), "F8 belongs to Purchases now");
+        assert!(keys.contains(&f7), "F7 belongs to Purchases now");
+        assert!(keys.contains(&f8), "F8 belongs to Settings now");
 
         let before = keys.len();
         keys.sort_unstable();
@@ -6183,21 +6187,20 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_puts_settings_before_purchases_and_keeps_hotkeys_in_order() {
+    fn the_rail_puts_settings_last_and_keeps_hotkeys_in_order() {
         let modules = all();
         let manager = rail_order(crate::auth::Role::Manager);
 
         assert_eq!(
             manager,
             &[
-                SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, SETTINGS, PURCHASES
+                SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, PURCHASES, SETTINGS
             ][..]
         );
-        assert_eq!(manager.last().copied(), Some(PURCHASES));
         assert_eq!(
-            manager.get(manager.len() - 2).copied(),
+            manager.last().copied(),
             Some(SETTINGS),
-            "the learned F7 does not move when a new screen is appended"
+            "Settings is the back-office screen and sits last"
         );
 
         // The rail's order and the F-keys are one contract: the first row is

@@ -46,10 +46,10 @@ That order is intentional. You cannot sell what is not in Products. You cannot r
 | `F4` | **Dashboard** | Takings, number of sales, best sellers, busiest hour |
 | `F5` | **Products** | The catalogue: add, edit, import, export |
 | `F6` | **Suppliers** | Who the shop buys from |
-| `F7` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
-| `F8` | **Purchases** | Plan a restocking trip, then receive what arrived |
+| `F7` | **Purchases** | Plan a restocking trip, then receive what arrived |
+| `F8` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
 
-F8 is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
+F7 is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
 
 ### 0.3 Signing in and locking
 
@@ -322,7 +322,7 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 
 ### 3A.1 Plan before you leave
 
-1. Press `F8` to open **Purchases**.
+1. Press `F7` to open **Purchases**.
 2. Press **New purchase**.
 3. Type the supplier's name if there is one. It is optional — a market trip often has no supplier or delivery note.
 4. Press **Add low stock**. Every tracked product at or under its warning line appears with a suggested quantity.
@@ -334,7 +334,7 @@ The purchase now reads **Planned**. Nothing has moved in stock — a plan is int
 
 ### 3A.2 Receive what came back
 
-1. `F8` → open the purchase → **Receive**.
+1. `F7` → open the purchase → **Receive**.
 2. Each row starts at the quantity still outstanding. Type what actually arrived.
 3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
 4. Tick **Not bought** on a line you did not find. It is removed from the plan.
@@ -362,7 +362,7 @@ The progress line reads "3 of 5 received" when part of a line is still outstandi
 ### 3A.5 Practice
 
 1. Make tea low: sell enough, or adjust it down to 2.
-2. `F8` → **New purchase** → **Add low stock**. Check tea appears with a sensible quantity.
+2. `F7` → **New purchase** → **Add low stock**. Check tea appears with a sensible quantity.
 3. Add soap manually even though it is not low.
 4. Save. Confirm the purchase is **Planned** and tea's on-hand count did not change.
 5. Receive 10 tea at cost `800`. Leave soap **Not bought**.
@@ -792,7 +792,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 SIGN IN      pick your name → 6-digit PIN → Sign in
 LOCK         Ctrl+L          (cart survives)
 SCREENS      F1 Sell  F2 Sales  F3 Inventory  F4 Dashboard
-             F5 Products  F6 Suppliers  F7 Settings  F8 Purchases
+             F5 Products  F6 Suppliers  F7 Purchases  F8 Settings
 
 ONE SALE     F1 → scan / search / tap → Pay (Ctrl+Enter)
              → cash received or Exact chip → Complete sale
@@ -809,7 +809,7 @@ STOCK        Track stock → count → warn level → keep-in-stock level
              Adjustment = type what you COUNTED, not the difference
              Sale subtracts by itself. Negative is allowed.
 
-PURCHASES    F8 → New purchase → Add low stock → Save (Planned)
+PURCHASES    F7 → New purchase → Add low stock → Save (Planned)
              Receive → type what arrived → cost if known → Receive
              Not bought removes a line; Add product records an impulse buy
              Only receiving moves stock. Received trips are locked.

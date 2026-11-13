@@ -74,8 +74,8 @@ one file on that machine.
 | F4 | Dashboard | takings and best sellers for today / 7 / 30 days / all time |
 | F5 | Products | the catalogue: add, edit, import, export |
 | F6 | Suppliers | who the shop buys from |
-| F7 | Settings | appearance, receipt preview, scanner, staff, backup |
-| F8 | Purchases | plan a restocking trip, then receive what arrived |
+| F7 | Purchases | plan a restocking trip, then receive what arrived |
+| F8 | Settings | appearance, receipt preview, scanner, staff, backup |
 
 **The status bar (bottom)** shows: "local only", shortcut hints, the app version,
 your name and role (or "no cashier" if nobody is signed in), and the current cart
@@ -275,7 +275,7 @@ records both halves of that trip.
 
 **Before leaving**
 
-1. Press F8 **Purchases** → **New purchase**.
+1. Press F7 **Purchases** → **New purchase**.
 2. Name the supplier if there is one; it is optional. Add a note such as
    "Saturday market".
 3. Press **Add low stock** to fill the list with everything at or under its
@@ -293,7 +293,7 @@ when you receive.
 
 **When the goods come back**
 
-1. F8 **Purchases** → open the planned trip → **Receive**.
+1. F7 **Purchases** → open the planned trip → **Receive**.
 2. Each row starts at the quantity still outstanding. Change it to what actually
    arrived. Enter the unit cost if you know it — this becomes the product's last
    known cost, and profit on future sales uses it.
