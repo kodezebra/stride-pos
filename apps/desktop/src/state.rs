@@ -2539,9 +2539,17 @@ pub fn range_caption(range: usize) -> &'static str {
     }
 }
 
-/// Settings sections. Each one is a page that does not exist yet; the list is
-/// real so the sidebar has the right shape from the start.
-pub const SETTINGS_SECTIONS: &[&str] = &["Terminal", "Receipt", "Scanner", "Tax", "Staff", "Sync"];
+/// Settings sections, in sidebar order. Appearance leads: it changes the whole
+/// till, while every section after it is about one part of the shop.
+pub const SETTINGS_SECTIONS: &[&str] = &[
+    "Appearance",
+    "Terminal",
+    "Receipt",
+    "Scanner",
+    "Tax",
+    "Staff",
+    "Sync",
+];
 
 #[cfg(test)]
 mod tests {

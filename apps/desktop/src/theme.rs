@@ -9,18 +9,18 @@ use ui_kit::tokens::{Palette, Rgb};
 
 /// Dark theme — Scandinavian FinTech.
 ///
-/// Slate-obsidian shell, muted slate surfaces, electric-mint primary actions.
-/// Cool, calm, hyper-legible for low-light hours; the mint stays visually
-/// sharp without the optical intensity of saturated orange or blue.
+/// Slate-obsidian shell, muted slate surfaces, ember-orange primary actions.
+/// Cool, calm, hyper-legible for low-light hours; the ember gives the one
+/// action that matters a warm focal point without tinting the chrome.
 pub const DARK: Palette = Palette {
     bg: Rgb::hex(0x0f_17_2a),
     surface: Rgb::hex(0x1e_29_3b),
     surface_alt: Rgb::hex(0x33_41_55),
     text: Rgb::hex(0xf8_fa_fc),
     text_muted: Rgb::hex(0x94_a3_b8),
-    accent: Rgb::hex(0x14_b8_a6),
+    accent: Rgb::hex(0xff_6b_00),
     accent_text: Rgb::hex(0x0f_17_2a),
-    accent_soft: Rgb::hex(0x16_4e_4b),
+    accent_soft: Rgb::hex(0x46_35_30),
     border: Rgb::hex(0x33_41_55),
     border_strong: Rgb::hex(0x64_74_8b),
     danger: Rgb::hex(0xf8_71_71),
@@ -30,19 +30,19 @@ pub const DARK: Palette = Palette {
 
 /// Light theme — Artisanal Coffee & Boutique Retail.
 ///
-/// Warm cashmere-cream canvas, deep warm-charcoal shell, deep-emerald primary.
-/// Organic and low-blue-light, easy on the eyes in bright retail, and nothing
-/// like corporate POS software. The default: a till under shop lighting next
-/// to a window, where a dark screen reads as a dead terminal to a customer.
+/// Warm cashmere-cream canvas, deep warm-charcoal shell, burnt-terracotta
+/// primary. Organic and low-blue-light, easy on the eyes in bright retail, and
+/// nothing like corporate POS software. The default: a till under shop lighting
+/// next to a window, where a dark screen reads as a dead terminal to a customer.
 pub const LIGHT: Palette = Palette {
     bg: Rgb::hex(0xf5_f5_f4),
     surface: Rgb::hex(0xff_ff_ff),
     surface_alt: Rgb::hex(0xe7_e5_e4),
     text: Rgb::hex(0x1c_19_17),
     text_muted: Rgb::hex(0x6e_66_5d),
-    accent: Rgb::hex(0x04_78_57),
+    accent: Rgb::hex(0xc2_41_0c),
     accent_text: Rgb::hex(0xff_ff_ff),
-    accent_soft: Rgb::hex(0xdc_fce7),
+    accent_soft: Rgb::hex(0xf6_e4_dd),
     border: Rgb::hex(0xd6_d3_ce),
     border_strong: Rgb::hex(0x7a_71_68),
     danger: Rgb::hex(0xc0_39_2b),
@@ -100,12 +100,12 @@ mod tests {
         }
     }
 
-    /// A brand may change the accent but not whether a selected row or a
-    /// primary button can be read.
+    /// The shipped palette, and every brand override derived from it, must keep
+    /// a selected row and a primary button readable.
     #[test]
-    fn every_brand_accent_derives_readable_text() {
+    fn every_accent_keeps_text_readable() {
         for (name, palette, dark) in [("light", LIGHT, false), ("dark", DARK, true)] {
-            let mut palettes = vec![palette.with_accent(palette.accent, dark)];
+            let mut palettes = vec![palette, palette.with_accent(palette.accent, dark)];
             palettes.extend(
                 BRANDS
                     .iter()
@@ -129,6 +129,19 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// `Default` has to mean something more than "the first swatch". If the
+    /// product accent duplicates a brand, the reset action and that swatch
+    /// produce the same screen and the control lies about what was chosen.
+    #[test]
+    fn the_default_accent_is_not_a_brand_swatch() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            assert!(
+                BRANDS.iter().all(|brand| brand.accent != palette.accent),
+                "{name} default accent duplicates a brand swatch"
+            );
         }
     }
 }
