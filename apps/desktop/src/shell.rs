@@ -227,10 +227,9 @@ impl PosShell {
         // be paid for: the modal is drawn under payment so a shortcut cannot
         // leave a quantity editor floating over a sale in progress.
         crate::modules::cart_quantity_modal(ui.ctx(), &mut self.state);
-        // Same reason: paying is the one flow that writes a sale, and it must own
-        // the screen while the cashier counts notes.
-        crate::checkout::payment_modal(ui.ctx(), &mut self.state);
-        // And the one flow that lends a manager's authority to a cashier.
+        // Paying is not a modal: it is the cart's footer. Drawn by the Sell
+        // module itself, so there is nothing to show here — the only thing that
+        // still owns the screen at this point is a manager's authority.
         crate::auth::override_modal(ui.ctx(), &mut self.state);
         self.persist();
     }
@@ -338,8 +337,12 @@ impl PosShell {
             }
         });
         // Through the same gate as the rail and the palette: an F-key is a route
-        // into a module like any other.
-        if let Some(index) = jump {
+        // into a module like any other. Not while a sale is being paid for: the
+        // tender lives in the Sell cart, and jumping away would hide the money
+        // the cashier is holding.
+        if let Some(index) = jump
+            && !self.state.is_tendering()
+        {
             modules::open(&mut self.state, index);
         }
 
@@ -368,6 +371,13 @@ impl PosShell {
         // about to happen, it should happen to someone who is signed in.
         if lock {
             self.state.lock();
+            return;
+        }
+        // Escape backs out of whatever is on top. While a sale is being paid
+        // for that is the tender panel: the basket is untouched, so the cashier
+        // lands exactly where they were rather than in an empty till.
+        if self.state.payment.is_some() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.state.close_payment();
             return;
         }
         // Not while another modal owns the keyboard: the product and supplier

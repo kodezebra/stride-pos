@@ -255,6 +255,14 @@ impl Module for Sell {
                 .max_rect(grid_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
+        // Paying owns the keyboard and the pointer. The grid stays exactly where
+        // it was — the cashier's map of the screen survives the sale — but it
+        // dims and stops accepting input, so a mis-click while counting notes
+        // cannot add a product to a basket that is already being paid for.
+        if state.is_tendering() {
+            grid_ui.set_opacity(0.35);
+            grid_ui.disable();
+        }
         self.products(&mut grid_ui, state);
 
         let mut cart_ui = ui.new_child(
@@ -304,8 +312,24 @@ impl Sell {
         // on a click elsewhere, so the Enter press is what confirms the scan. A
         // phone scan has no keyboard to press Enter, so it sets `scan_submit`
         // and the product panel consumes it here, through the same path.
+        // A scan that arrives mid-payment is consumed and dropped: the basket is
+        // frozen until the sale is written. Leaving the flag set would fire it
+        // at the next customer, which is a different bug.
         let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             || std::mem::take(&mut state.scan_submit);
+        let submitted = submitted && !state.is_tendering();
+        // A finished sale hands the keyboard back to the scanner: the next
+        // barcode is the next customer's first item, and nobody should have to
+        // click "Done" before the scanner works again. Only when nothing else
+        // holds focus, so it cannot fight the change readout's buttons.
+        if state
+            .payment
+            .as_ref()
+            .is_some_and(|payment| payment.done.is_some())
+            && ui.memory(|memory| memory.focused().is_none())
+        {
+            response.request_focus();
+        }
         ui.add_space(SPACING.md);
 
         // A till with an empty catalog is not a bug in the product panel: it is a
@@ -335,30 +359,40 @@ impl Sell {
 
         if submitted {
             let scanned = state.search.trim().to_owned();
-            match scan_target(&state.products, &scanned, &visible) {
-                Scan::One(index) => {
-                    // Cloned because the product panel holds `state.products`
-                    // borrowed and `add_to_cart` needs the whole state.
-                    let product = state.products[index].clone();
-                    state.add_to_cart(&product);
-                    // Clear the field so the next scan starts clean, and keep the
-                    // focus so it lands here without a mouse.
-                    state.search.clear();
-                    response.request_focus();
-                    // The panel is drawn this frame from `visible`: recompute it,
-                    // otherwise a successful scan leaves the panel showing only
-                    // the product it just moved to the cart until the next repaint.
-                    visible = visible_products(&state.products, state.category.as_deref(), "");
+            // Enter on an empty field is the till's fourth keystroke: scan,
+            // scan, Enter, cash. There is no barcode to look up, so it means
+            // "that is the basket" and the cart's footer becomes the tender.
+            if scanned.is_empty() {
+                if !state.cart.is_empty() {
+                    state.start_payment();
                 }
-                // Say what happened in words the cashier can act on. `add_to_cart`
-                // clears `notice`, so these are set after it, never before.
-                Scan::Ambiguous(count) => {
-                    state.notice = Some(format!(
-                        "{count} products match {scanned} — scan a barcode or type more."
-                    ));
-                }
-                Scan::None => {
-                    state.notice = Some(format!("No product matches {scanned}."));
+                response.request_focus();
+            } else {
+                match scan_target(&state.products, &scanned, &visible) {
+                    Scan::One(index) => {
+                        // Cloned because the product panel holds `state.products`
+                        // borrowed and `add_to_cart` needs the whole state.
+                        let product = state.products[index].clone();
+                        state.add_to_cart(&product);
+                        // Clear the field so the next scan starts clean, and keep the
+                        // focus so it lands here without a mouse.
+                        state.search.clear();
+                        response.request_focus();
+                        // The panel is drawn this frame from `visible`: recompute it,
+                        // otherwise a successful scan leaves the panel showing only
+                        // the product it just moved to the cart until the next repaint.
+                        visible = visible_products(&state.products, state.category.as_deref(), "");
+                    }
+                    // Say what happened in words the cashier can act on. `add_to_cart`
+                    // clears `notice`, so these are set after it, never before.
+                    Scan::Ambiguous(count) => {
+                        state.notice = Some(format!(
+                            "{count} products match {scanned} — scan a barcode or type more."
+                        ));
+                    }
+                    Scan::None => {
+                        state.notice = Some(format!("No product matches {scanned}."));
+                    }
                 }
             }
         }
@@ -571,13 +605,29 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     // The footer grows by one line when cash rounding applies, because that row
     // only exists then and a fixed reserve would push the Pay button off the
     // bottom at the window's narrow end.
+    //
+    // Paying takes the whole footer, and the tender panel is much taller than
+    // the totals it replaces. Its height is the sum of its rows — two 44.8
+    // amount rows, a 44 field, 34 chips, a 52 button, and the hint row that
+    // shares its line with "Back to cart" — plus 6px gaps and a little slack.
+    // An error replaces the hint rather than stacking under it, so that case
+    // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
-    let footer = if rounding_minor == 0 {
-        196.0
-    } else {
-        196.0 + TYPE.small * 1.8
+    let footer = match state.payment.as_ref() {
+        // The ghost: change, sale number, two buttons.
+        Some(payment) if payment.done.is_some() => 280.0,
+        Some(_) => {
+            410.0
+                + if rounding_minor != 0 {
+                    TYPE.small * 1.8
+                } else {
+                    0.0
+                }
+        }
+        None if rounding_minor == 0 => 196.0,
+        None => 196.0 + TYPE.small * 1.8,
     };
-    let list_height = (ui.available_height() - footer).max(120.0);
+    let list_height = (ui.available_height() - footer).max(80.0);
 
     if state.cart.is_empty() {
         // The cart *is* the pane, so its hint fills the space the lines would
@@ -703,6 +753,13 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     }
 
     ui.add_space(SPACING.sm);
+    // Paying is not a screen: the footer becomes the tender panel in place.
+    // The lines above stay visible, frozen, because the customer may still
+    // change their mind about one of them.
+    if state.payment.is_some() {
+        crate::checkout::tender(ui, state);
+        return;
+    }
     let subtotal = state.cart_total_minor();
     amount_row(ui, "Subtotal", &state.money(subtotal), false);
     amount_row(ui, "Tax", "not configured", false);

@@ -1726,6 +1726,16 @@ impl State {
     /// silently reprice something already in the basket.
     pub fn add_to_cart(&mut self, product: &Product) {
         self.notice = None;
+        // A finished sale leaves its change on the cart until the next item.
+        // Adding that item is the signal to let it go: the ghost was never a
+        // screen to dismiss, only a readout that has now been read.
+        if self
+            .payment
+            .as_ref()
+            .is_some_and(|payment| payment.done.is_some())
+        {
+            self.payment = None;
+        }
         match self
             .cart
             .iter_mut()
@@ -2968,6 +2978,17 @@ impl State {
             .and_then(|v| v.checked_div(100 + rate))
             .unwrap_or(0);
         total - pre_tax
+    }
+
+    /// Whether the basket is being paid for right now.
+    ///
+    /// A finished sale keeps its [`Payment`] for the change readout, but it is
+    /// not tendering: the cart is empty and the next scan is a new customer.
+    /// Everything that freezes the till asks this, not `payment.is_some()`.
+    pub fn is_tendering(&self) -> bool {
+        self.payment
+            .as_ref()
+            .is_some_and(|payment| payment.done.is_none())
     }
 
     /// Open the payment screen. Does nothing when the cart is empty or the
