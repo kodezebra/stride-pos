@@ -188,6 +188,10 @@ pub struct TrackDraft {
     pub search: String,
     pub opening: String,
     pub low_stock: String,
+    /// What to keep in stock. Empty means twice the warning line, computed by
+    /// the suggestion, which is a better default than making the owner do
+    /// arithmetic on a first day.
+    pub target_stock: String,
     pub error: Option<String>,
 }
 
@@ -198,6 +202,7 @@ impl TrackDraft {
             search: String::new(),
             opening: "0".to_owned(),
             low_stock: "5".to_owned(),
+            target_stock: String::new(),
             error: None,
         }
     }
@@ -239,6 +244,60 @@ impl StockMoveDraft {
 pub struct StockHistory {
     pub product_name: String,
     pub movements: Vec<crate::db::StockMovement>,
+}
+
+/// One line in the purchase editor.
+///
+/// Quantity and cost are text while they are being typed: parsing on every
+/// keystroke would eat a half-typed `12` and a blank cost means "not known",
+/// which is a real answer, not an error.
+pub struct PurchaseLineDraft {
+    pub product_id: i64,
+    pub name: String,
+    pub qty: String,
+    pub cost: String,
+}
+
+/// A purchase being planned or edited, open as a modal.
+pub struct PurchaseDraft {
+    /// `None` while creating, `Some` while editing a plan.
+    pub id: Option<i64>,
+    pub supplier_id: Option<String>,
+    pub note: String,
+    pub lines: Vec<PurchaseLineDraft>,
+    /// Search inside the product picker, separate from the list's filter.
+    pub search: String,
+    pub error: Option<String>,
+    /// First click arms deletion, second deletes; the row is where the mistake
+    /// would be, so the confirmation lives in the form.
+    pub confirm_delete: bool,
+}
+
+/// One line in the receiving screen.
+///
+/// `qty` is what arrived now, not the new total. `already` and `ordered` are
+/// there so the operator can see what is still outstanding.
+pub struct ReceiveLineDraft {
+    pub line_id: Option<i64>,
+    pub product_id: i64,
+    pub name: String,
+    pub ordered: i64,
+    pub already: i64,
+    pub qty: String,
+    pub cost: String,
+    /// Ticked for something that was not bought at all. Only a line that has
+    /// received nothing can be removed.
+    pub removed: bool,
+}
+
+/// A planned purchase being received, open as a modal.
+pub struct PurchaseReceiveDraft {
+    pub id: i64,
+    pub supplier: Option<String>,
+    pub note: String,
+    pub lines: Vec<ReceiveLineDraft>,
+    pub search: String,
+    pub error: Option<String>,
 }
 
 /// Category names offered in the product form even when the catalog is empty.
@@ -634,6 +693,21 @@ pub struct State {
     /// One product's movements, read when the history modal opens.
     pub stock_history: Option<StockHistory>,
 
+    /// Restocking trips, newest first. A purchase is a plan or a received
+    /// record; it never edits stock except through the receiving screen.
+    pub purchases: Vec<crate::db::Purchase>,
+    /// Search across the supplier and note. Product names on the lines are not
+    /// searched yet.
+    pub purchase_search: String,
+    /// `0` all, `1` planned, `2` received.
+    pub purchase_filter: usize,
+    /// The plan being created or edited.
+    pub purchase_editor: Option<PurchaseDraft>,
+    /// A planned purchase being counted in.
+    pub purchase_receive: Option<PurchaseReceiveDraft>,
+    /// A purchase being read, usually one already received.
+    pub purchase_view: Option<crate::db::PurchaseDetail>,
+
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
 
@@ -764,6 +838,7 @@ impl State {
         let categories = crate::db::categories(&store);
         let suppliers = crate::db::suppliers(&store);
         let stock = crate::db::stock(&store);
+        let purchases = crate::db::purchases(&store);
         let users = crate::db::users(&store);
         Self {
             store,
@@ -809,6 +884,12 @@ impl State {
             stock_editor: None,
             stock_move: None,
             stock_history: None,
+            purchases,
+            purchase_search: String::new(),
+            purchase_filter: 0,
+            purchase_editor: None,
+            purchase_receive: None,
+            purchase_view: None,
             payment: None,
             sale_open: None,
             notice: None,
@@ -2040,12 +2121,13 @@ impl State {
     /// catalog has no counts, and a product that starts at zero is a statement
     /// the operator made, not one the app guessed.
     pub fn save_tracking(&mut self) {
-        let Some((product_id, opening_text, low_stock_text)) =
+        let Some((product_id, opening_text, low_stock_text, target_text)) =
             self.stock_editor.as_ref().map(|draft| {
                 (
                     draft.product_id,
                     draft.opening.trim().to_owned(),
                     draft.low_stock.trim().to_owned(),
+                    draft.target_stock.trim().to_owned(),
                 )
             })
         else {
@@ -2063,6 +2145,17 @@ impl State {
             Ok(level) if level >= 0 => level,
             _ => return self.stock_editor_error("Low-stock level must be zero or more."),
         };
+        let target_stock = if target_text.is_empty() {
+            None
+        } else {
+            match target_text.parse::<i64>() {
+                Ok(target) if target >= low_stock => Some(target),
+                _ => {
+                    return self
+                        .stock_editor_error("Keep-in-stock must be at least the low-stock level.");
+                }
+            }
+        };
         let user_id = self.session.as_ref().map(|session| session.user_id.clone());
 
         match crate::db::track_product(
@@ -2070,6 +2163,7 @@ impl State {
             product_id,
             opening,
             low_stock,
+            target_stock,
             user_id.as_deref(),
         ) {
             Ok(()) => {
@@ -2199,6 +2293,488 @@ impl State {
 
     fn stock_move_error(&mut self, message: impl Into<String>) {
         if let Some(draft) = self.stock_move.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Purchases
+    // -----------------------------------------------------------------------
+
+    /// Re-read the trip list after a write.
+    pub fn reload_purchases(&mut self) {
+        self.purchases = crate::db::purchases(&self.store);
+    }
+
+    /// Read one purchase, received or not, without opening it for editing.
+    pub fn open_purchase(&mut self, id: i64) {
+        match crate::db::purchase_detail(&self.store, id) {
+            Some(detail) => self.purchase_view = Some(detail),
+            None => self.notice = Some("That purchase is no longer there.".to_owned()),
+        }
+    }
+
+    /// Open a blank plan for a new trip.
+    pub fn start_purchase(&mut self) {
+        self.purchase_editor = Some(PurchaseDraft {
+            id: None,
+            supplier_id: None,
+            note: String::new(),
+            lines: Vec::new(),
+            search: String::new(),
+            error: None,
+            confirm_delete: false,
+        });
+        self.purchase_receive = None;
+        self.purchase_view = None;
+        self.notice = None;
+    }
+
+    /// Open an existing plan for editing.
+    ///
+    /// A plan with anything already received is continued on the receiving
+    /// screen instead: replacing a line a movement points at would orphan the
+    /// ledger.
+    pub fn edit_purchase(&mut self, id: i64) {
+        let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
+            self.notice = Some("That purchase is no longer there.".to_owned());
+            return;
+        };
+        if detail.purchase.status == crate::db::PurchaseStatus::Received {
+            self.notice = Some("That purchase has been received; it cannot be changed.".to_owned());
+            return;
+        }
+        if detail.purchase.received_count > 0 {
+            self.notice =
+                Some("Some of that purchase has arrived; continue it from Receive.".to_owned());
+            return;
+        }
+
+        let currency = self.currency;
+        let lines = detail
+            .lines
+            .iter()
+            .map(|line| PurchaseLineDraft {
+                product_id: line.product_id.unwrap_or_default(),
+                name: line.name.clone(),
+                qty: line.qty_ordered.to_string(),
+                cost: line
+                    .unit_cost_minor
+                    .map(|cost| plain_amount(cost, currency))
+                    .unwrap_or_default(),
+            })
+            .collect();
+
+        self.purchase_editor = Some(PurchaseDraft {
+            id: Some(detail.purchase.id),
+            supplier_id: detail.purchase.supplier_id.clone(),
+            note: detail.purchase.note.clone().unwrap_or_default(),
+            lines,
+            search: String::new(),
+            error: None,
+            confirm_delete: false,
+        });
+        self.purchase_receive = None;
+        self.purchase_view = None;
+        self.notice = None;
+    }
+
+    /// Add one tracked product to the plan being edited.
+    pub fn purchase_add_product(&mut self, product_id: i64) {
+        let Some((name, cost)) = self
+            .stock
+            .iter()
+            .find(|item| item.product_id == product_id)
+            .map(|item| (item.name.clone(), item.cost_minor))
+        else {
+            return;
+        };
+        let currency = self.currency;
+        let Some(draft) = self.purchase_editor.as_mut() else {
+            return;
+        };
+        if draft.lines.iter().any(|line| line.product_id == product_id) {
+            return;
+        }
+        draft.lines.push(PurchaseLineDraft {
+            product_id,
+            name,
+            qty: "1".to_owned(),
+            cost: cost
+                .map(|cost| plain_amount(cost, currency))
+                .unwrap_or_default(),
+        });
+        draft.error = None;
+    }
+
+    /// Fill the plan with everything at or below its warning line.
+    ///
+    /// The quantity aims at the product's target minus what is on the shelf and
+    /// already on its way, so a trip cannot order the same gap twice. Anything
+    /// already on the list is left alone; the operator can adjust it.
+    pub fn purchase_add_low_stock(&mut self) {
+        let Some(draft) = self.purchase_editor.as_ref() else {
+            return;
+        };
+        let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
+        let currency = self.currency;
+        let suggestions: Vec<(i64, String, i64, Option<i64>)> = self
+            .stock
+            .iter()
+            .filter(|item| item.needs_restock() && !already.contains(&item.product_id))
+            .map(|item| {
+                (
+                    item.product_id,
+                    item.name.clone(),
+                    item.suggested(),
+                    item.cost_minor,
+                )
+            })
+            .collect();
+
+        let Some(draft) = self.purchase_editor.as_mut() else {
+            return;
+        };
+        if suggestions.is_empty() {
+            draft.error = Some(if already.is_empty() {
+                "Nothing is low, and nothing is already on its way.".to_owned()
+            } else {
+                "Everything that is low is already on this list.".to_owned()
+            });
+            return;
+        }
+
+        for (product_id, name, qty, cost) in suggestions {
+            draft.lines.push(PurchaseLineDraft {
+                product_id,
+                name,
+                qty: qty.to_string(),
+                cost: cost
+                    .map(|cost| plain_amount(cost, currency))
+                    .unwrap_or_default(),
+            });
+        }
+        draft.error = None;
+    }
+
+    pub fn purchase_remove_line(&mut self, product_id: i64) {
+        if let Some(draft) = self.purchase_editor.as_mut() {
+            draft.lines.retain(|line| line.product_id != product_id);
+            draft.confirm_delete = false;
+        }
+    }
+
+    /// Create or update the plan on screen.
+    pub fn save_purchase(&mut self) {
+        let Some(draft) = self.purchase_editor.as_ref() else {
+            return;
+        };
+        let id = draft.id;
+        let supplier_id = draft.supplier_id.clone();
+        let note = draft.note.clone();
+        let raw: Vec<(i64, String, String, String)> = draft
+            .lines
+            .iter()
+            .map(|line| {
+                (
+                    line.product_id,
+                    line.name.clone(),
+                    line.qty.trim().to_owned(),
+                    line.cost.trim().to_owned(),
+                )
+            })
+            .collect();
+
+        if raw.is_empty() {
+            return self.purchase_error("Add at least one product to the plan.");
+        }
+
+        let mut lines = Vec::with_capacity(raw.len());
+        for (product_id, name, qty_text, cost_text) in raw {
+            let qty = match qty_text.parse::<i64>() {
+                Ok(qty) if qty > 0 => qty,
+                _ => {
+                    return self
+                        .purchase_error(format!("{name} needs a whole quantity of one or more."));
+                }
+            };
+            let unit_cost_minor = match self.parse_cost(&cost_text) {
+                Ok(cost) => cost,
+                Err(message) => {
+                    return self.purchase_error(format!("{name}: {message}"));
+                }
+            };
+            lines.push(crate::db::PurchaseLineInput {
+                product_id,
+                qty,
+                unit_cost_minor,
+            });
+        }
+
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+        let result = match id {
+            Some(id) => {
+                crate::db::update_purchase(&self.store, id, supplier_id.as_deref(), &note, &lines)
+                    .map(|()| id)
+            }
+            None => crate::db::create_purchase(
+                &self.store,
+                supplier_id.as_deref(),
+                &note,
+                &lines,
+                user_id.as_deref(),
+            ),
+        };
+
+        match result {
+            Ok(_) => {
+                self.purchase_editor = None;
+                self.reload_purchases();
+                self.reload_stock();
+                self.notice = Some(if id.is_some() {
+                    "Plan updated.".to_owned()
+                } else {
+                    "Purchase planned.".to_owned()
+                });
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "saving a purchase failed");
+                self.purchase_error(format!("Could not save the purchase: {error}"));
+            }
+        }
+    }
+
+    /// Arm, then confirm, deleting a plan.
+    pub fn delete_purchase(&mut self) {
+        let Some((id, armed)) = self
+            .purchase_editor
+            .as_ref()
+            .map(|draft| (draft.id, draft.confirm_delete))
+        else {
+            return;
+        };
+        let Some(id) = id else {
+            return;
+        };
+        if !armed {
+            if let Some(draft) = self.purchase_editor.as_mut() {
+                draft.confirm_delete = true;
+            }
+            return;
+        }
+
+        match crate::db::delete_planned_purchase(&self.store, id) {
+            Ok(()) => {
+                self.purchase_editor = None;
+                self.reload_purchases();
+                self.reload_stock();
+                self.notice = Some("Plan deleted.".to_owned());
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "deleting a purchase failed");
+                self.purchase_error(format!("Could not delete the plan: {error}"));
+            }
+        }
+    }
+
+    /// Open the receiving screen for a planned purchase.
+    pub fn start_receive(&mut self, id: i64) {
+        let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
+            self.notice = Some("That purchase is no longer there.".to_owned());
+            return;
+        };
+        if detail.purchase.status == crate::db::PurchaseStatus::Received {
+            self.notice = Some("That purchase has already been received.".to_owned());
+            return;
+        }
+
+        let currency = self.currency;
+        let lines = detail
+            .lines
+            .iter()
+            .map(|line| {
+                let left = (line.qty_ordered - line.qty_received).max(0);
+                ReceiveLineDraft {
+                    line_id: Some(line.id),
+                    product_id: line.product_id.unwrap_or_default(),
+                    name: line.name.clone(),
+                    ordered: line.qty_ordered,
+                    already: line.qty_received,
+                    qty: left.to_string(),
+                    cost: line
+                        .unit_cost_minor
+                        .map(|cost| plain_amount(cost, currency))
+                        .unwrap_or_default(),
+                    removed: false,
+                }
+            })
+            .collect();
+
+        self.purchase_receive = Some(PurchaseReceiveDraft {
+            id: detail.purchase.id,
+            supplier: detail.purchase.supplier.clone(),
+            note: detail.purchase.note.clone().unwrap_or_default(),
+            lines,
+            search: String::new(),
+            error: None,
+        });
+        self.purchase_editor = None;
+        self.purchase_view = None;
+        self.notice = None;
+    }
+
+    /// Add an impulse item to the receiving screen.
+    pub fn receive_add_product(&mut self, product_id: i64) {
+        let Some((name, cost)) = self
+            .stock
+            .iter()
+            .find(|item| item.product_id == product_id)
+            .map(|item| (item.name.clone(), item.cost_minor))
+        else {
+            return;
+        };
+        let currency = self.currency;
+        let Some(draft) = self.purchase_receive.as_mut() else {
+            return;
+        };
+        if draft.lines.iter().any(|line| line.product_id == product_id) {
+            return;
+        }
+        draft.lines.push(ReceiveLineDraft {
+            line_id: None,
+            product_id,
+            name,
+            ordered: 0,
+            already: 0,
+            qty: "1".to_owned(),
+            cost: cost
+                .map(|cost| plain_amount(cost, currency))
+                .unwrap_or_default(),
+            removed: false,
+        });
+        draft.error = None;
+    }
+
+    pub fn receive_remove_line(&mut self, index: usize) {
+        if let Some(draft) = self.purchase_receive.as_mut()
+            && index < draft.lines.len()
+        {
+            draft.lines.remove(index);
+        }
+    }
+
+    /// Write what came back from the trip.
+    pub fn save_receive(&mut self) {
+        let Some(draft) = self.purchase_receive.as_ref() else {
+            return;
+        };
+        let id = draft.id;
+        let note = draft.note.clone();
+        let raw: Vec<(Option<i64>, i64, String, String, bool)> = draft
+            .lines
+            .iter()
+            .map(|line| {
+                (
+                    line.line_id,
+                    line.product_id,
+                    line.name.clone(),
+                    line.qty.trim().to_owned(),
+                    line.removed,
+                )
+            })
+            .collect();
+        let costs: Vec<String> = draft
+            .lines
+            .iter()
+            .map(|line| line.cost.trim().to_owned())
+            .collect();
+
+        let mut lines = Vec::new();
+        let mut remove = Vec::new();
+        for (index, (line_id, product_id, name, qty_text, removed)) in raw.into_iter().enumerate() {
+            if let (Some(line_id), true) = (line_id, removed) {
+                remove.push(line_id);
+                continue;
+            }
+            if removed {
+                continue;
+            }
+            let qty = match qty_text.parse::<i64>() {
+                Ok(qty) if qty >= 0 => qty,
+                _ => return self.receive_error(format!("{name} needs a whole quantity.")),
+            };
+            if qty == 0 {
+                continue;
+            }
+            let unit_cost_minor = match self.parse_cost(&costs[index]) {
+                Ok(cost) => cost,
+                Err(message) => return self.receive_error(format!("{name}: {message}")),
+            };
+            lines.push(crate::db::ReceiveLine {
+                line_id,
+                product_id,
+                qty,
+                unit_cost_minor,
+            });
+        }
+
+        if lines.is_empty() && remove.is_empty() {
+            return self.receive_error("Nothing was received.");
+        }
+
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+        match crate::db::receive_purchase(
+            &self.store,
+            id,
+            &lines,
+            &remove,
+            &note,
+            user_id.as_deref(),
+        ) {
+            Ok(()) => {
+                let units: i64 = lines.iter().map(|line| line.qty).sum();
+                self.purchase_receive = None;
+                self.reload_purchases();
+                self.reload_stock();
+                self.reload_products();
+                self.notice = Some(if units == 0 {
+                    "Nothing was bought; the plan was cleared.".to_owned()
+                } else {
+                    format!(
+                        "Received {units} unit{}.",
+                        if units == 1 { "" } else { "s" }
+                    )
+                });
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "receiving a purchase failed");
+                self.receive_error(format!("Could not receive it: {error}"));
+            }
+        }
+    }
+
+    /// An empty cost is a missing fact, not zero. Anything else must parse as
+    /// an amount in this till's currency and cannot be negative.
+    fn parse_cost(&self, text: &str) -> Result<Option<i64>, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        match Money::parse(text, self.currency) {
+            Ok(cost) if cost.minor() >= 0 => Ok(Some(cost.minor())),
+            Ok(_) => Err("a cost cannot be negative.".to_owned()),
+            Err(error) => Err(format!("a cost must be an amount like 1200 ({error}).")),
+        }
+    }
+
+    fn purchase_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.purchase_editor.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    fn receive_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.purchase_receive.as_mut() {
             draft.error = Some(message.into());
         }
     }

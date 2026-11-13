@@ -26,15 +26,16 @@ marked **Sell** puts the item in the cart; **Add** opens a new product with the
 barcode already filled in. The listener is off until you turn it on, and it
 never leaves the shop's network.
 
-**Dashboard** — takings, number of sales, and the latest transactions for today,
-the last 7 days, the last 30 days, or all time.
+**Dashboard** — takings, number of sales, profit where costs are known, and the
+latest transactions for today, the last 7 days, the last 30 days, or all time.
 
 **Products** — the catalogue of what you sell: add a product, edit its price or
 category, give it a barcode. Everything here becomes a key on the Sell screen.
 
 **Suppliers** — who the shop buys from: name, contact, phone, email, address and
 notes. Search by any of them, and archive a supplier you no longer use without
-losing the record. Purchases and stock are not part of this screen yet.
+losing the record. A purchase can name a supplier, but it does not have to: most
+trips to market have no delivery note.
 
 **Inventory** — what the ledger says is on the shelf. Tracking is opt-in per
 product: choose a product, count it, and set the level that counts as low. From
@@ -44,6 +45,14 @@ keeps its own history. Stock is always the sum of those movements; deleting a
 product deletes its history, because the ledger is operational and not a
 financial record. Cashiers can see stock; a manager or the owner records a
 movement.
+
+**Purchases** — a shopping list for the shop, not a stock movement. Start a plan
+before a trip, add what is low in one click, adjust quantities at the market,
+and receive only what you actually bought. Each received line writes one stock
+movement and can carry a unit cost, which becomes that product's last known cost.
+A plan with nothing received can still be edited or deleted; once goods start
+arriving, it is continued on the receiving screen. Purchases are local-only for
+now.
 
 **Sales** — every completed sale in the chosen range, newest first.
 
@@ -59,7 +68,7 @@ Three roles, and a till that asks for the person rather than a username.
 |---|---|---|---|
 | Sell and take payment | yes | yes | yes |
 | Lock the till | yes | yes | yes |
-| Void, refund, discount, change a price, open the drawer without a sale, edit settings, manage suppliers, change stock | — | yes | yes |
+| Void, refund, discount, change a price, open the drawer without a sale, edit settings, manage suppliers, change stock, plan and receive purchases | — | yes | yes |
 | Add staff, switch an account off, reset a PIN, change the currency | — | — | yes |
 
 The owner account is the back office. An owner who also works the counter should
@@ -83,7 +92,7 @@ try up to fifteen minutes. The till locks itself after five idle minutes
 
 | Key | Does |
 |---|---|
-| `F1` … `F7` | switch between the seven sections |
+| `F1` … `F8` | switch between the eight sections |
 | `Ctrl+Enter` | take payment for the cart |
 | `Ctrl+L` | lock the till |
 | `Ctrl+P` | command palette — jump anywhere by name |
@@ -110,15 +119,17 @@ stops working the moment it has been used once.
 ## Status
 
 This is an early build. You can sign in, sell, lock the till, keep a supplier
-directory, and track stock: build a cart, take the cash, and the sale is recorded
-with the name of whoever took it, on the Dashboard and in Sales.
+directory, track stock, and plan a restocking trip: build a cart, take the cash,
+and the sale is recorded with the name of whoever took it, on the Dashboard and
+in Sales.
 
 - payments are cash only — mobile money and cards come later
 - the catalogue can be typed in or imported from a CSV
   (`name, category, price, barcode`); stock counts are not imported
 - receipts can be previewed but not printed
 - void, refund and discount have permissions but no screen yet
-- inventory tracks counts, not cost: purchase orders and valuation come later
+- purchases record a unit cost and profit appears on the Dashboard once sales
+  with a known cost have happened; there is no full stock valuation yet
 - each till runs alone; there is no sync between terminals yet
 - the phone scanner is a companion Android app, not a mobile till of its own;
   it needs the till and the phone on the same Wi-Fi

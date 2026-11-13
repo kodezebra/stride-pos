@@ -26,28 +26,30 @@ This is a teaching document. It is deliberately repetitive: every lesson has ste
 
 Stride POS is a cash till for a small shop. It runs on the shop's computer and keeps working with no internet, no account, and no cloud. Every sale is stored in one file on that computer.
 
-It does four jobs, and this manual teaches them in the order goods move through the shop:
+It does five jobs, and this manual teaches them in the order goods move through the shop:
 
 1. **Products** — name and price what you sell.
 2. **Suppliers** — record who you buy from.
 3. **Inventory** — record what is on the shelf.
-4. **Sell** — take the money.
+4. **Purchases** — plan a restocking trip and receive what arrived.
+5. **Sell** — take the money.
 
 That order is intentional. You cannot sell what is not in Products. You cannot receive goods without a product to receive them into. You cannot trust a stock count you never started. Suppliers sit beside that chain: the delivery note needs a name. Learn the order once; after that, nearly all your time is in Lesson 4.
 
-### 0.2 The seven screens
+### 0.2 The eight screens
 
 | Key | Screen | What it is for |
 |---|---|---|
 | `F1` | **Sell** | The counter: search, scan, cart, payment |
-| `F2` | **Dashboard** | Takings, number of sales, best sellers, busiest hour |
-| `F3` | **Products** | The catalogue: add, edit, import, export |
-| `F4` | **Sales** | Every completed sale, newest first |
-| `F5` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
-| `F6` | **Inventory** | What the stock record says is on the shelf |
-| `F7` | **Suppliers** | Who the shop buys from |
+| `F2` | **Sales** | Every completed sale, newest first |
+| `F3` | **Inventory** | What the stock record says is on the shelf |
+| `F4` | **Dashboard** | Takings, number of sales, best sellers, busiest hour |
+| `F5` | **Products** | The catalogue: add, edit, import, export |
+| `F6` | **Suppliers** | Who the shop buys from |
+| `F7` | **Purchases** | Plan a restocking trip, then receive what arrived |
+| `F8` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
 
-`F8` is reserved for purchase orders and does nothing in this build. The bottom bar shows your name, your role, and the current cart.
+F7 is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
 
 ### 0.3 Signing in and locking
 
@@ -81,7 +83,7 @@ Two things can never be approved for a cashier: **managing staff** and **changin
 
 | Key | Does |
 |---|---|
-| `F1`–`F7` | Jump to a screen |
+| `F1`–`F8` | Jump to a screen |
 | `Ctrl+Enter` or `F12` | Take payment |
 | `Ctrl+L` | Lock the till |
 | `Ctrl+P` | Command palette — type "dash", "sales", "lock" |
@@ -140,7 +142,7 @@ Prices in the table are written with thousands separators so they are easy to re
 
 ### 1.1 Add one product
 
-1. Press `F3` to open **Products**.
+1. Press `F5` to open **Products**.
 2. Press **New product**.
 3. Type the **Name** — for example, `Africa Tea Leaves 100 g`.
 4. Type the **Price**. Type only the number: `3000`, not `UGX 3,000`.
@@ -162,11 +164,11 @@ Two facts to remember:
 
 ### 1.3 Load many products from a spreadsheet
 
-1. `F3` → **More** → **Import CSV**. A file chooser opens.
+1. `F5` → **More** → **Import CSV**. A file chooser opens.
 2. In the chooser, press **Save a template**, then choose a folder. The till writes `products-template.csv`.
 3. Open that file in a spreadsheet. Fill one product per row: `name,category,price,barcode`.
 4. Save it as CSV.
-5. `F3` → **More** → **Import CSV** again, and pick your filled file.
+5. `F5` → **More** → **Import CSV** again, and pick your filled file.
 6. Read the notice: **"Imported N products, skipped M."** If nothing at all could be imported, the same box shows the first reason. If only some rows were skipped, the notice gives the counts — open the file and check the rows yourself.
 
 Bad rows are skipped, never half-imported. Duplicate barcodes are skipped as well.
@@ -208,7 +210,7 @@ Both produce `products-…-YYYYMMDD-HHMMSS.csv`. Amounts are plain numbers with 
 
 ### 2.1 Add a supplier
 
-1. Press `F7` to open **Suppliers**.
+1. Press `F6` to open **Suppliers**.
 2. Press **New supplier**.
 3. Type the **Name** — this is the only required field.
 4. Fill in what you know: **Contact**, **Phone**, **Email**, **Address**, **Notes** (delivery days, terms, the rep's name).
@@ -226,7 +228,7 @@ Archiving is the correct way to retire a supplier. Do not delete — there is no
 
 ### 2.3 What this screen does not do
 
-Suppliers are a **directory only** in this build. There are no purchase orders, no supplier invoices, and no automatic link from a supplier to stock. When goods arrive, you record the stock yourself in Lesson 3. Write the invoice number in the movement note.
+Suppliers are a **directory**. A purchase can name one, but it does not have to: most market trips have no delivery note. The supplier name is for your records; it does not send an order, receive goods, or move stock. Stock changes when you receive a purchase (Lesson 3A) or record a movement yourself (Lesson 3). If there is an invoice, write its number in the purchase note.
 
 ### 2.4 Practice
 
@@ -259,7 +261,7 @@ Because stock is a ledger, you can always answer "why is the count what it is?" 
 
 ### 3.2 Start tracking a product
 
-1. Press `F6` to open **Inventory**.
+1. Press `F3` to open **Inventory**.
 2. Press **Track stock**.
 3. Choose the product.
 4. Enter **what is on the shelf right now** — the opening count.
@@ -272,7 +274,7 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 
 ### 3.3 Record a movement
 
-1. `F6` → find the product → **Move stock**.
+1. `F3` → find the product → **Move stock**.
 2. Choose **What happened**.
 
 | Choice | Use it when | Effect |
@@ -309,6 +311,62 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 5. Record **Waste** of 2 toothpaste.
 6. Record a **Customer return** of 1 soap.
 7. Open tea's **History** and read the last three lines.
+
+---
+
+## Lesson 3A — Purchases: the restocking trip
+
+**You will learn:** build a shopping list from low stock, adjust it before leaving, receive only what you actually bought, and record the unit cost.
+
+**Before you start:** the products you plan to buy must be tracked (Lesson 3).
+
+### 3A.1 Plan before you leave
+
+1. Press `F7` to open **Purchases**.
+2. Press **New purchase**.
+3. Type the supplier's name if there is one. It is optional — a market trip often has no supplier or delivery note.
+4. Press **Add low stock**. Every tracked product at or under its warning line appears with a suggested quantity.
+5. Change any quantity. The suggestion aims at the product's **Keep in stock** level after counting what is already on the shelf and on other planned purchases.
+6. Add anything else with the product search. A product does **not** have to be low to go on the list.
+7. Leave cost empty if you do not know it. Press **Save**.
+
+The purchase now reads **Planned**. Nothing has moved in stock — a plan is intent, not goods.
+
+### 3A.2 Receive what came back
+
+1. `F7` → open the purchase → **Receive**.
+2. Each row starts at the quantity still outstanding. Type what actually arrived.
+3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
+4. Tick **Not bought** on a line you did not find. It is removed from the plan.
+5. Bought something extra? **Add product**, then quantity and cost. It is recorded as fully received.
+6. Press **Receive**.
+
+Every received line writes exactly one stock movement, so the product's History shows the trip once. The shelf count goes up by what you received.
+
+### 3A.3 Reading the status
+
+| Status | Means | What you can do |
+|---|---|---|
+| **Planned** | Nothing received yet | Edit quantities, delete the whole plan |
+| **Part received** | Some lines or quantities are still open | Continue receiving only |
+| **Received** | Every remaining line is complete | Read it; it is locked |
+
+The progress line reads "3 of 5 received" when part of a line is still outstanding.
+
+### 3A.4 Three rules to say out loud
+
+1. **A plan is not stock.** Only receiving writes a movement.
+2. **Receive what is real.** Change the quantity to what is in front of you, not what the list hoped for.
+3. **Cost is optional but valuable.** Without it the till can still count stock; with it, the Dashboard can show profit.
+
+### 3A.5 Practice
+
+1. Make tea low: sell enough, or adjust it down to 2.
+2. `F7` → **New purchase** → **Add low stock**. Check tea appears with a sensible quantity.
+3. Add soap manually even though it is not low.
+4. Save. Confirm the purchase is **Planned** and tea's on-hand count did not change.
+5. Receive 10 tea at cost `800`. Leave soap **Not bought**.
+6. Confirm tea's stock rose by 10, the purchase says **Received**, and History shows one received line.
 
 ---
 
@@ -466,7 +524,7 @@ Run them on a fresh practice till when you can. If a product or supplier already
 
 *Situation:* Sugar moves from 3,350 to 3,500. The earlier receipts must not change.
 
-*Do:* Open the Sale B receipt from Lesson 4 — it contains sugar at 3,350. Edit Sugar 500 g to 3,500 and save. Open `F4` and open Sale B again. Change the price back afterwards.
+*Do:* Open the Sale B receipt from Lesson 4 — it contains sugar at 3,350. Edit Sugar 500 g to 3,500 and save. Open `F2` and open Sale B again. Change the price back afterwards.
 
 *Check:* The Sell tile shows 3,500. The old sale still shows 3,350.
 
@@ -480,7 +538,7 @@ Omo Washing Powder 500 g,Household,6200,6001234500080
 Bad Row,Groceries,abc,6001234500097
 ```
 
-*Do:* `F3` → **More** → **Import CSV**.
+*Do:* `F5` → **More** → **Import CSV**.
 
 *Check:* The notice says **"Imported 2 products, skipped 1."** The good rows are complete. The notice does not name the bad row, so check the file if the number surprises you.
 
@@ -596,7 +654,7 @@ Bad Row,Groceries,abc,6001234500097
 
 **S17 — The cashier needs the shop view**
 
-*Situation:* A cashier opens `F4` and sees only their own sales.
+*Situation:* A cashier opens `F2` and sees only their own sales.
 
 *Do:* Ask a manager to approve. The manager picks their name, enters their PIN, and presses **Approve**.
 
@@ -608,7 +666,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The shop is closing.
 
-*Do:* `F2` → **Today** → read Revenue and the **Payments taken** card. `F4` → **Export CSV**. Settings → Terminal → **Back up now**. `Ctrl+L`.
+*Do:* `F4` → **Today** → read Revenue and the **Payments taken** card. `F2` → **Export CSV**. Settings → Terminal → **Back up now**. `Ctrl+L`.
 
 *Check:* The cash in the drawer matches the Payments card. The export file exists. The backup is in the folder.
 
@@ -624,7 +682,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The drawer has 2,000 less than the till says.
 
-*Do:* Compare the **Payments taken** card with the physical cash. Open `F4` → **Today** and check the sale count and totals. Open suspicious rows to see paid and change. Export the day.
+*Do:* Compare the **Payments taken** card with the physical cash. Open `F2` → **Today** and check the sale count and totals. Open suspicious rows to see paid and change. Export the day.
 
 *Check:* If every sale is recorded, the till is right and the difference is a cash-handling problem. Do not invent a sale to hide it. Report it to the owner.
 
@@ -692,7 +750,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 - [ ] Adds a supplier with only a name
 - [ ] Finds a supplier by search
 - [ ] Archives and restores a supplier
-- [ ] Knows suppliers are a directory, not a purchase order
+- [ ] Knows a purchase can name a supplier, but the supplier is only a record
 
 **Inventory**
 
@@ -733,8 +791,8 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 ```
 SIGN IN      pick your name → 6-digit PIN → Sign in
 LOCK         Ctrl+L          (cart survives)
-SCREENS      F1 Sell  F2 Dashboard  F3 Products  F4 Sales
-             F5 Settings  F6 Inventory  F7 Suppliers
+SCREENS      F1 Sell  F2 Sales  F3 Inventory  F4 Dashboard
+             F5 Products  F6 Suppliers  F7 Purchases  F8 Settings
 
 ONE SALE     F1 → scan / search / tap → Pay (Ctrl+Enter)
              → cash received or Exact chip → Complete sale
@@ -746,16 +804,21 @@ CHANGE       green = give back; red = still short
 ROUNDING     UGX/KES nearest 100 · TZS nearest 5,000
              cash only; the exact total is still recorded
 
-STOCK        Track stock → count → warn level
+STOCK        Track stock → count → warn level → keep-in-stock level
              Move stock → Received / Customer return / Waste / Adjustment
              Adjustment = type what you COUNTED, not the difference
              Sale subtracts by itself. Negative is allowed.
 
-SUPPLIERS    F7 → New supplier (name only is enough)
+PURCHASES    F7 → New purchase → Add low stock → Save (Planned)
+             Receive → type what arrived → cost if known → Receive
+             Not bought removes a line; Add product records an impulse buy
+             Only receiving moves stock. Received trips are locked.
+
+SUPPLIERS    F6 → New supplier (name only is enough)
              Archive to retire; restore to bring back
 
-END OF DAY   F2 Today → compare Payments with the drawer
-             F4 Export CSV → Settings → Back up now → Ctrl+L
+END OF DAY   F4 Today → compare Payments with the drawer
+             F2 Export CSV → Settings → Back up now → Ctrl+L
 
 IF STUCK     Read the caption under the button.
              "A manager is needed" → ask for one-minute approval.
@@ -768,7 +831,7 @@ IF STUCK     Read the caption under the button.
 
 | What you see | Likely cause | What to do |
 |---|---|---|
-| "No products yet" on Sell | Empty catalogue | `F3` → **New product**, or import a CSV |
+| "No products yet" on Sell | Empty catalogue | `F5` → **New product**, or import a CSV |
 | Scan does nothing | Phone scanner off, till locked, or a dialog open | Settings → Scanner → **Turn on**; close dialogs; unlock |
 | "No product matches" | Barcode not in the catalogue | Search by name; add the product with the barcode |
 | "Another product already uses that barcode" | Duplicate barcode | Search the barcode and edit the existing product |
@@ -797,6 +860,12 @@ IF STUCK     Read the caption under the button.
 | **Movement** | One change to stock: received, sold, returned, wasted, adjusted |
 | **Opening count** | The quantity on the shelf when tracking starts |
 | **Warn level** | The number at or below which the till shows **Low** |
+| **Keep in stock** | The level a restock aims for; empty means twice the warn level |
+| **Purchase** | A shopping list for a restocking trip |
+| **Incoming** | Quantity planned but not yet received |
+| **Receive** | Count what actually arrived; this is what moves stock |
+| **Unit cost** | What one item cost you; used for profit on later sales |
+| **Profit** | Revenue minus cost, for the sale lines whose cost is known |
 | **Adjustment** | A correction after counting the shelf by hand |
 | **Rounding** | The small cash difference caused by coins no longer circulating |
 | **Approval** | A manager allowing one action for one minute |
@@ -811,11 +880,11 @@ Teach these limits so nobody hunts for a button that is not there.
 - **Cash only.** No mobile money, no cards.
 - **No printed receipts.** Copy the receipt as text instead.
 - **No void, refund, or discount screens.** The permissions exist, the screens do not.
-- **No cost or profit.** Inventory counts units, not what they cost.
-- **No purchase orders.** Suppliers are a directory.
+- **No full stock valuation.** Purchases record a unit cost, and the Dashboard shows profit only for sale lines that had a known cost.
+- **No supplier delivery workflow.** Purchases are a shopping list for the owner's trip; there is no sent order, no invoice, no payment to a supplier.
 - **No tax.** The cart says "not configured".
 - **No held carts.** Finishing or clearing the cart is the only way out.
-- **One till, one file.** No sync between terminals.
+- **One till, one file.** No sync between terminals; purchases stay on this till.
 - **The phone app is a scanner, not a second till.**
 - **The recovery code is the only owner password reset.**
 
