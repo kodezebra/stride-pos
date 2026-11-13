@@ -4,6 +4,7 @@
 //! has shipped, because some till somewhere already applied it.
 
 use anyhow::Context as _;
+use rusqlite::OptionalExtension as _;
 use std::path::{Path, PathBuf};
 use storage::Migration;
 
@@ -225,6 +226,15 @@ pub struct StockItem {
     pub category: String,
     pub on_hand: i64,
     pub low_stock: i64,
+    /// What the shop last paid for one, when it has said. Prefills the next
+    /// purchase line and lets the catalog show a margin.
+    pub cost_minor: Option<i64>,
+    /// How many the shop wants to keep. `None` means "twice the warning line",
+    /// which is a sensible default for a shop that never sets one.
+    pub target_stock: Option<i64>,
+    /// Ordered but not yet received, across planned purchases. Suggestions
+    /// subtract this so a trip in progress cannot be ordered twice.
+    pub incoming: i64,
 }
 
 impl StockItem {
@@ -234,6 +244,26 @@ impl StockItem {
 
     pub fn is_low(&self) -> bool {
         !self.is_out() && self.on_hand <= self.low_stock
+    }
+
+    /// The level a restock aims for: the shop's own target, or twice the
+    /// warning line. Never below the warning line itself.
+    pub fn target(&self) -> i64 {
+        self.target_stock
+            .unwrap_or_else(|| self.low_stock.saturating_mul(2))
+            .max(self.low_stock)
+    }
+
+    /// How many to buy to reach [`Self::target`], after what is already on the
+    /// shelf and already on its way.
+    pub fn suggested(&self) -> i64 {
+        (self.target() - self.on_hand - self.incoming).max(0)
+    }
+
+    /// Whether this is worth putting on the next list: at or under the warning
+    /// line, with nothing already planned to cover it.
+    pub fn needs_restock(&self) -> bool {
+        self.suggested() > 0 && self.on_hand + self.incoming <= self.low_stock
     }
 }
 
@@ -248,6 +278,157 @@ pub struct StockMovement {
     pub created_at: String,
     /// Who recorded it, when the movement names a staff account.
     pub user: Option<String>,
+}
+
+/// Where a purchase is in the only lifecycle it has.
+///
+/// There is no "ordered" or "sent" state: the shop buys in person, so a plan is
+/// a list until goods arrive. A partially received purchase is still `Planned`
+/// with some lines counted, which the screen reads as "3 of 5 received".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PurchaseStatus {
+    Planned,
+    Received,
+}
+
+impl PurchaseStatus {
+    pub fn key(self) -> &'static str {
+        match self {
+            PurchaseStatus::Planned => "planned",
+            PurchaseStatus::Received => "received",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "planned" => Some(PurchaseStatus::Planned),
+            "received" => Some(PurchaseStatus::Received),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PurchaseStatus::Planned => "Planned",
+            PurchaseStatus::Received => "Received",
+        }
+    }
+}
+
+/// A restocking trip, as the list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Purchase {
+    pub id: i64,
+    pub supplier_id: Option<String>,
+    /// The supplier's current name, read through the join. `None` when the
+    /// trip names no supplier, which is the common case at a market.
+    pub supplier: Option<String>,
+    pub status: PurchaseStatus,
+    pub note: Option<String>,
+    /// Local time, minute precision, like the sale list.
+    pub created_at: String,
+    /// Local time when the last line was received, if it is finished.
+    pub received_at: Option<String>,
+    pub line_count: i64,
+    /// Sum of what was ordered, across every line.
+    pub unit_count: i64,
+    /// Sum of what has arrived so far.
+    pub received_count: i64,
+    /// What the trip is expected to cost, from lines that have a price.
+    /// `None` when no line has one, rather than a misleading zero.
+    pub cost_minor: Option<i64>,
+}
+
+impl Purchase {
+    /// Whether some, but not all, of the ordered units have arrived.
+    pub fn is_partial(&self) -> bool {
+        self.status == PurchaseStatus::Planned && self.received_count > 0
+    }
+
+    /// The line under the supplier in the list: "3 of 5 received" while a trip
+    /// is part-done, otherwise the count ordered.
+    pub fn progress(&self) -> String {
+        if self.is_partial() {
+            format!("{} of {} received", self.received_count, self.unit_count)
+        } else {
+            format!(
+                "{} item{}",
+                self.unit_count,
+                if self.unit_count == 1 { "" } else { "s" }
+            )
+        }
+    }
+}
+
+/// One line of a purchase.
+///
+/// `name` is the snapshot taken when the line was written, not a join: the
+/// catalog may have been renamed or archived since, and the trip must keep
+/// reading as what was bought.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PurchaseLine {
+    pub id: i64,
+    /// The catalog row, when it still exists. `None` after a product is deleted.
+    pub product_id: Option<i64>,
+    pub name: String,
+    pub qty_ordered: i64,
+    pub qty_received: i64,
+    pub unit_cost_minor: Option<i64>,
+}
+
+/// A purchase and its lines, for the editor and the receiving screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PurchaseDetail {
+    pub purchase: Purchase,
+    pub lines: Vec<PurchaseLine>,
+}
+
+/// One line on its way into a new or edited plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PurchaseLineInput {
+    pub product_id: i64,
+    pub qty: i64,
+    pub unit_cost_minor: Option<i64>,
+}
+
+/// One line counted at receiving time.
+///
+/// `line_id` is `None` for something picked up that was not on the plan, which
+/// the receive screen allows: a market trip always brings one extra.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiveLine {
+    pub line_id: Option<i64>,
+    pub product_id: i64,
+    pub qty: i64,
+    pub unit_cost_minor: Option<i64>,
+}
+
+/// Revenue, cost and coverage for a range.
+///
+/// Only lines with a recorded cost contribute: counting an uncosted line's
+/// revenue as pure profit would overstate the margin, and guessing its cost
+/// would invent one. The counts tell the screen how much of the range it can
+/// speak for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Margin {
+    pub revenue_minor: i64,
+    pub cost_minor: i64,
+    pub costed_lines: i64,
+    pub total_lines: i64,
+}
+
+impl Margin {
+    pub fn profit_minor(&self) -> i64 {
+        self.revenue_minor - self.cost_minor
+    }
+
+    pub fn has_cost(&self) -> bool {
+        self.costed_lines > 0
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.total_lines > 0 && self.costed_lines == self.total_lines
+    }
 }
 
 /// Owner stamp in the SQLite header. Arbitrary, permanent, and never derived
@@ -654,6 +835,80 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "sync_peer_errors",
         sql: r#"
             ALTER TABLE sync_peers ADD COLUMN last_error TEXT;
+        "#,
+    },
+    // What the shop set out to buy, and what came back on the trip.
+    //
+    // A purchase is not an inventory movement: it records intent (a list for
+    // the market) and the receiving screen is the only place that writes stock.
+    // That split is what lets a planned list exist without claiming the goods
+    // are already on the shelf.
+    //
+    // `status` has two values, not a lifecycle. A purchase is either still a
+    // plan or it has been received in full; a partial delivery is the same plan
+    // with some lines already counted, which the screen reads as "3 of 5".
+    // `unit_cost_minor` is nullable because a market trip often has no clean
+    // per-unit price and a missing cost must never block receiving.
+    //
+    // Each line snapshots the product name for the same reason a sale line
+    // does: the catalog can be archived or renamed, and the purchase must keep
+    // reading as what was bought. `purchase_line_id` on the ledger is the link
+    // back from a movement to the trip that caused it.
+    //
+    // `products.cost_minor` is the last price paid, kept denormalized so the
+    // next purchase can prefill it and the catalog can show a margin without a
+    // join through history. `target_stock` is what "Add low-stock items"
+    // aims for; NULL falls back to twice the warning line.
+    //
+    // `sale_lines.cost_minor` is a snapshot taken at checkout. Profit has to be
+    // historical: recomputing it from today's cost would rewrite last month's
+    // margin every time a supplier changes their price.
+    Migration {
+        version: 12,
+        name: "purchases",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS purchases (
+                id          INTEGER PRIMARY KEY,
+                uid         TEXT,
+                supplier_id TEXT REFERENCES suppliers(id),
+                status      TEXT NOT NULL DEFAULT 'planned'
+                            CHECK (status IN ('planned', 'received')),
+                note        TEXT,
+                received_at TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                user_id     TEXT REFERENCES users(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS purchases_status
+                ON purchases (status, id DESC);
+
+            CREATE TABLE IF NOT EXISTS purchase_lines (
+                id              INTEGER PRIMARY KEY,
+                uid             TEXT,
+                purchase_id     INTEGER NOT NULL
+                                REFERENCES purchases(id) ON DELETE CASCADE,
+                product_id      INTEGER REFERENCES products(id) ON DELETE SET NULL,
+                name_snapshot   TEXT    NOT NULL CHECK (length(name_snapshot) > 0),
+                qty_ordered     INTEGER NOT NULL CHECK (qty_ordered > 0),
+                qty_received    INTEGER NOT NULL DEFAULT 0
+                                CHECK (qty_received >= 0),
+                unit_cost_minor INTEGER CHECK (unit_cost_minor >= 0),
+                position        INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS purchase_lines_purchase
+                ON purchase_lines (purchase_id, position);
+
+            ALTER TABLE stock_movements ADD COLUMN purchase_line_id INTEGER
+                REFERENCES purchase_lines(id);
+
+            ALTER TABLE products ADD COLUMN cost_minor INTEGER
+                CHECK (cost_minor >= 0);
+            ALTER TABLE products ADD COLUMN target_stock INTEGER
+                CHECK (target_stock >= 0);
+
+            ALTER TABLE sale_lines ADD COLUMN cost_minor INTEGER
+                CHECK (cost_minor >= 0);
         "#,
     },
 ];
@@ -1927,7 +2182,14 @@ fn optional_text(value: &str) -> Option<&str> {
 /// small enough to read whole, like the catalog.
 pub fn stock(store: &storage::Store) -> Vec<StockItem> {
     let mut statement = match store.conn().prepare(
-        "SELECT p.id, p.name, p.category, p.low_stock, COALESCE(SUM(m.delta), 0)
+        "SELECT p.id, p.name, p.category, p.low_stock, p.cost_minor, p.target_stock,
+                COALESCE(SUM(m.delta), 0),
+                COALESCE((
+                    SELECT SUM(pl.qty_ordered - pl.qty_received)
+                    FROM purchase_lines pl
+                    JOIN purchases pu ON pu.id = pl.purchase_id
+                    WHERE pl.product_id = p.id AND pu.status = 'planned'
+                ), 0)
          FROM products p
          LEFT JOIN stock_movements m ON m.product_id = p.id
          WHERE p.tracked = 1 AND p.archived = 0
@@ -1947,7 +2209,10 @@ pub fn stock(store: &storage::Store) -> Vec<StockItem> {
             name: row.get(1)?,
             category: row.get(2)?,
             low_stock: row.get(3)?,
-            on_hand: row.get(4)?,
+            cost_minor: row.get(4)?,
+            target_stock: row.get(5)?,
+            on_hand: row.get(6)?,
+            incoming: row.get(7)?,
         })
     });
 
@@ -1972,10 +2237,15 @@ pub fn track_product(
     product_id: i64,
     opening: i64,
     low_stock: i64,
+    target_stock: Option<i64>,
     user_id: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(opening >= 0, "the opening count cannot be negative");
     anyhow::ensure!(low_stock >= 0, "the low-stock level cannot be negative");
+    anyhow::ensure!(
+        target_stock.is_none_or(|target| target >= low_stock),
+        "the target cannot be below the low-stock level"
+    );
 
     let transaction = store.conn().unchecked_transaction()?;
 
@@ -1996,9 +2266,9 @@ pub fn track_product(
     anyhow::ensure!(!already, "that product is already tracked");
 
     transaction.execute(
-        "UPDATE products SET tracked = 1, low_stock = ?2
+        "UPDATE products SET tracked = 1, low_stock = ?2, target_stock = ?3
          WHERE id = ?1 AND archived = 0",
-        (product_id, low_stock),
+        (product_id, low_stock, target_stock),
     )?;
 
     if opening != 0 {
@@ -2110,6 +2380,489 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
         .collect()
 }
 
+/// Every purchase, newest first.
+///
+/// The list is small enough to read whole, like the catalog. Totals are
+/// recomputed from the lines so a purchase and its list can never disagree.
+pub fn purchases(store: &storage::Store) -> Vec<Purchase> {
+    let mut statement = match store.conn().prepare(
+        "SELECT p.id, p.supplier_id, sup.name, p.status, p.note,
+                strftime('%d/%m %H:%M', p.created_at, 'localtime'),
+                strftime('%d/%m %H:%M', p.received_at, 'localtime'),
+                COUNT(l.id),
+                COALESCE(SUM(l.qty_ordered), 0),
+                COALESCE(SUM(l.qty_received), 0),
+                SUM(l.qty_ordered * l.unit_cost_minor)
+         FROM purchases p
+         LEFT JOIN suppliers sup ON sup.id = p.supplier_id
+         LEFT JOIN purchase_lines l ON l.purchase_id = p.id
+         GROUP BY p.id
+         ORDER BY p.id DESC",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "purchases prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        let status: String = row.get(3)?;
+        Ok((
+            Purchase {
+                id: row.get(0)?,
+                supplier_id: row.get(1)?,
+                supplier: row.get(2)?,
+                status: PurchaseStatus::from_key(&status).unwrap_or(PurchaseStatus::Planned),
+                note: row.get(4)?,
+                created_at: row.get(5)?,
+                received_at: row.get(6)?,
+                line_count: row.get(7)?,
+                unit_count: row.get(8)?,
+                received_count: row.get(9)?,
+                cost_minor: row.get(10)?,
+            },
+            status,
+        ))
+    });
+
+    match rows {
+        Ok(rows) => rows
+            .filter_map(Result::ok)
+            .filter_map(|(purchase, status)| PurchaseStatus::from_key(&status).map(|_| purchase))
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "purchases query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// One purchase and its lines, or `None` when it is gone.
+pub fn purchase_detail(store: &storage::Store, id: i64) -> Option<PurchaseDetail> {
+    let purchase = purchases(store)
+        .into_iter()
+        .find(|purchase| purchase.id == id)?;
+
+    let mut statement = match store.conn().prepare(
+        "SELECT id, product_id, name_snapshot, qty_ordered, qty_received, unit_cost_minor
+         FROM purchase_lines WHERE purchase_id = ?1 ORDER BY position, id",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "purchase lines prepare failed");
+            return None;
+        }
+    };
+
+    let rows = statement.query_map([id], |row| {
+        Ok(PurchaseLine {
+            id: row.get(0)?,
+            product_id: row.get(1)?,
+            name: row.get(2)?,
+            qty_ordered: row.get(3)?,
+            qty_received: row.get(4)?,
+            unit_cost_minor: row.get(5)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => Some(PurchaseDetail {
+            purchase,
+            lines: rows.filter_map(Result::ok).collect(),
+        }),
+        Err(err) => {
+            tracing::warn!(error = %err, "purchase lines query failed");
+            None
+        }
+    }
+}
+
+/// Write a new planned purchase. Returns its id.
+pub fn create_purchase(
+    store: &storage::Store,
+    supplier_id: Option<&str>,
+    note: &str,
+    lines: &[PurchaseLineInput],
+    user_id: Option<&str>,
+) -> anyhow::Result<i64> {
+    anyhow::ensure!(!lines.is_empty(), "a purchase needs at least one line");
+
+    let transaction = store.conn().unchecked_transaction()?;
+
+    if let Some(supplier_id) = supplier_id {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
+            [supplier_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "that supplier is no longer in the directory");
+    }
+
+    transaction.execute(
+        "INSERT INTO purchases (uid, supplier_id, note, user_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        (
+            uuid::Uuid::now_v7().to_string(),
+            supplier_id,
+            optional_text(note),
+            user_id,
+        ),
+    )?;
+    let id = transaction.last_insert_rowid();
+
+    insert_purchase_lines(&transaction, id, lines)?;
+    transaction.commit()?;
+    Ok(id)
+}
+
+/// Replace a planned purchase's header and lines.
+///
+/// Only a plan with nothing received can be edited: replacing a line that a
+/// movement already points at would orphan the ledger row. A partially received
+/// purchase is continued on the receiving screen instead.
+pub fn update_purchase(
+    store: &storage::Store,
+    id: i64,
+    supplier_id: Option<&str>,
+    note: &str,
+    lines: &[PurchaseLineInput],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!lines.is_empty(), "a purchase needs at least one line");
+
+    let transaction = store.conn().unchecked_transaction()?;
+
+    let status: String = transaction
+        .query_row("SELECT status FROM purchases WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .context("that purchase no longer exists")?;
+    anyhow::ensure!(status == "planned", "a received purchase cannot be changed");
+
+    let received: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(qty_received), 0) FROM purchase_lines WHERE purchase_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        received == 0,
+        "some of this purchase has arrived; continue it from Receive"
+    );
+
+    if let Some(supplier_id) = supplier_id {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
+            [supplier_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "that supplier is no longer in the directory");
+    }
+
+    transaction.execute(
+        "UPDATE purchases SET supplier_id = ?2, note = ?3 WHERE id = ?1",
+        (id, supplier_id, optional_text(note)),
+    )?;
+    transaction.execute("DELETE FROM purchase_lines WHERE purchase_id = ?1", [id])?;
+    insert_purchase_lines(&transaction, id, lines)?;
+
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Delete a plan that has received nothing.
+///
+/// The lines go with it, which a real purchase relies on; nothing in the ledger
+/// points at them because nothing was received.
+pub fn delete_planned_purchase(store: &storage::Store, id: i64) -> anyhow::Result<()> {
+    let transaction = store.conn().unchecked_transaction()?;
+
+    let status: String = transaction
+        .query_row("SELECT status FROM purchases WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .context("that purchase no longer exists")?;
+    anyhow::ensure!(status == "planned", "a received purchase cannot be deleted");
+
+    let received: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(qty_received), 0) FROM purchase_lines WHERE purchase_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        received == 0,
+        "some of this purchase has arrived; it cannot be deleted"
+    );
+
+    transaction.execute("DELETE FROM purchase_lines WHERE purchase_id = ?1", [id])?;
+    let changed = transaction.execute("DELETE FROM purchases WHERE id = ?1", [id])?;
+    anyhow::ensure!(changed == 1, "that purchase no longer exists");
+
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Count what came back from a trip.
+///
+/// Every counted unit writes one `receive` movement and advances its line, in
+/// the same transaction. A line left at `qty_received = qty_ordered` closes; a
+/// line still short leaves the purchase planned, ready for a second trip.
+///
+/// `lines` carries the quantities received now. A line with `line_id: None` is
+/// an impulse buy: it becomes a fully received line of its own. `remove` holds
+/// lines that were not bought at all; only a line that has received nothing can
+/// be removed, because a movement already points at it otherwise.
+///
+/// `note` is the purchase's final note, editable at receiving time.
+pub fn receive_purchase(
+    store: &storage::Store,
+    id: i64,
+    lines: &[ReceiveLine],
+    remove: &[i64],
+    note: &str,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        lines.iter().any(|line| line.qty > 0) || !remove.is_empty(),
+        "nothing was received"
+    );
+
+    let transaction = store.conn().unchecked_transaction()?;
+
+    let status: String = transaction
+        .query_row("SELECT status FROM purchases WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .context("that purchase no longer exists")?;
+    anyhow::ensure!(
+        status == "planned",
+        "this purchase has already been received"
+    );
+
+    for line in lines {
+        anyhow::ensure!(line.qty >= 0, "a quantity cannot be negative");
+        anyhow::ensure!(
+            line.unit_cost_minor.is_none_or(|cost| cost >= 0),
+            "a cost cannot be negative"
+        );
+        if line.qty == 0 {
+            continue;
+        }
+
+        let product = transaction
+            .query_row(
+                "SELECT name, tracked, archived FROM products WHERE id = ?1",
+                [line.product_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("that product is no longer in the catalog")?;
+        anyhow::ensure!(!product.2, "{} is archived", product.0);
+        anyhow::ensure!(
+            product.1,
+            "{} is not tracked; only tracked products can be received",
+            product.0
+        );
+
+        let line_id = match line.line_id {
+            Some(line_id) => {
+                let (ordered, already, belongs): (i64, i64, bool) = transaction
+                    .query_row(
+                        "SELECT qty_ordered, qty_received, purchase_id = ?2
+                         FROM purchase_lines WHERE id = ?1",
+                        (line_id, id),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?
+                    .context("that purchase line no longer exists")?;
+                anyhow::ensure!(belongs, "that line belongs to another purchase");
+
+                let left = ordered - already;
+                anyhow::ensure!(
+                    line.qty <= left,
+                    "{} has only {} left to receive",
+                    product.0,
+                    left.max(0)
+                );
+
+                transaction.execute(
+                    "UPDATE purchase_lines
+                     SET qty_received = qty_received + ?2,
+                         unit_cost_minor = COALESCE(?3, unit_cost_minor)
+                     WHERE id = ?1",
+                    (line_id, line.qty, line.unit_cost_minor),
+                )?;
+                line_id
+            }
+            None => {
+                anyhow::ensure!(
+                    line.qty > 0,
+                    "an item picked up at the market needs a quantity"
+                );
+                let position: i64 = transaction.query_row(
+                    "SELECT COALESCE(MAX(position), -1) + 1
+                     FROM purchase_lines WHERE purchase_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                transaction.execute(
+                    "INSERT INTO purchase_lines
+                         (uid, purchase_id, product_id, name_snapshot, qty_ordered,
+                          qty_received, unit_cost_minor, position)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                    (
+                        uuid::Uuid::now_v7().to_string(),
+                        id,
+                        line.product_id,
+                        product.0.as_str(),
+                        line.qty,
+                        line.unit_cost_minor,
+                        position,
+                    ),
+                )?;
+                transaction.last_insert_rowid()
+            }
+        };
+
+        transaction.execute(
+            "INSERT INTO stock_movements
+                 (product_id, delta, kind, note, user_id, purchase_line_id, uid)
+             VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6)",
+            (
+                line.product_id,
+                line.qty,
+                optional_text(note),
+                user_id,
+                line_id,
+                uuid::Uuid::now_v7().to_string(),
+            ),
+        )?;
+
+        if let Some(cost) = line.unit_cost_minor {
+            transaction.execute(
+                "UPDATE products SET cost_minor = ?2 WHERE id = ?1",
+                (line.product_id, cost),
+            )?;
+        }
+    }
+
+    for line_id in remove {
+        let (belongs, received): (bool, i64) = transaction
+            .query_row(
+                "SELECT purchase_id = ?2, qty_received
+                 FROM purchase_lines WHERE id = ?1",
+                (line_id, id),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .context("that purchase line no longer exists")?;
+        anyhow::ensure!(belongs, "that line belongs to another purchase");
+        anyhow::ensure!(
+            received == 0,
+            "a line that has already arrived cannot be removed"
+        );
+        transaction.execute("DELETE FROM purchase_lines WHERE id = ?1", [line_id])?;
+    }
+
+    let (total, open): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN qty_received < qty_ordered THEN 1 ELSE 0 END), 0)
+         FROM purchase_lines WHERE purchase_id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    // Every line was marked "Not bought": there is nothing left to plan and
+    // nothing to receive. Keeping an empty purchase would leave a ghost in the
+    // list that can only be edited to add lines or deleted.
+    if total == 0 {
+        transaction.execute("DELETE FROM purchases WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        return Ok(());
+    }
+
+    let finished = open == 0;
+
+    transaction.execute(
+        "UPDATE purchases
+         SET note = ?2, status = ?3,
+             received_at = CASE WHEN ?3 = 'received' THEN datetime('now') ELSE NULL END
+         WHERE id = ?1",
+        (
+            id,
+            optional_text(note),
+            if finished {
+                PurchaseStatus::Received.key()
+            } else {
+                PurchaseStatus::Planned.key()
+            },
+        ),
+    )?;
+
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Insert a plan's lines, resolving each product's name at write time.
+fn insert_purchase_lines(
+    transaction: &rusqlite::Transaction<'_>,
+    purchase_id: i64,
+    lines: &[PurchaseLineInput],
+) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+
+    for (position, line) in lines.iter().enumerate() {
+        anyhow::ensure!(line.qty > 0, "every line needs a quantity");
+        anyhow::ensure!(
+            line.unit_cost_minor.is_none_or(|cost| cost >= 0),
+            "a cost cannot be negative"
+        );
+        anyhow::ensure!(
+            seen.insert(line.product_id),
+            "the same product is on the list twice"
+        );
+
+        let (name, tracked, archived): (String, bool, bool) = transaction
+            .query_row(
+                "SELECT name, tracked, archived FROM products WHERE id = ?1",
+                [line.product_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .context("that product is no longer in the catalog")?;
+        anyhow::ensure!(!archived, "{name} is archived");
+        anyhow::ensure!(
+            tracked,
+            "{name} is not tracked; only tracked products can be restocked"
+        );
+
+        transaction.execute(
+            "INSERT INTO purchase_lines
+                 (uid, purchase_id, product_id, name_snapshot, qty_ordered,
+                  unit_cost_minor, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                uuid::Uuid::now_v7().to_string(),
+                purchase_id,
+                line.product_id,
+                name.as_str(),
+                line.qty,
+                line.unit_cost_minor,
+                position as i64,
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Record a sale and its payment in one transaction.
 ///
 /// The amounts are checked here rather than left to the CHECK constraints, so a
@@ -2197,10 +2950,25 @@ pub fn record_sale(
 
     for line in lines {
         let line_uid = uuid::Uuid::now_v7().to_string();
+        // The cost is the one the shop last paid, snapshotted here. Profit is a
+        // historical fact: a supplier's next price must not rewrite last
+        // month's margin. An untracked or never-costed product stores NULL,
+        // which the margin query reads as "not known" rather than zero.
+        let cost_minor: Option<i64> = match line.product_id {
+            Some(product_id) => transaction
+                .query_row(
+                    "SELECT cost_minor FROM products WHERE id = ?1",
+                    [product_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten(),
+            None => None,
+        };
         transaction.execute(
             "INSERT INTO sale_lines
-                 (sale_id, product_id, name, qty, unit_minor, total_minor, uid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (sale_id, product_id, name, qty, unit_minor, total_minor, cost_minor, uid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 id,
                 line.product_id,
@@ -2208,6 +2976,7 @@ pub fn record_sale(
                 line.qty,
                 line.unit_minor,
                 line.qty * line.unit_minor,
+                cost_minor,
                 line_uid.as_str(),
             ),
         )?;
@@ -2386,6 +3155,42 @@ fn totals_in(store: &storage::Store, clause: &str, user: Option<&str>) -> (i64, 
         Err(err) => {
             tracing::warn!(error = %err, "totals query failed");
             (0, 0)
+        }
+    }
+}
+
+/// Revenue and cost across the lines that have a recorded cost.
+///
+/// The same window and the same scope as [`totals`], so the profit card and the
+/// revenue card above it always talk about the same sales. Lines without a cost
+/// are excluded from both sides: their revenue is not profit, and inventing a
+/// cost would be worse than admitting the shop has not recorded one.
+pub fn margin(store: &storage::Store, range: usize, user: Option<&str>) -> Margin {
+    let clause = window_clause(range, "s.created_at");
+    let sql = format!(
+        "SELECT
+             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL
+                               THEN l.qty * l.unit_minor ELSE 0 END), 0),
+             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL
+                               THEN l.qty * l.cost_minor ELSE 0 END), 0),
+             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL THEN 1 ELSE 0 END), 0),
+             COUNT(l.id)
+         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+         WHERE {clause}"
+    );
+
+    match store.conn().query_row(&sql, [user], |row| {
+        Ok(Margin {
+            revenue_minor: row.get(0)?,
+            cost_minor: row.get(1)?,
+            costed_lines: row.get(2)?,
+            total_lines: row.get(3)?,
+        })
+    }) {
+        Ok(margin) => margin,
+        Err(err) => {
+            tracing::warn!(error = %err, "margin query failed");
+            Margin::default()
         }
     }
 }
@@ -3834,7 +4639,7 @@ mod tests {
         let (store, path) = store("stock-track");
         let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
 
-        track_product(&store, soap, 12, 3, None).expect("track");
+        track_product(&store, soap, 12, 3, None, None).expect("track");
         let tracked = stock(&store);
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].on_hand, 12);
@@ -3875,7 +4680,7 @@ mod tests {
         let (store, path) = store("stock-sale");
         let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("soap");
         let bun = insert_product(&store, "Bun", 500, "Bakery", None, None).expect("bun");
-        track_product(&store, soap, 10, 5, None).expect("track soap");
+        track_product(&store, soap, 10, 5, None, None).expect("track soap");
 
         let cashier = insert_user(
             &store,
@@ -3944,7 +4749,7 @@ mod tests {
         let (store, path) = store("stock-zero");
         let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
 
-        track_product(&store, soap, 0, 5, None).expect("track");
+        track_product(&store, soap, 0, 5, None, None).expect("track");
         let tracked = stock(&store);
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].on_hand, 0);
@@ -3952,7 +4757,7 @@ mod tests {
         assert!(stock_movements(&store, soap).is_empty());
 
         // Tracking is a decision, not a button: starting twice is refused.
-        assert!(track_product(&store, soap, 4, 5, None).is_err());
+        assert!(track_product(&store, soap, 4, 5, None, None).is_err());
 
         let _ = std::fs::remove_file(path);
     }
@@ -3961,7 +4766,7 @@ mod tests {
     fn a_movement_whose_sign_contradicts_its_kind_is_refused() {
         let (store, path) = store("stock-signs");
         let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
-        track_product(&store, soap, 5, 2, None).expect("track");
+        track_product(&store, soap, 5, 2, None, None).expect("track");
 
         for (delta, kind) in [
             (-1, StockKind::Receive),
@@ -3991,7 +4796,7 @@ mod tests {
     fn stock_may_go_negative_when_the_shelf_and_the_ledger_disagree() {
         let (store, path) = store("stock-negative");
         let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("product");
-        track_product(&store, soap, 1, 2, None).expect("track");
+        track_product(&store, soap, 1, 2, None, None).expect("track");
 
         record_sale(
             &store,
@@ -4025,7 +4830,7 @@ mod tests {
     fn history_is_newest_first_and_capped() {
         let (store, path) = store("stock-history");
         let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
-        track_product(&store, soap, 0, 5, None).expect("track");
+        track_product(&store, soap, 0, 5, None, None).expect("track");
 
         for _ in 0..(MOVEMENT_HISTORY + 5) {
             record_stock_movement(&store, soap, 1, StockKind::Receive, "", None).expect("receive");
@@ -4123,7 +4928,7 @@ mod tests {
     fn a_sale_is_stamped_with_an_identity_and_moves_the_cursor() {
         let (store, path) = store("sale-identity");
         let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("product");
-        track_product(&store, soap, 10, 3, None).expect("track");
+        track_product(&store, soap, 10, 3, None, None).expect("track");
 
         let line = SaleLine {
             product_id: Some(soap),
@@ -4721,6 +5526,478 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A tracked product with an opening count, ready for a purchase test.
+    fn stocked(
+        store: &storage::Store,
+        name: &str,
+        opening: i64,
+        low: i64,
+        target: Option<i64>,
+    ) -> i64 {
+        let id = insert_product(store, name, 500, "Shop", None, None).expect("insert");
+        track_product(store, id, opening, low, target, None).expect("track");
+        id
+    }
+
+    #[test]
+    fn a_plan_counts_nothing_until_it_is_received() {
+        let (store, path) = store("purchase-plan");
+        let soap = stocked(&store, "Soap", 0, 2, Some(10));
+
+        let id = create_purchase(
+            &store,
+            None,
+            "Saturday market",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 5,
+                unit_cost_minor: Some(100),
+            }],
+            None,
+        )
+        .expect("plan");
+
+        let item = stock(&store)
+            .into_iter()
+            .find(|item| item.product_id == soap)
+            .expect("stock");
+        assert_eq!(item.on_hand, 0, "a plan is not stock");
+        assert_eq!(item.incoming, 5, "but it is on its way");
+        assert_eq!(item.suggested(), 5, "target 10, nothing here, five coming");
+        assert!(
+            !item.needs_restock(),
+            "the plan already covers the warning line"
+        );
+
+        let list = purchases(&store);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, PurchaseStatus::Planned);
+        assert_eq!(list[0].unit_count, 5);
+        assert_eq!(list[0].cost_minor, Some(500));
+        assert_eq!(list[0].progress(), "5 items");
+        assert_eq!(
+            purchase_detail(&store, id).expect("detail").lines[0].name,
+            "Soap"
+        );
+
+        // Three arrive. The ledger moves; the plan stays open.
+        receive_purchase(
+            &store,
+            id,
+            &[ReceiveLine {
+                line_id: Some(purchase_detail(&store, id).expect("detail").lines[0].id),
+                product_id: soap,
+                qty: 3,
+                unit_cost_minor: Some(120),
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive part");
+
+        let item = stock(&store)
+            .into_iter()
+            .find(|item| item.product_id == soap)
+            .expect("stock");
+        assert_eq!(item.on_hand, 3);
+        assert_eq!(item.incoming, 2);
+        assert_eq!(item.cost_minor, Some(120), "last cost came from receiving");
+
+        let list = purchases(&store);
+        assert_eq!(list[0].status, PurchaseStatus::Planned);
+        assert!(list[0].is_partial());
+        assert_eq!(list[0].progress(), "3 of 5 received");
+        assert_eq!(
+            stock_movements(&store, soap).len(),
+            1,
+            "one movement for one trip"
+        );
+
+        // The rest arrives; the purchase closes.
+        receive_purchase(
+            &store,
+            id,
+            &[ReceiveLine {
+                line_id: Some(purchase_detail(&store, id).expect("detail").lines[0].id),
+                product_id: soap,
+                qty: 2,
+                unit_cost_minor: None,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive rest");
+
+        let list = purchases(&store);
+        assert_eq!(list[0].status, PurchaseStatus::Received);
+        assert!(list[0].received_at.is_some());
+        assert_eq!(stock(&store)[0].on_hand, 5);
+        assert_eq!(
+            stock_movements(&store, soap).len(),
+            2,
+            "one movement per received count"
+        );
+        assert_eq!(
+            stock(&store)[0].cost_minor,
+            Some(120),
+            "a missing cost does not erase the last known one"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_partly_received_plan_can_only_be_continued() {
+        let (store, path) = store("purchase-partial");
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 4,
+                unit_cost_minor: None,
+            }],
+            None,
+        )
+        .expect("plan");
+        assert!(
+            update_purchase(
+                &store,
+                id,
+                None,
+                "",
+                &[PurchaseLineInput {
+                    product_id: soap,
+                    qty: 9,
+                    unit_cost_minor: None
+                }]
+            )
+            .is_ok(),
+            "an untouched plan is editable"
+        );
+        assert!(delete_planned_purchase(&store, id).is_ok(), "and deletable");
+
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 4,
+                unit_cost_minor: None,
+            }],
+            None,
+        )
+        .expect("plan again");
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+        receive_purchase(
+            &store,
+            id,
+            &[ReceiveLine {
+                line_id: Some(line),
+                product_id: soap,
+                qty: 1,
+                unit_cost_minor: None,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive one");
+
+        assert!(
+            update_purchase(
+                &store,
+                id,
+                None,
+                "",
+                &[PurchaseLineInput {
+                    product_id: soap,
+                    qty: 4,
+                    unit_cost_minor: None
+                }]
+            )
+            .is_err(),
+            "a line a movement points at cannot be replaced"
+        );
+        assert!(
+            delete_planned_purchase(&store, id).is_err(),
+            "nor can the trip vanish"
+        );
+        assert_eq!(
+            purchases(&store).len(),
+            1,
+            "the trip is still there to finish"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn receiving_can_add_an_impulse_buy_and_remove_an_unbought_line() {
+        let (store, path) = store("purchase-impulse");
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let rice = stocked(&store, "Rice", 0, 2, None);
+        let salt = stocked(&store, "Salt", 0, 2, None);
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[
+                PurchaseLineInput {
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: None,
+                },
+                PurchaseLineInput {
+                    product_id: rice,
+                    qty: 5,
+                    unit_cost_minor: None,
+                },
+            ],
+            None,
+        )
+        .expect("plan");
+        let lines = purchase_detail(&store, id).expect("detail").lines;
+        let soap_line = lines
+            .iter()
+            .find(|line| line.product_id == Some(soap))
+            .expect("soap")
+            .id;
+        let rice_line = lines
+            .iter()
+            .find(|line| line.product_id == Some(rice))
+            .expect("rice")
+            .id;
+
+        receive_purchase(
+            &store,
+            id,
+            &[
+                ReceiveLine {
+                    line_id: Some(soap_line),
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: Some(50),
+                },
+                ReceiveLine {
+                    line_id: None,
+                    product_id: salt,
+                    qty: 3,
+                    unit_cost_minor: Some(80),
+                },
+            ],
+            &[rice_line],
+            "Rice was on offer",
+            None,
+        )
+        .expect("receive");
+
+        let detail = purchase_detail(&store, id).expect("detail");
+        assert_eq!(detail.lines.len(), 2, "the unbought rice line is gone");
+        let soap_line = detail
+            .lines
+            .iter()
+            .find(|line| line.product_id == Some(soap))
+            .expect("soap");
+        assert_eq!((soap_line.qty_ordered, soap_line.qty_received), (2, 2));
+        let impulse = detail
+            .lines
+            .iter()
+            .find(|line| line.product_id == Some(salt))
+            .expect("salt");
+        assert_eq!(
+            (impulse.qty_ordered, impulse.qty_received),
+            (3, 3),
+            "an impulse buy is fully received as its own line"
+        );
+        assert_eq!(detail.purchase.status, PurchaseStatus::Received);
+        assert_eq!(detail.purchase.note.as_deref(), Some("Rice was on offer"));
+
+        let second = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 2,
+                unit_cost_minor: None,
+            }],
+            None,
+        )
+        .expect("second plan");
+        let line = purchase_detail(&store, second).expect("detail").lines[0].id;
+        receive_purchase(&store, second, &[], &[line], "", None).expect("remove unbought");
+
+        assert!(
+            purchase_detail(&store, second).is_none(),
+            "a plan with every line marked Not bought is cleared, not left empty"
+        );
+        assert!(
+            purchases(&store).iter().all(|p| p.id != second),
+            "nothing to buy means no purchase to show"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_finished_purchase_keeps_its_names_after_the_catalog_changes() {
+        let (store, path) = store("purchase-snapshot");
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 2,
+                unit_cost_minor: Some(70),
+            }],
+            None,
+        )
+        .expect("plan");
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+        receive_purchase(
+            &store,
+            id,
+            &[ReceiveLine {
+                line_id: Some(line),
+                product_id: soap,
+                qty: 2,
+                unit_cost_minor: None,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive");
+
+        store
+            .conn()
+            .execute(
+                "UPDATE products SET name = 'Soap (large)', archived = 1 WHERE id = ?1",
+                [soap],
+            )
+            .expect("archive");
+
+        let detail = purchase_detail(&store, id).expect("detail");
+        assert_eq!(
+            detail.lines[0].name, "Soap",
+            "the line remembers what was bought, not what the catalog says now"
+        );
+        assert!(
+            update_purchase(
+                &store,
+                id,
+                None,
+                "",
+                &[PurchaseLineInput {
+                    product_id: soap,
+                    qty: 1,
+                    unit_cost_minor: None
+                }]
+            )
+            .is_err(),
+            "a received trip is locked"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_tracked_products_can_be_restocked() {
+        let (store, path) = store("purchase-tracked");
+        let loose =
+            insert_product(&store, "Loose sweets", 100, "Shop", None, None).expect("insert");
+
+        assert!(
+            create_purchase(
+                &store,
+                None,
+                "",
+                &[PurchaseLineInput {
+                    product_id: loose,
+                    qty: 5,
+                    unit_cost_minor: None
+                }],
+                None
+            )
+            .is_err(),
+            "an untracked product has no shelf to count"
+        );
+
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 5,
+                unit_cost_minor: None,
+            }],
+            None,
+        )
+        .expect("plan");
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+        store
+            .conn()
+            .execute("UPDATE products SET tracked = 0 WHERE id = ?1", [soap])
+            .expect("untrack");
+        assert!(
+            receive_purchase(
+                &store,
+                id,
+                &[ReceiveLine {
+                    line_id: Some(line),
+                    product_id: soap,
+                    qty: 1,
+                    unit_cost_minor: None,
+                }],
+                &[],
+                "",
+                None
+            )
+            .is_err(),
+            "receiving into an untracked product would write a movement nothing reads"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn profit_only_counts_lines_with_a_cost() {
+        let (store, path) = store("margin");
+        let id = insert_sale(&store, "-0 days", &[("Tea", 2, 300), ("Sugar", 1, 200)]);
+        store
+            .conn()
+            .execute(
+                "UPDATE sale_lines SET cost_minor = 100 WHERE sale_id = ?1 AND name = 'Tea'",
+                [id],
+            )
+            .expect("cost one line");
+
+        let reported = margin(&store, 0, None);
+        assert_eq!(
+            reported.revenue_minor, 600,
+            "only the costed line's revenue"
+        );
+        assert_eq!(reported.cost_minor, 200);
+        assert_eq!(reported.profit_minor(), 400);
+        assert_eq!((reported.costed_lines, reported.total_lines), (1, 2));
+        assert!(!reported.is_complete(), "the sugar line had no cost");
+        assert!(reported.has_cost());
+
+        assert_eq!(margin(&store, 3, None).profit_minor(), 400);
+
         let _ = std::fs::remove_file(path);
     }
 }

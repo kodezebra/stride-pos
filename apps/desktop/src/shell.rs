@@ -10,8 +10,7 @@
 //!
 //! | Key         | Action                    |
 //! |-------------|---------------------------|
-//! | `F1`..`F7`  | Switch to a visible module |
-//! | `F8`        | Reserved: purchase orders |
+//! | `F1`..`F8`  | Switch to a visible module |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
 //! | `Ctrl+Enter`| Take payment              |
@@ -208,6 +207,12 @@ impl PosShell {
         crate::modules::track_modal(ui.ctx(), &mut self.state);
         crate::modules::stock_move_modal(ui.ctx(), &mut self.state);
         crate::modules::stock_history_modal(ui.ctx(), &mut self.state);
+        // Purchases' three surfaces: planning a trip, counting one in, and
+        // reading a finished one. Receive is drawn after the editor so an
+        // impulse add never opens under the plan behind it.
+        crate::modules::purchase_editor_modal(ui.ctx(), &mut self.state);
+        crate::modules::purchase_receive_modal(ui.ctx(), &mut self.state);
+        crate::modules::purchase_view_modal(ui.ctx(), &mut self.state);
         // Choosing the file to read or the folder to write into. Drawn before
         // the typed import form so that "Type the path instead" can hand the
         // screen over in the same frame, without a flash of both.

@@ -86,5 +86,10 @@ mod tests {
             .find(|command| command.label == "Go to Settings")
             .expect("a manager can open Settings");
         assert_eq!(settings.hint, "F7");
+        let purchases = manager
+            .iter()
+            .find(|command| command.label == "Go to Purchases")
+            .expect("a manager can open Purchases");
+        assert_eq!(purchases.hint, "F8");
     }
 }
