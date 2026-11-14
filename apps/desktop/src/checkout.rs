@@ -1,13 +1,15 @@
-//! The payment screen: cash in, change out, one sale written.
+//! Cash in, change out, one sale written — inside the cart column.
 //!
-//! A modal, like the product form, because paying is a single act that must not
-//! compete with the grid behind it. The cashier is counting notes; a mis-click on
-//! a product tile at that moment is a sale that did not happen.
+//! Paying is not a screen. The cart's footer grows into the tender panel in
+//! place, so the amount the cashier was already reading does not move, and the
+//! product grid behind it dims but stays where it was. A till is operated by
+//! muscle memory; a modal that covers the workspace throws that memory away
+//! every single sale.
 //!
-//! Two states, one window. Before the sale: what is due, what the customer
-//! handed over, what comes back. After: the change, big, and the one button that
-//! starts the next sale. The switch is [`crate::state::Payment::done`] rather
-//! than a second modal, so the confirmation never has to be found somewhere else.
+//! Two states, one panel. Before the sale: what is due, what the customer
+//! handed over, what comes back. After: the change, big, and the sale number —
+//! and the cart is already empty, so the next customer needs no "new sale"
+//! button at all. The switch is [`crate::state::Payment::done`].
 //!
 //! Cash only. The `payments` table already has a `method` column and mobile money
 //! is a new row rather than a migration, but a method picker with one method in
@@ -22,11 +24,12 @@ use ui_shell::egui;
 use crate::actions;
 use crate::state::{self, State};
 
-/// Draw the payment modal, if one is open.
+/// Draw the tender panel into the cart column.
 ///
-/// Called from `shell` after the frame, like the product form, so the backdrop
-/// covers the cart and the Pay button cannot be pressed twice.
-pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
+/// Called from the Sell module's cart, at the point where the totals and the
+/// Pay button would otherwise be. It owns the footer for as long as
+/// [`State::payment`] is set: the panel is the payment, not an overlay on it.
+pub fn tender(ui: &mut egui::Ui, state: &mut State) {
     if state.payment.is_none() {
         return;
     }
@@ -34,331 +37,270 @@ pub fn payment_modal(ctx: &egui::Context, state: &mut State) {
     // Read the amounts before borrowing the payment: they come from the cart,
     // which the payment does not own, and `Money::format` is the one rendering.
     let currency = state.currency;
-    let shop = state.settings.shop_name().to_owned();
-    let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
-    let subtotal_minor = state.cart_total_minor();
     let rounding_minor = state.cart_rounding_minor();
     let due_minor = state.due_minor();
-    let subtotal = state.money(subtotal_minor);
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
-    let tax_minor = state.cart_tax_minor();
-    let tax_rate = state.settings.tax_rate_percent;
-    let pre_tax = state.money(subtotal_minor - tax_minor);
-    let tax_amount = state.money(tax_minor);
+    // Built before the payment is borrowed: the slip is rendered from state the
+    // payment does not own, and the ghost panel only shows its text form.
+    let shop = state.settings.shop_name().to_owned();
+    let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
 
-    // A finished sale is a different screen and needs no mutable payment.
+    // A finished sale is a different panel and needs no mutable payment. The
+    // cart is already empty, so this is the change the cashier is counting out
+    // plus the number the customer might come back with.
     if let Some(payment) = state.payment.as_mut()
         && let Some(sale) = payment.done.clone()
     {
-        let just_finished = payment.focus;
+        // Read before the borrow ends; nothing below writes to it.
         payment.focus = false;
-        // Cloned out of the borrow: the receipt renderer needs the state's
-        // currency, and holding `payment` open for the whole closure would
-        // fight it. A receipt is a handful of lines, not a table.
         let receipt = payment.detail.clone();
 
         let change = state.money(sale.change_minor);
-        // Built before the closure: the clipboard text is the whole slip, and
-        // assembling it while the button row is being drawn would have to borrow
-        // `receipt` again for no gain.
+        let paid = state.money(sale.paid_minor());
         let copy_text = receipt
             .as_ref()
             .map(|detail| crate::receipt::plain(detail, &paper, currency));
-        let mut close = false;
+
+        let palette = theme::current(ui.ctx());
+        let success = egui::Color32::from(palette.success);
         let mut copied = false;
 
-        crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            let palette = theme::current(ui.ctx());
-            let success = egui::Color32::from(palette.success);
+        ui.add_space(SPACING.sm);
+        components::divider(ui);
+        ui.add_space(SPACING.sm);
 
-            ui.label(
-                components::semibold("Paid")
-                    .size(TYPE.heading)
-                    .color(success),
-            );
-            components::caption(ui, &format!("Sale #{}", sale.id));
+        ui.label(components::semibold("Paid").size(TYPE.body).color(success));
+        ui.add_space(SPACING.xs);
 
-            ui.add_space(SPACING.md);
-            // The change stays the big figure on this screen: it is the number
-            // the cashier acts on. The receipt below is what the customer
-            // keeps, and it repeats the change because paper has to.
-            change_row(ui, &change, success);
-            ui.add_space(SPACING.md);
+        // The change is the only number the cashier acts on now.
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), TYPE.total * 1.5),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(components::numeric(&change).size(TYPE.total).color(success));
+                ui.label(components::semibold("Change").size(TYPE.body));
+            },
+        );
 
-            if let Some(detail) = receipt.as_ref() {
-                // A twenty-line sale scrolls inside the modal rather than
-                // growing it past the bottom of the window.
-                egui::ScrollArea::vertical()
-                    .max_height(420.0)
-                    .show(ui, |ui| {
-                        crate::receipt::body(ui, detail, &paper, currency, false);
-                    });
-            } else {
-                // The row was just written, so this should not happen; but a
-                // cashier standing over a paid sale is owed the figures either
-                // way, and the four we hold are better than a blank screen.
-                components::receipt_line(ui, "Cash", &state.money(sale.tendered_minor));
-                if sale.rounding_minor != 0 {
-                    components::receipt_line(
-                        ui,
-                        if sale.rounding_minor < 0 {
-                            "Rounded down"
-                        } else {
-                            "Rounded up"
-                        },
-                        &Money::new(sale.rounding_minor, currency).format(),
-                    );
-                }
-                components::receipt_line(ui, "Total", &state.money(sale.paid_minor()));
-            }
+        components::caption(ui, &format!("Sale #{} · {paid} taken", sale.id));
+        ui.add_space(SPACING.sm);
 
-            actions::footer(ui, |ui| {
-                if actions::primary(ui, "New sale").clicked() {
-                    close = true;
-                }
-                // The slip as text, because a customer who wants the receipt
-                // usually wants it in a message, not read aloud across the
-                // counter.
-                if let Some(text) = &copy_text {
-                    let copy = actions::secondary(ui, "Copy receipt")
-                        .on_hover_text("Copy this slip as text");
-                    if copy.clicked() {
-                        ui.ctx().copy_text(text.clone());
-                        // Hand the keyboard back: Space means "next sale" in
-                        // this modal, and a button left focused would copy
-                        // again and dismiss the receipt on the same press.
-                        copy.surrender_focus();
-                        copied = true;
-                    }
-                }
-                // The receipt is already written, so this cannot undo the sale;
-                // it dismisses the screen. It is quiet because "New sale" is the
-                // decision, and the cashier may only want the receipt gone.
-                if actions::quiet(ui, "Close")
-                    .on_hover_text("Close this receipt")
-                    .clicked()
-                {
-                    close = true;
-                }
-            });
-            ui.add_space(SPACING.xs);
-            if copied {
-                components::caption(ui, "Copied to the clipboard.");
-            } else {
-                components::caption(ui, "Enter or Space starts the next sale. Escape closes.");
-            }
-        });
-
-        if close
-            || (!just_finished
-                && ctx.input(|input| {
-                    input.key_pressed(egui::Key::Escape)
-                        || input.key_pressed(egui::Key::Enter)
-                        || input.key_pressed(egui::Key::Space)
-                }))
+        // The slip as text, because a customer who wants the receipt usually
+        // wants it in a message, not read aloud across the counter.
+        //
+        // This is the ghost's only action, and deliberately so: it is a readout,
+        // not a screen. The next scan ends it. A till that waits to be told the
+        // customer has gone is a till with a step in it.
+        if let Some(text) = &copy_text
+            && actions::secondary(ui, "Copy receipt")
+                .on_hover_text("Copy this slip as text")
+                .clicked()
         {
-            state.close_payment();
+            ui.ctx().copy_text(text.clone());
+            copied = true;
         }
+
+        // The confirmation replaces nothing: the ghost has no hint line of its
+        // own, because the empty cart above already says what to do next. This
+        // only appears after a copy, so it is feedback, never instruction.
+        if copied {
+            ui.add_space(SPACING.xs);
+            components::caption(ui, "Copied to the clipboard.");
+        }
+
         return;
     }
 
+    // From here the payment is open and unfinished. Everything below draws the
+    // form; the keys are routed by `shell`, so a focused field and a bare
+    // counter top behave the same.
     let Some(payment) = state.payment.as_mut() else {
         return;
     };
 
-    // The frame that opened the modal still has the keystroke that opened it —
-    // Ctrl+Enter — in its input, and Enter here means "complete the sale". A
-    // guard on the focus flag keeps that keystroke from selling the basket the
-    // cashier only meant to start paying.
+    // The frame that opened the panel still has the keystroke that opened it —
+    // Enter or Ctrl+Enter — in its input, and Enter here means "complete the
+    // sale". A guard on the focus flag keeps that keystroke from selling the
+    // basket the cashier only meant to start paying.
     let opening = payment.focus;
+
+    let palette = theme::current(ui.ctx());
+    let success = egui::Color32::from(palette.success);
     let mut complete = false;
     let mut close = false;
     let mut field_submitted = false;
 
-    crate::modules::modal(ctx, egui::Id::new("pos_payment")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        let palette = theme::current(ui.ctx());
+    // The caller has already put a gap between the lines and the footer.
+    components::divider(ui);
+    ui.add_space(SPACING.xs);
 
-        ui.label(components::semibold("Take payment").size(TYPE.heading));
-
-        ui.add_space(SPACING.md);
-        components::receipt_line(ui, "Subtotal", &subtotal);
-        if tax_minor > 0 {
-            components::receipt_line(ui, "Pre-tax", &pre_tax);
-            components::receipt_line(ui, &format!("Tax (@ {}%)", tax_rate), &tax_amount);
-        }
-        if rounding_minor != 0 {
-            // Named by the direction the drawer moved, not by the mechanism: a
-            // cashier can act on "rounded down" without knowing what a rounding
-            // step is, and the receipt says the same words.
-            let label = if rounding_minor < 0 {
-                "Rounded down"
-            } else {
-                "Rounded up"
-            };
-            components::receipt_line(ui, label, &rounding);
-        }
-        components::divider(ui);
-        crate::modules::amount_row(ui, "To pay", &due, true);
-
-        if rounding_minor != 0 {
-            // The line a shop owner stops at, so it gets the whole of it: why
-            // the figure moved, and that the sale still carries the exact total.
-            ui.add_space(SPACING.xs);
-            components::caption(
-                ui,
-                &format!(
-                    "Cash is rounded to the nearest {}, the smallest coin in circulation. \
-                     The customer pays {due}; the sale still records {subtotal}.",
-                    Money::new(crate::currencies::cash_step(currency), currency).format(),
-                ),
-            );
-        }
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Cash received");
-        ui.add_space(SPACING.xs);
-
-        let mut edited = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.sm;
-
-            let field =
-                crate::modules::text_field(ui, &mut payment.tendered, "Exact amount", 210.0);
-            if payment.focus {
-                field.request_focus();
-                payment.focus = false;
-            }
-            if field.changed() {
-                edited = true;
-            }
-            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                field_submitted = true;
-            }
-
-            if actions::secondary_compact(ui, "Clear")
-                .on_hover_text("Clear cash received")
-                .clicked()
-            {
-                payment.tendered.clear();
-                edited = true;
-            }
-        });
-
-        // Exact first, then the notes that can actually cover the bill. A chip
-        // smaller than the total can only make the drawer come up short, so it
-        // is not offered.
-        ui.add_space(SPACING.xs);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-            for &amount in &quick_amounts(currency, due_minor) {
-                let exact_amount = amount == due_minor;
-                let label = if exact_amount {
-                    "Exact".to_owned()
-                } else {
-                    Money::new(amount, currency).format()
-                };
-                let btn = egui::Button::new(
-                    egui::RichText::new(&label)
-                        .size(TYPE.small)
-                        .family(theme::semibold()),
-                )
-                .min_size(egui::vec2(0.0, 30.0));
-
-                let hint = if exact_amount {
-                    format!("Tender the exact {due}")
-                } else {
-                    format!("Tender {label}")
-                };
-                if ui.add(btn).on_hover_text(hint).clicked() {
-                    apply_denomination(payment, amount, due_minor, currency);
-                    edited = true;
-                }
-            }
-        });
-
-        // An error about the previous attempt is not about the new one.
-        if edited {
-            payment.error = None;
-        }
-
-        // The change updates as the cashier types: it is the number they read
-        // out, and waiting for Complete to show it invites a second count.
-        let tendered = if payment.tendered.trim().is_empty() {
-            Some(due_minor)
+    // The exact total, then what the drawer takes. The cashier already read
+    // these on the cart; they are repeated because the rounding line only
+    // matters at the moment money changes hands.
+    if rounding_minor != 0 {
+        let label = if rounding_minor < 0 {
+            "Rounded down"
         } else {
-            Money::parse(payment.tendered.trim(), currency)
-                .ok()
-                .map(|amount| amount.minor())
+            "Rounded up"
         };
+        components::receipt_line(ui, label, &rounding);
+    }
+    crate::modules::amount_row(ui, "To pay", &due, true);
+    ui.add_space(SPACING.sm);
 
-        ui.add_space(SPACING.sm);
-        match tendered {
-            Some(tendered) if tendered < due_minor => {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Short by {}",
-                        Money::new(due_minor - tendered, currency).format()
-                    ))
+    components::field_label(ui, "Cash received");
+    ui.add_space(SPACING.xs);
+
+    let mut edited = false;
+    let field = crate::modules::text_field(ui, &mut payment.tendered, &due, ui.available_width());
+    if payment.focus {
+        field.request_focus();
+        payment.focus = false;
+    }
+    if field.changed() {
+        edited = true;
+    }
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        field_submitted = true;
+    }
+
+    // Exact first, then the notes that can actually cover the bill. A chip
+    // smaller than the total can only make the drawer come up short, so it is
+    // not offered. Four is the strip's limit: past that it stops being a
+    // shortcut and becomes the currency.
+    ui.add_space(SPACING.xs);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+        for &amount in quick_amounts(currency, due_minor).iter().take(4) {
+            let exact_amount = amount == due_minor;
+            let label = if exact_amount {
+                "Exact".to_owned()
+            } else {
+                Money::new(amount, currency).format()
+            };
+            let btn = egui::Button::new(
+                egui::RichText::new(&label)
                     .size(TYPE.small)
-                    .color(egui::Color32::from(palette.danger)),
-                );
-            }
-            Some(tendered) => change_row(
-                ui,
-                &Money::new(tendered - due_minor, currency).format(),
-                egui::Color32::from(palette.success),
-            ),
-            // Mid-typing text that is not yet an amount is not an error.
-            None => {
-                ui.label(egui::RichText::new(" ").size(TYPE.small));
+                    .family(theme::semibold()),
+            )
+            .min_size(egui::vec2(0.0, 34.0));
+
+            let hint = if exact_amount {
+                format!("Tender the exact {due}")
+            } else {
+                format!("Tender {label}")
+            };
+            if ui.add(btn).on_hover_text(hint).clicked() {
+                apply_denomination(payment, amount, due_minor, currency);
+                edited = true;
+                // Hand the keyboard back to the amount: the next thing a
+                // cashier does is type, not click again.
+                field.request_focus();
             }
         }
-
-        if let Some(error) = &payment.error {
-            ui.add_space(SPACING.xs);
-            ui.label(
-                egui::RichText::new(error)
-                    .size(TYPE.small)
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
-
-        actions::footer(ui, |ui| {
-            if actions::primary(ui, "Complete sale").clicked() {
-                complete = true;
-            }
-            // "Cancel" here would read as cancelling the sale. The basket is
-            // intact; this only returns to it.
-            if actions::secondary(ui, "Back to cart").clicked() {
-                close = true;
-            }
-        });
-        ui.add_space(SPACING.xs);
-        components::caption(
-            ui,
-            "Enter completes the sale, Escape goes back to the cart.",
-        );
     });
 
-    if (!opening && ctx.input(|input| input.key_pressed(egui::Key::Enter))) || field_submitted {
+    // An error about the previous attempt is not about the new one.
+    if edited {
+        payment.error = None;
+    }
+
+    // The change updates as the cashier types: it is the number they read out,
+    // and waiting for Complete to show it invites a second count.
+    let tendered = if payment.tendered.trim().is_empty() {
+        Some(due_minor)
+    } else {
+        Money::parse(payment.tendered.trim(), currency)
+            .ok()
+            .map(|amount| amount.minor())
+    };
+
+    ui.add_space(SPACING.xs);
+    match tendered {
+        Some(tendered) if tendered < due_minor => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Short by {}",
+                    Money::new(due_minor - tendered, currency).format()
+                ))
+                .size(TYPE.small)
+                .color(egui::Color32::from(palette.danger)),
+            );
+        }
+        Some(tendered) => change_row(
+            ui,
+            &Money::new(tendered - due_minor, currency).format(),
+            success,
+        ),
+        // Mid-typing text that is not yet an amount is not an error.
+        None => {
+            ui.label(egui::RichText::new(" ").size(TYPE.small));
+        }
+    }
+
+    if let Some(error) = &payment.error {
+        ui.add_space(SPACING.xs);
+        ui.label(
+            egui::RichText::new(error)
+                .size(TYPE.small)
+                .color(ui.visuals().error_fg_color),
+        );
+    }
+
+    ui.add_space(SPACING.sm);
+    let label = if tendered.is_some_and(|t| t >= due_minor) {
+        "Complete sale"
+    } else {
+        "Cash is short"
+    };
+    let complete_btn = ui.add_sized(
+        [ui.available_width(), 52.0],
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(TYPE.button)
+                .family(theme::semibold())
+                .color(palette.accent_text),
+        )
+        .fill(palette.accent)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(egui::CornerRadius::same(ui_kit::tokens::RADII.sm as u8)),
+    );
+    if complete_btn.clicked() {
         complete = true;
     }
-    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-        close = true;
+
+    // "Cancel" would read as cancelling the sale. The basket is intact; this
+    // only returns to it. Same row as the key hint, because the two are the
+    // same thought: nothing here is committed until Complete.
+    ui.horizontal(|ui| {
+        if actions::quiet(ui, "Back to cart")
+            .on_hover_text("Escape")
+            .clicked()
+        {
+            close = true;
+        }
+        // The hint gives way to an error rather than stacking under it: the
+        // panel is the cart's footer and has a fixed height to stay inside.
+        if payment.error.is_none() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                components::caption(ui, "Enter pays · Esc back");
+            });
+        }
+    });
+
+    if (!opening && ui.input(|i| i.key_pressed(egui::Key::Enter))) || field_submitted {
+        complete = true;
     }
 
     if complete {
         state.confirm_payment();
-    }
-    if close {
+    } else if close {
         state.close_payment();
     }
 }
 
-/// How many one-tap amounts the payment screen offers, exact amount included.
+/// How many one-tap amounts the tender panel offers, exact amount included.
 ///
 /// Three handovers above the bill is what a customer's pocket realistically
 /// holds; past that the strip stops being a shortcut and becomes the currency.
