@@ -4822,6 +4822,179 @@ fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovement) {
 
 struct Sales;
 
+/// The cash drawer, at the top of Today.
+///
+/// One card with two states. Open: what the till expects to be in the drawer,
+/// and the one number it cannot know — what is actually there. Closed: what was
+/// counted and how it compared. Nothing is drawn before the first sale of the
+/// day, because there is nothing to count and a card saying so is noise.
+///
+/// The drawer is the shop's, not the cashier's: the count covers every sale in
+/// the shift even when the list below is scoped to one person.
+fn drawer_card(ui: &mut egui::Ui, state: &mut State) {
+    let Some(drawer) = state.drawer.clone() else {
+        return;
+    };
+    let palette = theme::current(ui.ctx());
+
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+
+        let opened_by = drawer
+            .shift
+            .opened_by
+            .as_deref()
+            .map(|name| format!(" · {name}"))
+            .unwrap_or_default();
+        let count = drawer.totals.sales_count;
+        let sales = match count {
+            0 => String::new(),
+            1 => "1 sale · ".to_owned(),
+            _ => format!("{count} sales · "),
+        };
+        let title = if drawer.shift.is_open() {
+            "Cash drawer"
+        } else {
+            "Day closed"
+        };
+        ui.horizontal(|ui| {
+            ui.label(components::semibold(title).size(TYPE.body));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                components::caption(
+                    ui,
+                    &format!("{sales}opened {}{opened_by}", drawer.shift.opened_at),
+                );
+            });
+        });
+        ui.add_space(SPACING.md);
+
+        // The figures are peers in one row, not a form: three numbers a shopkeeper
+        // reads at a glance, the same three every day.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 40.0;
+            drawer_figure(
+                ui,
+                "Cash taken",
+                &state.money(drawer.totals.cash_minor),
+                None,
+            );
+            if drawer.shift.float_minor > 0 {
+                drawer_figure(
+                    ui,
+                    "Change float",
+                    &state.money(drawer.shift.float_minor),
+                    None,
+                );
+            }
+            drawer_figure(
+                ui,
+                "Expected in drawer",
+                &state.money(drawer.expected_minor()),
+                None,
+            );
+
+            if drawer.shift.is_open() {
+                return;
+            }
+            if let Some(counted) = drawer.shift.counted_minor {
+                drawer_figure(ui, "Counted", &state.money(counted), None);
+            }
+            if let Some(difference) = drawer.difference_minor() {
+                let (text, color) = match difference.cmp(&0) {
+                    std::cmp::Ordering::Equal => ("Balanced".to_owned(), palette.success),
+                    std::cmp::Ordering::Less => (
+                        format!("Short {}", state.money(-difference)),
+                        palette.danger,
+                    ),
+                    std::cmp::Ordering::Greater => {
+                        (format!("Over {}", state.money(difference)), palette.warning)
+                    }
+                };
+                drawer_figure(ui, "Difference", &text, Some(egui::Color32::from(color)));
+            }
+        });
+
+        if !drawer.shift.is_open() {
+            return;
+        }
+
+        // The list below can be one person's; the drawer never is. Say so where
+        // the two disagree, rather than leaving a cashier to wonder whose cash
+        // they are counting.
+        if !state.report_scope().is_shop() {
+            ui.add_space(SPACING.xs);
+            components::caption(
+                ui,
+                "The drawer is the shop's: this count covers every sale since it opened.",
+            );
+        }
+
+        // A rule, because what follows is the one thing the till is asking
+        // rather than telling.
+        ui.add_space(SPACING.md);
+        let rule = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            rule.x_range(),
+            rule.top(),
+            egui::Stroke::new(1.0_f32, palette.border),
+        );
+        ui.add_space(SPACING.md);
+
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            components::field_label(ui, "Cash counted");
+            let response = text_field(ui, &mut state.drawer_count, "0", 140.0);
+            // Enter is the keyboard-first path: count, Enter, done. The button is
+            // the same act with a finger.
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                close = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if actions::primary(ui, "Close day").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            state.close_day();
+        }
+
+        if let Some(error) = state.drawer_error.clone() {
+            ui.add_space(SPACING.xs);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(palette.danger),
+            );
+        }
+
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            if drawer.shift.float_minor > 0 {
+                "Type what is in the drawer, then close. Take the takings out and leave the float."
+            } else {
+                "Type what is in the drawer, then close. Take the takings out."
+            },
+        );
+    });
+    ui.add_space(SPACING.lg);
+}
+
+/// One figure with its caption above it, in a row of peers.
+fn drawer_figure(ui: &mut egui::Ui, label: &str, value: &str, color: Option<egui::Color32>) {
+    ui.vertical(|ui| {
+        components::field_label(ui, label);
+        ui.add_space(2.0);
+        let text = components::numeric(value).size(TYPE.heading);
+        ui.label(match color {
+            Some(color) => text.color(color),
+            None => text,
+        });
+    });
+}
+
 impl Module for Sales {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Range");
@@ -4855,6 +5028,12 @@ impl Module for Sales {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The drawer belongs to Today. "7 days" is a report, and a report is not
+        // something you count.
+        if state.range == 0 {
+            drawer_card(ui, state);
+        }
+
         let scope = state.report_scope();
         let shop = scope.is_shop();
         let user = scope.user().map(str::to_owned);
@@ -4957,7 +5136,7 @@ impl Module for Settings {
                     locked_card(ui, crate::auth::Permission::ManageUsers);
                 }
             }
-            "Tax" => tax_card(ui, state),
+            "Money" => money_card(ui, state),
             "Sync" => sync_card(ui, state),
             _ => {}
         }
@@ -5858,14 +6037,23 @@ fn shop_caption(state: &State) -> &'static str {
     }
 }
 
-/// The tax rate the till charges, as a whole percentage.
+/// The two numbers that describe money the till handles but did not earn: the
+/// tax it collects on the shop's behalf, and the change it opens with.
 ///
-/// `0` means no tax — some small stores are not VAT-registered. Prices on the
-/// till are tax-inclusive: the shelf price is what the customer pays, and the
-/// receipt backs the tax out underneath the total. Changing the rate does not
-/// alter past sales; each sale records the tax it collected.
-fn tax_card(ui: &mut egui::Ui, state: &mut State) {
-    let dirty = state.tax_draft.trim() != state.settings.tax_rate_percent.to_string();
+/// `0` tax means no tax — some small stores are not VAT-registered. Prices on
+/// the till are tax-inclusive: the shelf price is what the customer pays, and
+/// the receipt backs the tax out underneath the total. Changing the rate does
+/// not alter past sales; each sale records the tax it collected.
+///
+/// The float is the cash in the drawer before the first sale. Zero is right for
+/// a shop that opens an empty drawer; a shop that starts with change sets it
+/// once, so the evening count is compared against takings plus the float instead
+/// of reading its own float as a surplus every single day.
+fn money_card(ui: &mut egui::Ui, state: &mut State) {
+    let tax_dirty = state.tax_draft.trim() != state.settings.tax_rate_percent.to_string();
+    let saved_float = state::plain_amount(state.settings.cash_float_minor, state.currency);
+    let float_dirty = state.float_draft.trim() != saved_float;
+    let palette = theme::current(ui.ctx());
 
     components::card(ui, |ui| {
         ui.set_min_width(ui.available_width());
@@ -5883,17 +6071,55 @@ fn tax_card(ui: &mut egui::Ui, state: &mut State) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.sm;
             text_field(ui, &mut state.tax_draft, "0", 120.0);
-            if dirty && actions::primary(ui, "Save").clicked() {
+            if tax_dirty && actions::primary(ui, "Save").clicked() {
                 state.save_tax_rate();
             }
         });
 
         ui.add_space(SPACING.xs);
         components::caption(ui, tax_caption(state));
+
+        ui.add_space(SPACING.md);
+        let rule = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            rule.x_range(),
+            rule.top(),
+            egui::Stroke::new(1.0_f32, palette.border),
+        );
+        ui.add_space(SPACING.md);
+
+        components::caption(
+            ui,
+            "The change in the drawer before the first sale. It is added to the \
+             day's takings when the drawer is counted, so the float never reads \
+             as a surplus.",
+        );
+        ui.add_space(SPACING.md);
+
+        components::field_label(ui, "Change float");
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.sm;
+            text_field(ui, &mut state.float_draft, "0", 120.0);
+            if float_dirty && actions::primary(ui, "Save").clicked() {
+                state.save_cash_float();
+            }
+        });
+
+        ui.add_space(SPACING.xs);
+        let caption = if float_dirty {
+            "Not saved yet.".to_owned()
+        } else {
+            format!(
+                "Counted in {} at close.",
+                state.money(state.settings.cash_float_minor)
+            )
+        };
+        components::caption(ui, &caption);
     });
 }
 
-/// What the card says under the field.
+/// What the card says under the tax field.
 fn tax_caption(state: &State) -> &'static str {
     let rate = state.settings.tax_rate_percent;
     if state.tax_draft.trim() != rate.to_string() {
