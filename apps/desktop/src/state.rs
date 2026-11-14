@@ -14,7 +14,7 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
-use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
+use crate::db::{Product, SaleLine, StockItem, Supplier};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
 
@@ -258,7 +258,7 @@ pub struct PurchaseLineDraft {
     pub cost: String,
 }
 
-/// A purchase being planned or edited, open as a modal.
+/// A purchase being planned or edited, open as the Restock page.
 pub struct PurchaseDraft {
     /// `None` while creating, `Some` while editing a plan.
     pub id: Option<i64>,
@@ -271,33 +271,6 @@ pub struct PurchaseDraft {
     /// First click arms deletion, second deletes; the row is where the mistake
     /// would be, so the confirmation lives in the form.
     pub confirm_delete: bool,
-}
-
-/// One line in the receiving screen.
-///
-/// `qty` is what arrived now, not the new total. `already` and `ordered` are
-/// there so the operator can see what is still outstanding.
-pub struct ReceiveLineDraft {
-    pub line_id: Option<i64>,
-    pub product_id: i64,
-    pub name: String,
-    pub ordered: i64,
-    pub already: i64,
-    pub qty: String,
-    pub cost: String,
-    /// Ticked for something that was not bought at all. Only a line that has
-    /// received nothing can be removed.
-    pub removed: bool,
-}
-
-/// A planned purchase being received, open as a modal.
-pub struct PurchaseReceiveDraft {
-    pub id: i64,
-    pub supplier: Option<String>,
-    pub note: String,
-    pub lines: Vec<ReceiveLineDraft>,
-    pub search: String,
-    pub error: Option<String>,
 }
 
 /// Category names offered in the product form even when the catalog is empty.
@@ -362,7 +335,7 @@ pub struct ImportDraft {
     pub error: Option<String>,
 }
 
-/// The payment screen, open as a modal over the app.
+/// The payment panel, open in the cart footer.
 ///
 /// Cash received is text, for the same reason a price is: it is mid-edit, and
 /// parsing on every keystroke would eat a half-typed `5000`. Empty means "the
@@ -370,13 +343,6 @@ pub struct ImportDraft {
 pub struct Payment {
     pub tendered: String,
     pub error: Option<String>,
-    /// Set once the sale is written. The modal then shows the change instead of
-    /// the form, so the cashier reads the number before the drawer opens.
-    pub done: Option<RecordedSale>,
-    /// The same sale read back with its lines and header. `done` drives the
-    /// screen; this is what the receipt says, and it can only be filled from
-    /// the ledger, never from the cart that has just been emptied.
-    pub detail: Option<crate::db::SaleDetail>,
     /// Put the cursor in the cash field on the first frame.
     pub focus: bool,
 }
@@ -702,13 +668,11 @@ pub struct State {
     /// Search across the supplier and note. Product names on the lines are not
     /// searched yet.
     pub purchase_search: String,
-    /// `0` all, `1` planned, `2` received.
+    /// `0` all, `1` to buy, `2` received.
     pub purchase_filter: usize,
-    /// The plan being created or edited.
+    /// The list being created or edited, open as the Restock page.
     pub purchase_editor: Option<PurchaseDraft>,
-    /// A planned purchase being counted in.
-    pub purchase_receive: Option<PurchaseReceiveDraft>,
-    /// A purchase being read, usually one already received.
+    /// A received trip being read.
     pub purchase_view: Option<crate::db::PurchaseDetail>,
 
     /// The payment screen, when it is open.
@@ -916,7 +880,6 @@ impl State {
             purchase_search: String::new(),
             purchase_filter: 0,
             purchase_editor: None,
-            purchase_receive: None,
             purchase_view: None,
             payment: None,
             drawer,
@@ -1850,16 +1813,6 @@ impl State {
     /// silently reprice something already in the basket.
     pub fn add_to_cart(&mut self, product: &Product) {
         self.notice = None;
-        // A finished sale leaves its change on the cart until the next item.
-        // Adding that item is the signal to let it go: the ghost was never a
-        // screen to dismiss, only a readout that has now been read.
-        if self
-            .payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_some())
-        {
-            self.payment = None;
-        }
         match self
             .cart
             .iter_mut()
@@ -2440,14 +2393,6 @@ impl State {
         self.purchases = crate::db::purchases(&self.store);
     }
 
-    /// Read one purchase, received or not, without opening it for editing.
-    pub fn open_purchase(&mut self, id: i64) {
-        match crate::db::purchase_detail(&self.store, id) {
-            Some(detail) => self.purchase_view = Some(detail),
-            None => self.notice = Some("That purchase is no longer there.".to_owned()),
-        }
-    }
-
     /// Open a blank plan for a new trip.
     pub fn start_purchase(&mut self) {
         self.purchase_editor = Some(PurchaseDraft {
@@ -2459,28 +2404,23 @@ impl State {
             error: None,
             confirm_delete: false,
         });
-        self.purchase_receive = None;
         self.purchase_view = None;
         self.notice = None;
     }
 
-    /// Open an existing plan for editing.
+    /// Open an existing list for editing.
     ///
-    /// A plan with anything already received is continued on the receiving
-    /// screen instead: replacing a line a movement points at would orphan the
-    /// ledger.
+    /// A received trip is a record, not a list: it opens read-only, because
+    /// replacing a line a movement points at would orphan the ledger.
     pub fn edit_purchase(&mut self, id: i64) {
         let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
             self.notice = Some("That purchase is no longer there.".to_owned());
             return;
         };
         if detail.purchase.status == crate::db::PurchaseStatus::Received {
-            self.notice = Some("That purchase has been received; it cannot be changed.".to_owned());
-            return;
-        }
-        if detail.purchase.received_count > 0 {
-            self.notice =
-                Some("Some of that purchase has arrived; continue it from Receive.".to_owned());
+            self.purchase_view = Some(detail);
+            self.purchase_editor = None;
+            self.notice = None;
             return;
         }
 
@@ -2508,7 +2448,6 @@ impl State {
             error: None,
             confirm_delete: false,
         });
-        self.purchase_receive = None;
         self.purchase_view = None;
         self.notice = None;
     }
@@ -2598,99 +2537,18 @@ impl State {
         }
     }
 
-    /// Create or update the plan on screen.
-    pub fn save_purchase(&mut self) {
+    /// Delete the list on screen. Only a trip that never arrived can go, and
+    /// only after a second tap: the same button is the undo of itself.
+    pub fn delete_purchase(&mut self) {
         let Some(draft) = self.purchase_editor.as_ref() else {
             return;
         };
-        let id = draft.id;
-        let supplier_id = draft.supplier_id.clone();
-        let note = draft.note.clone();
-        let raw: Vec<(i64, String, String, String)> = draft
-            .lines
-            .iter()
-            .map(|line| {
-                (
-                    line.product_id,
-                    line.name.clone(),
-                    line.qty.trim().to_owned(),
-                    line.cost.trim().to_owned(),
-                )
-            })
-            .collect();
-
-        if raw.is_empty() {
-            return self.purchase_error("Add at least one product to the plan.");
-        }
-
-        let mut lines = Vec::with_capacity(raw.len());
-        for (product_id, name, qty_text, cost_text) in raw {
-            let qty = match qty_text.parse::<i64>() {
-                Ok(qty) if qty > 0 => qty,
-                _ => {
-                    return self
-                        .purchase_error(format!("{name} needs a whole quantity of one or more."));
-                }
-            };
-            let unit_cost_minor = match self.parse_cost(&cost_text) {
-                Ok(cost) => cost,
-                Err(message) => {
-                    return self.purchase_error(format!("{name}: {message}"));
-                }
-            };
-            lines.push(crate::db::PurchaseLineInput {
-                product_id,
-                qty,
-                unit_cost_minor,
-            });
-        }
-
-        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
-        let result = match id {
-            Some(id) => {
-                crate::db::update_purchase(&self.store, id, supplier_id.as_deref(), &note, &lines)
-                    .map(|()| id)
-            }
-            None => crate::db::create_purchase(
-                &self.store,
-                supplier_id.as_deref(),
-                &note,
-                &lines,
-                user_id.as_deref(),
-            ),
-        };
-
-        match result {
-            Ok(_) => {
-                self.purchase_editor = None;
-                self.reload_purchases();
-                self.reload_stock();
-                self.notice = Some(if id.is_some() {
-                    "Plan updated.".to_owned()
-                } else {
-                    "Purchase planned.".to_owned()
-                });
-            }
-            Err(error) => {
-                tracing::error!(error = %error, "saving a purchase failed");
-                self.purchase_error(format!("Could not save the purchase: {error}"));
-            }
-        }
-    }
-
-    /// Arm, then confirm, deleting a plan.
-    pub fn delete_purchase(&mut self) {
-        let Some((id, armed)) = self
-            .purchase_editor
-            .as_ref()
-            .map(|draft| (draft.id, draft.confirm_delete))
-        else {
+        let Some(id) = draft.id else {
+            // Never saved, so there is nothing to delete.
+            self.purchase_editor = None;
             return;
         };
-        let Some(id) = id else {
-            return;
-        };
-        if !armed {
+        if !draft.confirm_delete {
             if let Some(draft) = self.purchase_editor.as_mut() {
                 draft.confirm_delete = true;
             }
@@ -2701,188 +2559,213 @@ impl State {
             Ok(()) => {
                 self.purchase_editor = None;
                 self.reload_purchases();
+                // The deleted list was "on its way", so the shelf's incoming
+                // count and the low-stock warnings just changed.
                 self.reload_stock();
-                self.notice = Some("Plan deleted.".to_owned());
+                self.notice = Some("List deleted.".to_owned());
             }
             Err(error) => {
                 tracing::error!(error = %error, "deleting a purchase failed");
-                self.purchase_error(format!("Could not delete the plan: {error}"));
+                self.purchase_error(format!("Could not delete it: {error}"));
             }
         }
     }
 
-    /// Open the receiving screen for a planned purchase.
-    pub fn start_receive(&mut self, id: i64) {
-        let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
-            self.notice = Some("That purchase is no longer there.".to_owned());
-            return;
+    /// The draft's lines as the database wants them.
+    ///
+    /// `allow_zero` is for receiving: a line counted at zero was not bought, and
+    /// that is a fact worth keeping. A list being saved needs a positive
+    /// quantity on every line, because "buy zero of this" is not a plan.
+    fn draft_lines(&self, allow_zero: bool) -> Result<Vec<crate::db::PurchaseLineInput>, String> {
+        let Some(draft) = self.purchase_editor.as_ref() else {
+            return Err("There is no list to save.".to_owned());
         };
-        if detail.purchase.status == crate::db::PurchaseStatus::Received {
-            self.notice = Some("That purchase has already been received.".to_owned());
-            return;
-        }
-
-        let currency = self.currency;
-        let lines = detail
-            .lines
-            .iter()
-            .map(|line| {
-                let left = (line.qty_ordered - line.qty_received).max(0);
-                ReceiveLineDraft {
-                    line_id: Some(line.id),
-                    product_id: line.product_id.unwrap_or_default(),
-                    name: line.name.clone(),
-                    ordered: line.qty_ordered,
-                    already: line.qty_received,
-                    qty: left.to_string(),
-                    cost: line
-                        .unit_cost_minor
-                        .map(|cost| plain_amount(cost, currency))
-                        .unwrap_or_default(),
-                    removed: false,
+        let mut lines = Vec::with_capacity(draft.lines.len());
+        for line in &draft.lines {
+            let qty = match line.qty.trim().parse::<i64>() {
+                Ok(qty) if qty > 0 || (allow_zero && qty == 0) => qty,
+                _ => {
+                    return Err(if allow_zero {
+                        format!("{} needs a whole quantity of zero or more.", line.name)
+                    } else {
+                        format!("{} needs a whole quantity of one or more.", line.name)
+                    });
                 }
-            })
-            .collect();
-
-        self.purchase_receive = Some(PurchaseReceiveDraft {
-            id: detail.purchase.id,
-            supplier: detail.purchase.supplier.clone(),
-            note: detail.purchase.note.clone().unwrap_or_default(),
-            lines,
-            search: String::new(),
-            error: None,
-        });
-        self.purchase_editor = None;
-        self.purchase_view = None;
-        self.notice = None;
-    }
-
-    /// Add an impulse item to the receiving screen.
-    pub fn receive_add_product(&mut self, product_id: i64) {
-        let Some((name, cost)) = self
-            .stock
-            .iter()
-            .find(|item| item.product_id == product_id)
-            .map(|item| (item.name.clone(), item.cost_minor))
-        else {
-            return;
-        };
-        let currency = self.currency;
-        let Some(draft) = self.purchase_receive.as_mut() else {
-            return;
-        };
-        if draft.lines.iter().any(|line| line.product_id == product_id) {
-            return;
-        }
-        draft.lines.push(ReceiveLineDraft {
-            line_id: None,
-            product_id,
-            name,
-            ordered: 0,
-            already: 0,
-            qty: "1".to_owned(),
-            cost: cost
-                .map(|cost| plain_amount(cost, currency))
-                .unwrap_or_default(),
-            removed: false,
-        });
-        draft.error = None;
-    }
-
-    pub fn receive_remove_line(&mut self, index: usize) {
-        if let Some(draft) = self.purchase_receive.as_mut()
-            && index < draft.lines.len()
-        {
-            draft.lines.remove(index);
-        }
-    }
-
-    /// Write what came back from the trip.
-    pub fn save_receive(&mut self) {
-        let Some(draft) = self.purchase_receive.as_ref() else {
-            return;
-        };
-        let id = draft.id;
-        let note = draft.note.clone();
-        let raw: Vec<(Option<i64>, i64, String, String, bool)> = draft
-            .lines
-            .iter()
-            .map(|line| {
-                (
-                    line.line_id,
-                    line.product_id,
-                    line.name.clone(),
-                    line.qty.trim().to_owned(),
-                    line.removed,
-                )
-            })
-            .collect();
-        let costs: Vec<String> = draft
-            .lines
-            .iter()
-            .map(|line| line.cost.trim().to_owned())
-            .collect();
-
-        let mut lines = Vec::new();
-        let mut remove = Vec::new();
-        for (index, (line_id, product_id, name, qty_text, removed)) in raw.into_iter().enumerate() {
-            if let (Some(line_id), true) = (line_id, removed) {
-                remove.push(line_id);
-                continue;
-            }
-            if removed {
-                continue;
-            }
-            let qty = match qty_text.parse::<i64>() {
-                Ok(qty) if qty >= 0 => qty,
-                _ => return self.receive_error(format!("{name} needs a whole quantity.")),
             };
-            if qty == 0 {
-                continue;
-            }
-            let unit_cost_minor = match self.parse_cost(&costs[index]) {
-                Ok(cost) => cost,
-                Err(message) => return self.receive_error(format!("{name}: {message}")),
-            };
-            lines.push(crate::db::ReceiveLine {
-                line_id,
-                product_id,
+            let unit_cost_minor = self
+                .parse_cost(&line.cost)
+                .map_err(|message| format!("{}: {message}", line.name))?;
+            lines.push(crate::db::PurchaseLineInput {
+                product_id: line.product_id,
                 qty,
                 unit_cost_minor,
             });
         }
+        Ok(lines)
+    }
 
-        if lines.is_empty() && remove.is_empty() {
-            return self.receive_error("Nothing was received.");
+    /// Create or update the list the draft describes, and return its id.
+    fn write_list(&self, lines: &[crate::db::PurchaseLineInput]) -> anyhow::Result<i64> {
+        let Some(draft) = self.purchase_editor.as_ref() else {
+            anyhow::bail!("there is no list to save");
+        };
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+        match draft.id {
+            Some(id) => crate::db::update_purchase(
+                &self.store,
+                id,
+                draft.supplier_id.as_deref(),
+                &draft.note,
+                lines,
+            )
+            .map(|()| id),
+            None => crate::db::create_purchase(
+                &self.store,
+                draft.supplier_id.as_deref(),
+                &draft.note,
+                lines,
+                user_id.as_deref(),
+            ),
         }
+    }
+
+    /// Save the list and go back to Restock.
+    pub fn save_purchase(&mut self) {
+        let lines = match self.draft_lines(false) {
+            Ok(lines) => lines,
+            Err(message) => return self.purchase_error(message),
+        };
+        if lines.is_empty() {
+            return self.purchase_error("Add at least one product to the list.");
+        }
+
+        let existing = self
+            .purchase_editor
+            .as_ref()
+            .is_some_and(|draft| draft.id.is_some());
+        match self.write_list(&lines) {
+            Ok(_) => {
+                self.purchase_editor = None;
+                self.reload_purchases();
+                self.reload_stock();
+                self.notice = Some(if existing {
+                    "List updated.".to_owned()
+                } else {
+                    "List saved.".to_owned()
+                });
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "saving a purchase failed");
+                self.purchase_error(format!("Could not save the list: {error}"));
+            }
+        }
+    }
+
+    /// Close the trip: write what was actually bought and add it to stock.
+    ///
+    /// The list on screen is the count sheet. A line's quantity is what came
+    /// home — fewer than planned is normal, more is a market with a good deal —
+    /// and the same number is what enters the shelf. The trip is over when this
+    /// returns; there is no half-received state to come back to.
+    ///
+    /// A saved list is not rewritten first: its quantities are the plan, and the
+    /// numbers on screen are what arrived. Only a list that was never saved is
+    /// written here, so a trip planned at the market can be received in one go.
+    pub fn receive_purchase(&mut self) {
+        let lines = match self.draft_lines(true) {
+            Ok(lines) => lines,
+            Err(message) => return self.purchase_error(message),
+        };
+        if lines.is_empty() {
+            return self.purchase_error("Add at least one product to the trip.");
+        }
+        if !lines.iter().any(|line| line.qty > 0) {
+            return self
+                .purchase_error("Type what came home on at least one line, or delete the list.");
+        }
+
+        let unsaved = self
+            .purchase_editor
+            .as_ref()
+            .is_some_and(|draft| draft.id.is_none());
+        let id = if unsaved {
+            // A count sheet may carry a line that brought nothing home, but a
+            // plan may not: "buy zero of this" is not something the list can say.
+            // Writing only the bought lines keeps the new purchase honest and
+            // leaves the zero behind without an error at the counter.
+            let bought: Vec<_> = lines.iter().filter(|line| line.qty > 0).cloned().collect();
+            match self.write_list(&bought) {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(error = %error, "saving a purchase before receiving it failed");
+                    return self.purchase_error(format!("Could not save the list: {error}"));
+                }
+            }
+        } else {
+            match self.purchase_editor.as_ref().and_then(|draft| draft.id) {
+                Some(id) => id,
+                None => return,
+            }
+        };
+
+        let note = self
+            .purchase_editor
+            .as_ref()
+            .map(|draft| draft.note.clone())
+            .unwrap_or_default();
+        let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
+            return self.purchase_error("That purchase is no longer there.");
+        };
+        // Line ids are matched by product, not carried in the draft: saving a
+        // list rewrites its rows, so an id captured when the page opened may
+        // already be gone.
+        let mut existing: Vec<(i64, i64)> = detail
+            .lines
+            .iter()
+            .filter_map(|line| line.product_id.map(|product_id| (product_id, line.id)))
+            .collect();
+
+        let mut received = Vec::with_capacity(lines.len());
+        for line in lines {
+            let line_id = existing
+                .iter()
+                .position(|(product_id, _)| *product_id == line.product_id)
+                .map(|index| existing.remove(index).1);
+            received.push(crate::db::ReceiveLine {
+                line_id,
+                product_id: line.product_id,
+                qty: line.qty,
+                unit_cost_minor: line.unit_cost_minor,
+            });
+        }
+        // A line that is no longer on the sheet was a planning mistake. It can
+        // go, because nothing was ever received against it.
+        let remove: Vec<i64> = existing.into_iter().map(|(_, line_id)| line_id).collect();
 
         let user_id = self.session.as_ref().map(|session| session.user_id.clone());
         match crate::db::receive_purchase(
             &self.store,
             id,
-            &lines,
+            &received,
             &remove,
             &note,
             user_id.as_deref(),
         ) {
             Ok(()) => {
-                let units: i64 = lines.iter().map(|line| line.qty).sum();
-                self.purchase_receive = None;
+                let units: i64 = received.iter().map(|line| line.qty).sum();
+                self.purchase_editor = None;
+                self.purchase_view = None;
                 self.reload_purchases();
                 self.reload_stock();
                 self.reload_products();
-                self.notice = Some(if units == 0 {
-                    "Nothing was bought; the plan was cleared.".to_owned()
-                } else {
-                    format!(
-                        "Received {units} unit{}.",
-                        if units == 1 { "" } else { "s" }
-                    )
-                });
+                self.notice = Some(format!(
+                    "Received {units} unit{}.",
+                    if units == 1 { "" } else { "s" }
+                ));
             }
             Err(error) => {
                 tracing::error!(error = %error, "receiving a purchase failed");
-                self.receive_error(format!("Could not receive it: {error}"));
+                self.purchase_error(format!("Could not receive it: {error}"));
             }
         }
     }
@@ -2903,12 +2786,6 @@ impl State {
 
     fn purchase_error(&mut self, message: impl Into<String>) {
         if let Some(draft) = self.purchase_editor.as_mut() {
-            draft.error = Some(message.into());
-        }
-    }
-
-    fn receive_error(&mut self, message: impl Into<String>) {
-        if let Some(draft) = self.purchase_receive.as_mut() {
             draft.error = Some(message.into());
         }
     }
@@ -3051,6 +2928,7 @@ impl State {
 
     pub fn clear_cart(&mut self) {
         self.cart.clear();
+        self.payment = None;
         self.cart_quantity = None;
         self.notice = None;
     }
@@ -3106,13 +2984,11 @@ impl State {
 
     /// Whether the basket is being paid for right now.
     ///
-    /// A finished sale keeps its [`Payment`] for the change readout, but it is
-    /// not tendering: the cart is empty and the next scan is a new customer.
-    /// Everything that freezes the till asks this, not `payment.is_some()`.
+    /// The payment exists only while the tender panel is open. A written sale
+    /// clears it before the next frame, so the till is never frozen behind a
+    /// finished sale.
     pub fn is_tendering(&self) -> bool {
-        self.payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_none())
+        self.payment.is_some()
     }
 
     /// Open the payment screen. Does nothing when the cart is empty or the
@@ -3133,8 +3009,6 @@ impl State {
         self.payment = Some(Payment {
             tendered: String::new(),
             error: None,
-            done: None,
-            detail: None,
             focus: true,
         });
     }
@@ -3148,9 +3022,6 @@ impl State {
         let Some(payment) = self.payment.as_ref() else {
             return;
         };
-        if payment.done.is_some() {
-            return;
-        }
 
         let due_minor = self.due_minor();
         let tendered_text = payment.tendered.trim().to_owned();
@@ -3197,8 +3068,15 @@ impl State {
                 .map(|session| session.user_id.as_str()),
             shift_uid.as_deref(),
         ) {
-            Ok(sale) => {
+            Ok(_) => {
                 self.cart.clear();
+                // The sale is written, so the tender panel has done its job.
+                // Leaving a change readout behind would make an empty cart look
+                // like a cart that never cleared; the change is on the sale.
+                self.payment = None;
+                // Hand the keyboard back to the scanner: the next barcode is
+                // the next customer's first item.
+                self.scan_focus = true;
                 // The sale wrote one negative movement per tracked line, in the
                 // same transaction. Re-read the sums now so the Inventory list
                 // agrees with what just happened.
@@ -3206,16 +3084,6 @@ impl State {
                 // The drawer gained this sale's cash; the card on Today must
                 // say so without waiting for a restart.
                 self.refresh_drawer();
-                // Read the sale back once, here, so the confirmation can print
-                // a receipt instead of four remembered numbers. The cart is
-                // already empty: this is the only copy of what was sold.
-                let detail = crate::db::sale_detail(&self.store, sale.id);
-                if let Some(payment) = self.payment.as_mut() {
-                    payment.error = None;
-                    payment.done = Some(sale);
-                    payment.detail = detail;
-                    payment.focus = true;
-                }
             }
             Err(error) => {
                 tracing::error!(error = %error, "recording a sale failed");
@@ -3347,6 +3215,171 @@ mod tests {
         }
     }
 
+    /// A trip that was never saved is still a trip: planning at the market and
+    /// counting in should not need a save in between, and nothing reaches the
+    /// shelf except through receiving.
+    #[test]
+    fn a_trip_planned_at_the_market_is_received_in_one_go() {
+        let (mut state, path) = state("receive-unsaved", Currency::UGX);
+        state
+            .store
+            .conn()
+            .execute("UPDATE products SET tracked = 1 WHERE id = 1", [])
+            .expect("track the seeded item");
+        state.reload_stock();
+
+        state.start_purchase();
+        state
+            .purchase_editor
+            .as_mut()
+            .expect("open")
+            .lines
+            .push(PurchaseLineDraft {
+                product_id: 1,
+                name: "Test item".to_owned(),
+                qty: "3".to_owned(),
+                cost: "500".to_owned(),
+            });
+
+        assert_eq!(state.stock[0].on_hand, 0, "a plan moves no stock");
+        state.receive_purchase();
+
+        assert!(state.purchase_editor.is_none(), "the trip is closed");
+        let trip = state.purchases.first().expect("one trip");
+        assert_eq!(trip.status, crate::db::PurchaseStatus::Received);
+        assert_eq!(trip.count_label(), "3 items");
+        assert_eq!(trip.cost_minor, Some(1_500), "three at five hundred");
+        assert_eq!(state.stock[0].on_hand, 3, "the shelf moved on receiving");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A count sheet typed at the market can carry a line that brought nothing
+    /// home. Writing that list must not refuse the whole trip over a zero the
+    /// receiving step is about to ignore, and the saved plan must not claim to
+    /// have ordered something nobody bought.
+    #[test]
+    fn an_unsaved_trip_can_count_a_line_at_zero() {
+        let (mut state, path) = state("receive-unsaved-zero", Currency::UGX);
+        crate::db::insert_product(&state.store, "Soap", 200, "Test", None, None)
+            .expect("seed product");
+        state
+            .store
+            .conn()
+            .execute("UPDATE products SET tracked = 1", [])
+            .expect("track everything");
+        state.reload_stock();
+
+        state.start_purchase();
+        for (product_id, name, qty) in [(1, "Test item", "2"), (2, "Soap", "0")] {
+            state
+                .purchase_editor
+                .as_mut()
+                .expect("open")
+                .lines
+                .push(PurchaseLineDraft {
+                    product_id,
+                    name: name.to_owned(),
+                    qty: qty.to_owned(),
+                    cost: String::new(),
+                });
+        }
+        state.receive_purchase();
+
+        assert!(
+            state
+                .purchase_editor
+                .as_ref()
+                .is_none_or(|draft| draft.error.is_none()),
+            "a zero line is not an error"
+        );
+        let trip = state.purchases.first().expect("the trip");
+        assert_eq!(trip.status, crate::db::PurchaseStatus::Received);
+        assert_eq!(trip.count_label(), "2 items", "only what was bought");
+        let detail = crate::db::purchase_detail(&state.store, trip.id).expect("detail");
+        assert_eq!(detail.lines.len(), 1, "the zero never reached the plan");
+        let soap = state
+            .stock
+            .iter()
+            .find(|item| item.product_id == 2)
+            .expect("soap is still tracked");
+        assert_eq!(soap.on_hand, 0, "nothing came home for it");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The list is the count sheet: a line counted short is recorded as short,
+    /// a line counted at zero was not bought, and a line taken off the sheet was
+    /// never bought at all. One trip, three different truths.
+    #[test]
+    fn a_received_trip_keeps_the_difference_between_plan_and_count() {
+        let (mut state, path) = state("receive-short", Currency::UGX);
+        for (name, price) in [("Test item", 100), ("Soap", 200), ("Tea", 300)] {
+            crate::db::insert_product(&state.store, name, price, "Test", None, None)
+                .expect("seed product");
+        }
+        state
+            .store
+            .conn()
+            .execute("UPDATE products SET tracked = 1", [])
+            .expect("track everything");
+        state.reload_stock();
+        state.reload_products();
+
+        state.start_purchase();
+        for (product_id, name, qty) in [(1, "Test item", "5"), (2, "Soap", "4"), (3, "Tea", "2")] {
+            state
+                .purchase_editor
+                .as_mut()
+                .expect("open")
+                .lines
+                .push(PurchaseLineDraft {
+                    product_id,
+                    name: name.to_owned(),
+                    qty: qty.to_owned(),
+                    cost: "500".to_owned(),
+                });
+        }
+        state.save_purchase();
+        assert!(state.purchase_editor.is_none(), "saving returns to Restock");
+        assert_eq!(state.purchases[0].count_label(), "11 items");
+
+        let id = state.purchases[0].id;
+        state.edit_purchase(id);
+        let draft = state.purchase_editor.as_mut().expect("reopened");
+        draft.lines[0].qty = "2".to_owned(); // short
+        draft.lines[1].qty = "0".to_owned(); // not bought
+        let tea = draft.lines[2].product_id;
+        state.purchase_remove_line(tea); // never bought
+        state.receive_purchase();
+
+        let trip = state.purchases.first().expect("the trip");
+        assert_eq!(trip.status, crate::db::PurchaseStatus::Received);
+        assert_eq!(trip.count_label(), "2 of 9 bought");
+        assert_eq!(trip.cost_minor, Some(1_000), "two at five hundred");
+
+        let detail = crate::db::purchase_detail(&state.store, trip.id).expect("the trip, in full");
+        assert_eq!(
+            detail.lines.len(),
+            2,
+            "the line taken off the sheet is gone"
+        );
+        let soap = state
+            .stock
+            .iter()
+            .find(|item| item.product_id == 2)
+            .expect("soap is still tracked");
+        assert_eq!(soap.on_hand, 0, "a line counted at zero adds nothing");
+        let tea = state
+            .stock
+            .iter()
+            .find(|item| item.product_id == 3)
+            .expect("tea is still tracked");
+        assert_eq!(tea.on_hand, 0, "a line taken off the sheet adds nothing");
+
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The dashboard is open to everyone; the scope is what narrows. A cashier
     /// reads their own sales, a manager reads the shop's, and an approval buys
     /// a cashier the shop view for the same minute it buys anything else.
@@ -3475,7 +3508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sale_empties_the_cart_and_reports_the_change() {
+    fn a_sale_empties_the_cart_and_closes_the_payment() {
         let (mut state, path) = state("paid", Currency::UGX);
         state.cart = vec![line("Sugar", 1, 340), line("Soap", 2, 500)];
 
@@ -3483,28 +3516,22 @@ mod tests {
         state.payment.as_mut().expect("open").tendered = "2000".to_owned();
         state.confirm_payment();
 
-        let sale = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.done.clone())
-            .expect("the sale was recorded");
-        assert_eq!(sale.total_minor, 1_340);
-        assert_eq!(sale.rounding_minor, -40, "1340 rounds down to 1300");
-        assert_eq!(sale.paid_minor(), 1_300);
-        assert_eq!(sale.change_minor, 700);
+        assert!(
+            state.payment.is_none(),
+            "the tender panel closes with the sale"
+        );
+        assert!(state.cart.is_empty(), "the till is ready for the next sale");
 
-        // The confirmation prints the receipt, so the lines have to come back
-        // from the ledger — the cart they came from is already empty.
-        let detail = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.detail.as_ref())
-            .expect("the sale was read back");
+        // The cart is already empty, so the sale is read back from the ledger.
+        let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+        let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+        assert_eq!(detail.total_minor, 1_340);
+        assert_eq!(detail.rounding_minor, -40, "1340 rounds down to 1300");
+        assert_eq!(detail.paid_minor, 1_300);
+        assert_eq!(detail.change_minor, 700);
         assert_eq!(detail.lines.len(), 2);
         assert_eq!(detail.lines[0].name, "Sugar");
-        assert_eq!(detail.change_minor, 700);
 
-        assert!(state.cart.is_empty(), "the till is ready for the next sale");
         assert_eq!(crate::db::totals(&state.store, 3, None), (1, 1_300));
         // The sale carries the person, not the shop: a till with three cashiers
         // has to be able to say which of them took this money.
@@ -3526,13 +3553,11 @@ mod tests {
         state.start_payment();
         state.confirm_payment();
 
-        let sale = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.done.clone())
-            .expect("the sale was recorded");
-        assert_eq!(sale.tendered_minor, 300);
-        assert_eq!(sale.change_minor, 0);
+        assert!(state.payment.is_none());
+        let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+        let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+        assert_eq!(detail.tendered_minor, 300);
+        assert_eq!(detail.change_minor, 0);
 
         let _ = std::fs::remove_file(path);
     }
@@ -3549,7 +3574,6 @@ mod tests {
         state.confirm_payment();
 
         let payment = state.payment.as_ref().expect("still open");
-        assert!(payment.done.is_none(), "nothing was recorded");
         assert_eq!(payment.error.as_deref(), Some("That is USh 100 short."));
         assert_eq!(state.cart.len(), 1, "the basket is untouched");
         assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
@@ -3557,7 +3581,7 @@ mod tests {
         // Correcting the field completes the sale.
         state.payment.as_mut().expect("open").tendered = "500".to_owned();
         state.confirm_payment();
-        assert!(state.payment.as_ref().expect("open").done.is_some());
+        assert!(state.payment.is_none());
         assert!(state.cart.is_empty());
 
         let _ = std::fs::remove_file(path);

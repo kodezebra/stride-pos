@@ -250,12 +250,6 @@ impl PosShell {
         crate::modules::track_modal(ui.ctx(), &mut self.state);
         crate::modules::stock_move_modal(ui.ctx(), &mut self.state);
         crate::modules::stock_history_modal(ui.ctx(), &mut self.state);
-        // Purchases' three surfaces: planning a trip, counting one in, and
-        // reading a finished one. Receive is drawn after the editor so an
-        // impulse add never opens under the plan behind it.
-        crate::modules::purchase_editor_modal(ui.ctx(), &mut self.state);
-        crate::modules::purchase_receive_modal(ui.ctx(), &mut self.state);
-        crate::modules::purchase_view_modal(ui.ctx(), &mut self.state);
         // Choosing the file to read or the folder to write into. Drawn before
         // the typed import form so that "Type the path instead" can hand the
         // screen over in the same frame, without a flash of both.

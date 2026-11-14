@@ -46,12 +46,12 @@ product deletes its history, because the ledger is operational and not a
 financial record. Cashiers can see stock; a manager or the owner records a
 movement.
 
-**Purchases** — a shopping list for the shop, not a stock movement. Start a plan
+**Restock** — a shopping list for the shop, not a stock movement. Start a list
 before a trip, add what is low in one click, adjust quantities at the market,
 and receive only what you actually bought. Each received line writes one stock
 movement and can carry a unit cost, which becomes that product's last known cost.
-A plan with nothing received can still be edited or deleted; once goods start
-arriving, it is continued on the receiving screen. Purchases are local-only for
+Receiving is one act: a trip that came home short says so, and a received list is
+read-only because a movement points at its lines. Purchases are local-only for
 now.
 
 **Sales** — every completed sale in the chosen range, newest first.

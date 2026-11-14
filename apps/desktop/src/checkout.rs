@@ -6,10 +6,10 @@
 //! muscle memory; a modal that covers the workspace throws that memory away
 //! every single sale.
 //!
-//! Two states, one panel. Before the sale: what is due, what the customer
-//! handed over, what comes back. After: the change, big, and the sale number —
-//! and the cart is already empty, so the next customer needs no "new sale"
-//! button at all. The switch is [`crate::state::Payment::done`].
+//! One state, one panel. It asks what is due, what the customer handed over,
+//! and what comes back. Completing the sale closes the panel and empties the
+//! cart in the same frame, so the next customer starts from a clean till with
+//! no "new sale" button to press.
 //!
 //! Cash only. The `payments` table already has a `method` column and mobile money
 //! is a new row rather than a migration, but a method picker with one method in
@@ -41,80 +41,9 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
     let due_minor = state.due_minor();
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
-    // Built before the payment is borrowed: the slip is rendered from state the
-    // payment does not own, and the ghost panel only shows its text form.
-    let shop = state.settings.shop_name().to_owned();
-    let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
 
-    // A finished sale is a different panel and needs no mutable payment. The
-    // cart is already empty, so this is the change the cashier is counting out
-    // plus the number the customer might come back with.
-    if let Some(payment) = state.payment.as_mut()
-        && let Some(sale) = payment.done.clone()
-    {
-        // Read before the borrow ends; nothing below writes to it.
-        payment.focus = false;
-        let receipt = payment.detail.clone();
-
-        let change = state.money(sale.change_minor);
-        let paid = state.money(sale.paid_minor());
-        let copy_text = receipt
-            .as_ref()
-            .map(|detail| crate::receipt::plain(detail, &paper, currency));
-
-        let palette = theme::current(ui.ctx());
-        let success = egui::Color32::from(palette.success);
-        let mut copied = false;
-
-        ui.add_space(SPACING.sm);
-        components::divider(ui);
-        ui.add_space(SPACING.sm);
-
-        ui.label(components::semibold("Paid").size(TYPE.body).color(success));
-        ui.add_space(SPACING.xs);
-
-        // The change is the only number the cashier acts on now.
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), TYPE.total * 1.5),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.label(components::numeric(&change).size(TYPE.total).color(success));
-                ui.label(components::semibold("Change").size(TYPE.body));
-            },
-        );
-
-        components::caption(ui, &format!("Sale #{} · {paid} taken", sale.id));
-        ui.add_space(SPACING.sm);
-
-        // The slip as text, because a customer who wants the receipt usually
-        // wants it in a message, not read aloud across the counter.
-        //
-        // This is the ghost's only action, and deliberately so: it is a readout,
-        // not a screen. The next scan ends it. A till that waits to be told the
-        // customer has gone is a till with a step in it.
-        if let Some(text) = &copy_text
-            && actions::secondary(ui, "Copy receipt")
-                .on_hover_text("Copy this slip as text")
-                .clicked()
-        {
-            ui.ctx().copy_text(text.clone());
-            copied = true;
-        }
-
-        // The confirmation replaces nothing: the ghost has no hint line of its
-        // own, because the empty cart above already says what to do next. This
-        // only appears after a copy, so it is feedback, never instruction.
-        if copied {
-            ui.add_space(SPACING.xs);
-            components::caption(ui, "Copied to the clipboard.");
-        }
-
-        return;
-    }
-
-    // From here the payment is open and unfinished. Everything below draws the
-    // form; the keys are routed by `shell`, so a focused field and a bare
-    // counter top behave the same.
+    // Everything below draws the form; the keys are routed by `shell`, so a
+    // focused field and a bare counter top behave the same.
     let Some(payment) = state.payment.as_mut() else {
         return;
     };
@@ -419,8 +348,6 @@ mod tests {
         let mut payment = state::Payment {
             tendered: String::new(),
             error: Some("Previous error".into()),
-            done: None,
-            detail: None,
             focus: false,
         };
 

@@ -72,8 +72,8 @@ pub struct SaleLine {
 
 /// A sale after it is written.
 ///
-/// The amounts are the ones the cashier reads out, so the confirmation screen
-/// does not have to re-derive them from a cart that is now empty.
+/// The amounts are the ones the cashier reads out, so a caller does not have to
+/// re-derive them from a cart that is now empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSale {
     pub id: i64,
@@ -92,6 +92,7 @@ pub struct RecordedSale {
 
 impl RecordedSale {
     /// What the customer paid, and what the drawer gained.
+    #[cfg(test)]
     pub fn paid_minor(&self) -> i64 {
         self.total_minor + self.rounding_minor
     }
@@ -347,11 +348,13 @@ pub struct StockMovement {
     pub user: Option<String>,
 }
 
-/// Where a purchase is in the only lifecycle it has.
+/// Where a purchase is in the only lifecycle it has: a shopping list, then a
+/// record of a trip.
 ///
-/// There is no "ordered" or "sent" state: the shop buys in person, so a plan is
-/// a list until goods arrive. A partially received purchase is still `Planned`
-/// with some lines counted, which the screen reads as "3 of 5 received".
+/// There is no "ordered", "sent" or "part received" state. The shop buys in
+/// person, so a list is a list until the goods are in hand, and the moment they
+/// are in hand the trip is over. Receiving is one act, not a series of
+/// deliveries to track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PurchaseStatus {
     Planned,
@@ -359,13 +362,6 @@ pub enum PurchaseStatus {
 }
 
 impl PurchaseStatus {
-    pub fn key(self) -> &'static str {
-        match self {
-            PurchaseStatus::Planned => "planned",
-            PurchaseStatus::Received => "received",
-        }
-    }
-
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "planned" => Some(PurchaseStatus::Planned),
@@ -376,7 +372,7 @@ impl PurchaseStatus {
 
     pub fn label(self) -> &'static str {
         match self {
-            PurchaseStatus::Planned => "Planned",
+            PurchaseStatus::Planned => "To buy",
             PurchaseStatus::Received => "Received",
         }
     }
@@ -407,22 +403,21 @@ pub struct Purchase {
 }
 
 impl Purchase {
-    /// Whether some, but not all, of the ordered units have arrived.
-    pub fn is_partial(&self) -> bool {
-        self.status == PurchaseStatus::Planned && self.received_count > 0
-    }
-
-    /// The line under the supplier in the list: "3 of 5 received" while a trip
-    /// is part-done, otherwise the count ordered.
-    pub fn progress(&self) -> String {
-        if self.is_partial() {
-            format!("{} of {} received", self.received_count, self.unit_count)
+    /// The count under the title: what came in on a received trip, what is on
+    /// the list while it is still to buy.
+    ///
+    /// A trip that came home short says so — "6 of 10 bought" is the number the
+    /// owner wants — but one that came home with extra is just "12 items".
+    pub fn count_label(&self) -> String {
+        let (shown, planned) = match self.status {
+            PurchaseStatus::Planned => (self.unit_count, self.unit_count),
+            PurchaseStatus::Received => (self.received_count, self.unit_count),
+        };
+        let items = if shown == 1 { "item" } else { "items" };
+        if shown < planned {
+            format!("{shown} of {planned} bought")
         } else {
-            format!(
-                "{} item{}",
-                self.unit_count,
-                if self.unit_count == 1 { "" } else { "s" }
-            )
+            format!("{shown} {items}")
         }
     }
 }
@@ -912,8 +907,9 @@ pub const MIGRATIONS: &[Migration] = &[
     // are already on the shelf.
     //
     // `status` has two values, not a lifecycle. A purchase is either still a
-    // plan or it has been received in full; a partial delivery is the same plan
-    // with some lines already counted, which the screen reads as "3 of 5".
+    // plan or it is closed. This migration also allowed a plan to be counted
+    // against without being closed, which is what migration 15 repairs; nothing
+    // since opens that door, so receiving is one act, not a half state.
     // `unit_cost_minor` is nullable because a market trip often has no clean
     // per-unit price and a missing cost must never block receiving.
     //
@@ -1036,6 +1032,41 @@ pub const MIGRATIONS: &[Migration] = &[
             ALTER TABLE sales ADD COLUMN receipt_no TEXT;
             CREATE UNIQUE INDEX IF NOT EXISTS sales_receipt_no
                 ON sales (origin_device, receipt_no) WHERE receipt_no IS NOT NULL;
+        "#,
+    },
+    // Close the half-received trips an earlier build left open.
+    //
+    // Migration 12 let a plan sit at `planned` while lines were counted against
+    // it, so a tills-in-the-field database can still hold "3 of 5 bought" with
+    // no way to finish: receiving again would add the first three to the shelf a
+    // second time. A trip is one act now, so those rows are what they always
+    // were in fact — a finished trip that came home short — and that is what
+    // this records. `received_at` comes from the last movement that actually
+    // arrived, falling back to the day the list was written, because the
+    // receiving happened whenever the stock moved, not now.
+    //
+    // The two of five that never came home are not invented as a new list: the
+    // shortfall reads on the closed trip, and the next trip is the operator's to
+    // plan. No ledger row is written or removed here — only the status that made
+    // a second receive possible.
+    Migration {
+        version: 15,
+        name: "close_half_received_purchases",
+        sql: r#"
+            UPDATE purchases
+               SET status = 'received',
+                   received_at = COALESCE(
+                       (SELECT MAX(m.created_at)
+                          FROM stock_movements m
+                          JOIN purchase_lines l ON l.id = m.purchase_line_id
+                         WHERE l.purchase_id = purchases.id),
+                       created_at
+                   )
+             WHERE status = 'planned'
+               AND EXISTS (
+                       SELECT 1 FROM purchase_lines l
+                        WHERE l.purchase_id = purchases.id AND l.qty_received > 0
+                   );
         "#,
     },
 ];
@@ -2589,7 +2620,8 @@ pub fn purchases(store: &storage::Store) -> Vec<Purchase> {
                 COUNT(l.id),
                 COALESCE(SUM(l.qty_ordered), 0),
                 COALESCE(SUM(l.qty_received), 0),
-                SUM(l.qty_ordered * l.unit_cost_minor)
+                SUM(CASE WHEN p.status = 'received' THEN l.qty_received
+                         ELSE l.qty_ordered END * l.unit_cost_minor)
          FROM purchases p
          LEFT JOIN suppliers sup ON sup.id = p.supplier_id
          LEFT JOIN purchase_lines l ON l.purchase_id = p.id
@@ -2744,7 +2776,7 @@ pub fn update_purchase(
     )?;
     anyhow::ensure!(
         received == 0,
-        "some of this purchase has arrived; continue it from Receive"
+        "some of this purchase has arrived; it cannot be changed"
     );
 
     if let Some(supplier_id) = supplier_id {
@@ -2800,16 +2832,18 @@ pub fn delete_planned_purchase(store: &storage::Store, id: i64) -> anyhow::Resul
     Ok(())
 }
 
-/// Count what came back from a trip.
+/// Close a trip.
 ///
 /// Every counted unit writes one `receive` movement and advances its line, in
-/// the same transaction. A line left at `qty_received = qty_ordered` closes; a
-/// line still short leaves the purchase planned, ready for a second trip.
+/// the same transaction, and the purchase becomes `Received`. There is no
+/// half-received state: coming home is one act, and a second trip is a second
+/// list.
 ///
-/// `lines` carries the quantities received now. A line with `line_id: None` is
-/// an impulse buy: it becomes a fully received line of its own. `remove` holds
-/// lines that were not bought at all; only a line that has received nothing can
-/// be removed, because a movement already points at it otherwise.
+/// `lines` carries what was bought. A line with `line_id: None` is an impulse
+/// buy: it becomes a fully received line of its own. A line counted at zero is
+/// kept as not bought, which is the truth about that trip. `remove` holds lines
+/// that were a planning mistake; they are deleted, and the ledger is untouched
+/// because nothing was ever received against them.
 ///
 /// `note` is the purchase's final note, editable at receiving time.
 pub fn receive_purchase(
@@ -2836,6 +2870,20 @@ pub fn receive_purchase(
     anyhow::ensure!(
         status == "planned",
         "this purchase has already been received"
+    );
+
+    // Migration 15 closed the trips an earlier build left half-received, and
+    // nothing since writes a count without closing. The check stays because the
+    // cost of being wrong is a second copy of the goods on the shelf, and the
+    // database is a file a person can edit.
+    let already: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(qty_received), 0) FROM purchase_lines WHERE purchase_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        already == 0,
+        "some of this purchase has already arrived; it cannot be received twice"
     );
 
     for line in lines {
@@ -2871,28 +2919,24 @@ pub fn receive_purchase(
 
         let line_id = match line.line_id {
             Some(line_id) => {
-                let (ordered, already, belongs): (i64, i64, bool) = transaction
+                let belongs: bool = transaction
                     .query_row(
-                        "SELECT qty_ordered, qty_received, purchase_id = ?2
-                         FROM purchase_lines WHERE id = ?1",
+                        "SELECT purchase_id = ?2 FROM purchase_lines WHERE id = ?1",
                         (line_id, id),
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| row.get(0),
                     )
                     .optional()?
                     .context("that purchase line no longer exists")?;
                 anyhow::ensure!(belongs, "that line belongs to another purchase");
 
-                let left = ordered - already;
-                anyhow::ensure!(
-                    line.qty <= left,
-                    "{} has only {} left to receive",
-                    product.0,
-                    left.max(0)
-                );
-
+                // The count sheet is the truth about the trip. Buying more than
+                // planned means the plan understated it, so the ordered count is
+                // raised to match instead of refusing goods that are already in
+                // the bag.
                 transaction.execute(
                     "UPDATE purchase_lines
-                     SET qty_received = qty_received + ?2,
+                     SET qty_ordered = MAX(qty_ordered, ?2),
+                         qty_received = qty_received + ?2,
                          unit_cost_minor = COALESCE(?3, unit_cost_minor)
                      WHERE id = ?1",
                     (line_id, line.qty, line.unit_cost_minor),
@@ -2969,38 +3013,26 @@ pub fn receive_purchase(
         transaction.execute("DELETE FROM purchase_lines WHERE id = ?1", [line_id])?;
     }
 
-    let (total, open): (i64, i64) = transaction.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN qty_received < qty_ordered THEN 1 ELSE 0 END), 0)
-         FROM purchase_lines WHERE purchase_id = ?1",
+    let total: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM purchase_lines WHERE purchase_id = ?1",
         [id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
 
-    // Every line was marked "Not bought": there is nothing left to plan and
-    // nothing to receive. Keeping an empty purchase would leave a ghost in the
-    // list that can only be edited to add lines or deleted.
+    // Every line was removed: there is nothing left to plan and nothing to
+    // receive. Keeping an empty purchase would leave a ghost in the list that
+    // can only be edited to add lines or deleted.
     if total == 0 {
         transaction.execute("DELETE FROM purchases WHERE id = ?1", [id])?;
         transaction.commit()?;
         return Ok(());
     }
 
-    let finished = open == 0;
-
     transaction.execute(
         "UPDATE purchases
-         SET note = ?2, status = ?3,
-             received_at = CASE WHEN ?3 = 'received' THEN datetime('now') ELSE NULL END
+         SET note = ?2, status = 'received', received_at = datetime('now')
          WHERE id = ?1",
-        (
-            id,
-            optional_text(note),
-            if finished {
-                PurchaseStatus::Received.key()
-            } else {
-                PurchaseStatus::Planned.key()
-            },
-        ),
+        (id, optional_text(note)),
     )?;
 
     transaction.commit()?;
@@ -6057,13 +6089,14 @@ mod tests {
         assert_eq!(list[0].status, PurchaseStatus::Planned);
         assert_eq!(list[0].unit_count, 5);
         assert_eq!(list[0].cost_minor, Some(500));
-        assert_eq!(list[0].progress(), "5 items");
+        assert_eq!(list[0].count_label(), "5 items");
         assert_eq!(
             purchase_detail(&store, id).expect("detail").lines[0].name,
             "Soap"
         );
 
-        // Three arrive. The ledger moves; the plan stays open.
+        // Three arrive, and the trip is over: there is no half-received state
+        // to come back to.
         receive_purchase(
             &store,
             id,
@@ -6077,62 +6110,99 @@ mod tests {
             "",
             None,
         )
-        .expect("receive part");
+        .expect("receive the trip");
 
         let item = stock(&store)
             .into_iter()
             .find(|item| item.product_id == soap)
             .expect("stock");
         assert_eq!(item.on_hand, 3);
-        assert_eq!(item.incoming, 2);
+        assert_eq!(item.incoming, 0, "the list is closed, nothing is coming");
         assert_eq!(item.cost_minor, Some(120), "last cost came from receiving");
 
         let list = purchases(&store);
-        assert_eq!(list[0].status, PurchaseStatus::Planned);
-        assert!(list[0].is_partial());
-        assert_eq!(list[0].progress(), "3 of 5 received");
+        assert_eq!(list[0].status, PurchaseStatus::Received);
+        assert!(list[0].received_at.is_some());
+        assert_eq!(
+            list[0].count_label(),
+            "3 of 5 bought",
+            "coming home short is worth saying"
+        );
         assert_eq!(
             stock_movements(&store, soap).len(),
             1,
             "one movement for one trip"
         );
 
-        // The rest arrives; the purchase closes.
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+        assert!(
+            receive_purchase(
+                &store,
+                id,
+                &[ReceiveLine {
+                    line_id: Some(line),
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: None,
+                }],
+                &[],
+                "",
+                None,
+            )
+            .is_err(),
+            "a closed trip cannot be received twice"
+        );
+        assert_eq!(stock(&store)[0].on_hand, 3, "and the shelf did not move");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The sheet is the truth about the trip. Buying more than the list said
+    /// means the list understated it, so the plan rises to match instead of the
+    /// goods being refused at the counter.
+    #[test]
+    fn buying_more_than_planned_raises_the_plan() {
+        let (store, path) = store("purchase-overbuy");
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 2,
+                unit_cost_minor: Some(100),
+            }],
+            None,
+        )
+        .expect("plan");
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+
         receive_purchase(
             &store,
             id,
             &[ReceiveLine {
-                line_id: Some(purchase_detail(&store, id).expect("detail").lines[0].id),
+                line_id: Some(line),
                 product_id: soap,
-                qty: 2,
+                qty: 7,
                 unit_cost_minor: None,
             }],
             &[],
             "",
             None,
         )
-        .expect("receive rest");
+        .expect("the market had more than the list said");
 
         let list = purchases(&store);
-        assert_eq!(list[0].status, PurchaseStatus::Received);
-        assert!(list[0].received_at.is_some());
-        assert_eq!(stock(&store)[0].on_hand, 5);
-        assert_eq!(
-            stock_movements(&store, soap).len(),
-            2,
-            "one movement per received count"
-        );
-        assert_eq!(
-            stock(&store)[0].cost_minor,
-            Some(120),
-            "a missing cost does not erase the last known one"
-        );
+        assert_eq!(list[0].count_label(), "7 items", "not a shortfall");
+        assert_eq!(list[0].cost_minor, Some(700), "seven at one hundred");
+        assert_eq!(stock(&store)[0].on_hand, 7);
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn a_partly_received_plan_can_only_be_continued() {
+    fn a_received_trip_cannot_be_changed_or_deleted() {
         let (store, path) = store("purchase-partial");
         let soap = stocked(&store, "Soap", 0, 2, None);
         let id = create_purchase(
@@ -6160,7 +6230,7 @@ mod tests {
                 }]
             )
             .is_ok(),
-            "an untouched plan is editable"
+            "an untouched list is editable"
         );
         assert!(delete_planned_purchase(&store, id).is_ok(), "and deletable");
 
@@ -6190,7 +6260,7 @@ mod tests {
             "",
             None,
         )
-        .expect("receive one");
+        .expect("receive the trip");
 
         assert!(
             update_purchase(
@@ -6211,11 +6281,106 @@ mod tests {
             delete_planned_purchase(&store, id).is_err(),
             "nor can the trip vanish"
         );
+        assert_eq!(purchases(&store).len(), 1, "the record stays");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Migration 12 shipped a `planned` purchase that could already have stock
+    /// counted against it. Such a row cannot be finished — receiving it again
+    /// would put the same goods on the shelf twice — so migration 15 closes it
+    /// as what it always was: a trip that came home short.
+    #[test]
+    fn a_half_received_trip_from_an_older_build_is_closed() {
+        // Build the file the way the build before this one left it.
+        let path =
+            std::env::temp_dir().join(format!("pos-purchase-legacy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = storage::Store::open(&path).expect("open database");
+        let older: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 14)
+            .map(|migration| Migration {
+                version: migration.version,
+                name: migration.name,
+                sql: migration.sql,
+            })
+            .collect();
+        store.migrate(&older).expect("migrate to 14");
+
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        store
+            .conn()
+            .execute(
+                "INSERT INTO purchases (uid, status, created_at)
+                 VALUES (?1, 'planned', '2024-01-01 09:00:00')",
+                [uuid::Uuid::now_v7().to_string()],
+            )
+            .expect("legacy purchase");
+        let id = store.conn().last_insert_rowid();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO purchase_lines
+                     (uid, purchase_id, product_id, name_snapshot, qty_ordered,
+                      qty_received, position)
+                 VALUES (?1, ?2, ?3, 'Soap', 5, 3, 0)",
+                (uuid::Uuid::now_v7().to_string(), id, soap),
+            )
+            .expect("legacy line");
+        let line = store.conn().last_insert_rowid();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO stock_movements
+                     (product_id, delta, kind, created_at, purchase_line_id, uid)
+                 VALUES (?1, 3, 'receive', '2024-01-02 10:30:00', ?2, ?3)",
+                (soap, line, uuid::Uuid::now_v7().to_string()),
+            )
+            .expect("legacy movement");
+
+        store.migrate(MIGRATIONS).expect("migrate to 15");
+
+        let trip = purchases(&store).into_iter().next().expect("the trip");
+        assert_eq!(trip.status, PurchaseStatus::Received, "it was finished");
         assert_eq!(
-            purchases(&store).len(),
-            1,
-            "the trip is still there to finish"
+            trip.count_label(),
+            "3 of 5 bought",
+            "and it came home short"
         );
+        let received_at: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT received_at FROM purchases WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("received_at");
+        assert_eq!(
+            received_at.as_deref(),
+            Some("2024-01-02 10:30:00"),
+            "dated when the goods actually arrived, not when the update ran"
+        );
+        assert_eq!(stock(&store)[0].on_hand, 3, "the shelf already knew");
+
+        assert!(
+            receive_purchase(
+                &store,
+                id,
+                &[ReceiveLine {
+                    line_id: Some(line),
+                    product_id: soap,
+                    qty: 3,
+                    unit_cost_minor: None,
+                }],
+                &[],
+                "",
+                None,
+            )
+            .is_err(),
+            "and it cannot be received a second time"
+        );
+        assert_eq!(stock(&store)[0].on_hand, 3, "so the shelf did not move");
 
         let _ = std::fs::remove_file(path);
     }

@@ -31,7 +31,7 @@ It does five jobs, and this manual teaches them in the order goods move through 
 1. **Products** — name and price what you sell.
 2. **Suppliers** — record who you buy from.
 3. **Inventory** — record what is on the shelf.
-4. **Purchases** — plan a restocking trip and receive what arrived.
+4. **Restock** — plan a restocking trip and receive what arrived.
 5. **Sell** — take the money.
 
 That order is intentional. You cannot sell what is not in Products. You cannot receive goods without a product to receive them into. You cannot trust a stock count you never started. Suppliers sit beside that chain: the delivery note needs a name. Learn the order once; after that, nearly all your time is in Lesson 4.
@@ -46,7 +46,7 @@ That order is intentional. You cannot sell what is not in Products. You cannot r
 | `F4` | **Dashboard** | Takings, number of sales, best sellers, busiest hour |
 | `F5` | **Products** | The catalogue: add, edit, import, export |
 | `F6` | **Suppliers** | Who the shop buys from |
-| `F7` | **Purchases** | Plan a restocking trip, then receive what arrived |
+| `F7` | **Restock** | Plan a restocking trip, then receive what arrived |
 | `F8` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
 
 F7 is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
@@ -314,7 +314,7 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 
 ---
 
-## Lesson 3A — Purchases: the restocking trip
+## Lesson 3A — Restock: the restocking trip
 
 **You will learn:** build a shopping list from low stock, adjust it before leaving, receive only what you actually bought, and record the unit cost.
 
@@ -322,24 +322,24 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 
 ### 3A.1 Plan before you leave
 
-1. Press `F7` to open **Purchases**.
-2. Press **New purchase**.
+1. Press `F7` to open **Restock**.
+2. Press **New list**.
 3. Type the supplier's name if there is one. It is optional — a market trip often has no supplier or delivery note.
 4. Press **Add low stock**. Every tracked product at or under its warning line appears with a suggested quantity.
 5. Change any quantity. The suggestion aims at the product's **Keep in stock** level after counting what is already on the shelf and on other planned purchases.
 6. Add anything else with the product search. A product does **not** have to be low to go on the list.
 7. Leave cost empty if you do not know it. Press **Save**.
 
-The purchase now reads **Planned**. Nothing has moved in stock — a plan is intent, not goods.
+The list now reads **Planned**. Nothing has moved in stock — a plan is intent, not goods.
 
 ### 3A.2 Receive what came back
 
-1. `F7` → open the purchase → **Receive**.
-2. Each row starts at the quantity still outstanding. Type what actually arrived.
+1. `F7` → open the list → the page opens ready to count in.
+2. Each row starts at the planned quantity. Type what actually arrived.
 3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
-4. Tick **Not bought** on a line you did not find. It is removed from the plan.
-5. Bought something extra? **Add product**, then quantity and cost. It is recorded as fully received.
-6. Press **Receive**.
+4. Set a line you did not find to **0**. It stays on the record as not bought.
+5. Bought something extra? Add it from the search at the bottom of the page with its quantity and cost.
+6. Press **Received**.
 
 Every received line writes exactly one stock movement, so the product's History shows the trip once. The shelf count goes up by what you received.
 
@@ -347,11 +347,10 @@ Every received line writes exactly one stock movement, so the product's History 
 
 | Status | Means | What you can do |
 |---|---|---|
-| **Planned** | Nothing received yet | Edit quantities, delete the whole plan |
-| **Part received** | Some lines or quantities are still open | Continue receiving only |
-| **Received** | Every remaining line is complete | Read it; it is locked |
+| **Planned** | Nothing received yet | Edit quantities, delete the whole list |
+| **Received** | The trip came home and is recorded | Read it; it is locked |
 
-The progress line reads "3 of 5 received" when part of a line is still outstanding.
+There is no **Part received** state. Receiving is one act, so the same goods cannot be counted in twice. A trip that came home short says "3 of 5 bought" — the shortfall is not turned into a new list for you; plan the next trip from **Add low stock**.
 
 ### 3A.4 Three rules to say out loud
 
@@ -362,11 +361,11 @@ The progress line reads "3 of 5 received" when part of a line is still outstandi
 ### 3A.5 Practice
 
 1. Make tea low: sell enough, or adjust it down to 2.
-2. `F7` → **New purchase** → **Add low stock**. Check tea appears with a sensible quantity.
+2. `F7` → **New list** → **Add low stock**. Check tea appears with a sensible quantity.
 3. Add soap manually even though it is not low.
-4. Save. Confirm the purchase is **Planned** and tea's on-hand count did not change.
-5. Receive 10 tea at cost `800`. Leave soap **Not bought**.
-6. Confirm tea's stock rose by 10, the purchase says **Received**, and History shows one received line.
+4. Save. Confirm the list is **Planned** and tea's on-hand count did not change.
+5. Open it, receive 10 tea at cost `800`. Set soap to **0**.
+6. Confirm tea's stock rose by 10, the trip says **Received**, History shows one received line, and soap's count did not move.
 
 ---
 
@@ -384,7 +383,7 @@ The progress line reads "3 of 5 received" when part of a line is still outstandi
 4. Press **Pay** (or `Ctrl+Enter` / `F12`).
 5. Type the cash received, or tap a quick-tender chip.
 6. Press **Complete sale** (or `Enter`).
-7. Hand over the change, then press **New sale** (or `Enter` / `Space`).
+7. Hand over the change. The cart is empty and the cursor is back in **Scan or search** — scan the next customer's first item.
 
 ### 4.2 Putting items in the cart
 
@@ -425,13 +424,13 @@ The sale still records the exact price-list total and stores the rounding differ
 
 ### 4.5 After the sale
 
-The confirmation shows **Paid**, the **Change** in large type, and the receipt.
+Pressing **Complete sale** writes the sale, takes the stock out, empties the cart, and puts the cursor back in **Scan or search**. There is no confirmation panel and nothing to dismiss — the next customer's first item can be scanned immediately.
 
-- **Copy receipt** copies the slip as text. Use it for a WhatsApp confirmation or a dispute.
-- **New sale** (`Enter` or `Space`) starts the next customer.
-- `Escape` closes the confirmation.
+- The **Change** you read before completing is what you hand over.
+- The slip is kept on the sale: `F2` **Sales** → open the sale, which shows lines, amount paid, method and change. **Copy receipt** puts it on the clipboard as text, for a WhatsApp confirmation or a dispute.
+- Receipts cannot be printed in this build. Say so plainly and offer the copied text.
 
-Receipts cannot be printed in this build. Say so plainly and offer the copied text.
+**If the queue is long:** the cart is already empty after a sale, so `Enter` on the scanner's next barcode starts the next sale. No keypress is needed to "start a new sale".
 
 ### 4.6 Fixing mistakes
 
@@ -618,7 +617,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Do:* Ring Sale A.
 
-*Check:* Total 10,000, change 0, confirmation says **Paid**.
+*Check:* Total 10,000, change 0, and the screen is ready for the next scan.
 
 **S13 — Change and rounding**
 
@@ -626,7 +625,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Do:* Ring Sale B.
 
-*Check:* Subtotal 8,550; cash total 8,600; change 1,400; receipt shows **Rounded up 50**.
+*Check:* Subtotal 8,550; cash total 8,600; change 1,400; the sale detail in `F2` shows **Rounded up 50**.
 
 **S14 — The barcode will not scan**
 
@@ -648,7 +647,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The first sale is paid; the next customer is already waiting.
 
-*Do:* Press **New sale** (`Enter` or `Space`) instead of closing the app.
+*Do:* Scan the next customer's first item. The cart cleared itself; there is no **New sale** button to press and nothing to close.
 
 *Check:* The cart is empty and the search field is ready.
 
@@ -792,14 +791,15 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 SIGN IN      pick your name → 6-digit PIN → Sign in
 LOCK         Ctrl+L          (cart survives)
 SCREENS      F1 Sell  F2 Sales  F3 Inventory  F4 Dashboard
-             F5 Products  F6 Suppliers  F7 Purchases  F8 Settings
+             F5 Products  F6 Suppliers  F7 Restock  F8 Settings
 
 ONE SALE     F1 → scan / search / tap → Pay (Ctrl+Enter)
              → cash received or Exact chip → Complete sale
-             → give change → New sale (Enter / Space)
+             → give change → scan the next customer's first item
 FIX CART     − / + on the line; below 1 removes it
              Ctrl+P → Clear cart
 CHANGE       green = give back; red = still short
+             the slip stays on the sale: F2 → open it → Copy receipt
 
 ROUNDING     UGX/KES nearest 100 · TZS nearest 5,000
              cash only; the exact total is still recorded
@@ -809,9 +809,9 @@ STOCK        Track stock → count → warn level → keep-in-stock level
              Adjustment = type what you COUNTED, not the difference
              Sale subtracts by itself. Negative is allowed.
 
-PURCHASES    F7 → New purchase → Add low stock → Save (Planned)
-             Receive → type what arrived → cost if known → Receive
-             Not bought removes a line; Add product records an impulse buy
+PURCHASES    F7 → New list → Add low stock → Save (Planned)
+             open it → type what arrived → cost if known → Received
+             0 = not bought; an extra buy is added from the search
              Only receiving moves stock. Received trips are locked.
 
 SUPPLIERS    F6 → New supplier (name only is enough)

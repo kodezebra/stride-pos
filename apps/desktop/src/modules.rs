@@ -411,18 +411,6 @@ impl Sell {
         let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             || std::mem::take(&mut state.scan_submit);
         let submitted = submitted && !state.is_tendering();
-        // A finished sale hands the keyboard back to the scanner: the next
-        // barcode is the next customer's first item, and nobody should have to
-        // click anything before the scanner works again. Only when nothing else
-        // holds focus, so it cannot fight the change readout's button.
-        if state
-            .payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_some())
-            && ui.memory(|memory| memory.focused().is_none())
-        {
-            response.request_focus();
-        }
         ui.add_space(SPACING.md);
 
         // A till with an empty catalog is not a bug in the product panel: it is a
@@ -707,10 +695,6 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
     let footer = match state.payment.as_ref() {
-        // The ghost: change, sale number, one button, and the line the copy
-        // confirmation lands on. It is reserved even when nothing is copied, so
-        // the panel does not jump the moment the cashier copies the slip.
-        Some(payment) if payment.done.is_some() => 232.0,
         Some(_) => {
             410.0
                 + if rounding_minor != 0 {
@@ -2959,9 +2943,10 @@ fn field(
 
 /// Restocking trips: what the shop means to buy, and what came back.
 ///
-/// A purchase is a list, not a stock movement. Nothing on the shelf changes
-/// until the receiving screen counts goods in, so a plan can be made at home,
-/// edited at the market, or abandoned without leaving a trace in the ledger.
+/// A list is not a stock movement. Nothing on the shelf changes until the trip
+/// is received, so a list can be made at home, adjusted at the market, or
+/// abandoned without leaving a trace in the ledger. Planning and counting in are
+/// the same page: the quantity column is the count sheet.
 struct Purchases;
 
 impl Module for Purchases {
@@ -2974,7 +2959,7 @@ impl Module for Purchases {
         ui.add_space(SPACING.md);
         components::field_label(ui, "Show");
         ui.add_space(SPACING.xs);
-        for (index, label) in ["All", "Planned", "Received"].into_iter().enumerate() {
+        for (index, label) in ["All", "To buy", "Received"].into_iter().enumerate() {
             if regions::nav_item(ui, state.purchase_filter == index, label).clicked() {
                 state.purchase_filter = index;
             }
@@ -2983,24 +2968,68 @@ impl Module for Purchases {
         ui.add_space(SPACING.md);
         components::caption(
             ui,
-            "Plan a trip before you go, then count what came back. \
-             Stock changes only when you receive.",
+            "Plan a trip before you go, then change the quantities to what came \
+             home. Stock changes only when you mark it received.",
         );
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+
+        // A trip takes the whole tab: the heading names what is open, and the
+        // one way back is on the same row, so the page never hides its exits.
+        if state.purchase_editor.is_some() || state.purchase_view.is_some() {
+            let editing = state.purchase_editor.is_some();
+            let title = purchase_title(state);
+            let mut back = false;
+            let mut save = false;
+            let mut receive = false;
+            action_bar(ui, &title, |ui| {
+                if editing && can_manage {
+                    if actions::primary_compact(ui, "Received").clicked() {
+                        receive = true;
+                    }
+                    if actions::secondary_compact(ui, "Save").clicked() {
+                        save = true;
+                    }
+                }
+                if actions::quiet_compact(ui, "← Restock").clicked() {
+                    back = true;
+                }
+            });
+            if receive {
+                state.receive_purchase();
+            }
+            if save {
+                state.save_purchase();
+            }
+            if back {
+                state.purchase_editor = None;
+                state.purchase_view = None;
+            }
+            return;
+        }
+
         let mut new = false;
+        let mut low = false;
+        let any_low = state.stock.iter().any(|item| item.needs_restock());
         action_bar(ui, "Restock", |ui| {
             if !can_manage {
                 return;
             }
-            if actions::primary_compact(ui, "New purchase").clicked() {
+            if actions::primary_compact(ui, "New list").clicked() {
                 new = true;
+            }
+            if any_low && actions::secondary_compact(ui, "Add low stock").clicked() {
+                low = true;
             }
         });
         if new {
             state.start_purchase();
+        }
+        if low {
+            state.start_purchase();
+            state.purchase_add_low_stock();
         }
     }
 
@@ -3009,10 +3038,17 @@ impl Module for Purchases {
             return locked_card(ui, crate::auth::Permission::ManageInventory);
         }
 
+        if state.purchase_editor.is_some() {
+            return purchase_page(ui, state);
+        }
+        if state.purchase_view.is_some() {
+            return purchase_received_page(ui, state);
+        }
+
         components::caption(
             ui,
-            "A shopping list for the shop. Add what is low, adjust quantities at \
-             the market, and receive only what you actually bought.",
+            "A shopping list for the shop. Add what is low, adjust the quantities \
+             at the market, and receive what you actually bought.",
         );
         if let Some(notice) = state.notice.as_deref() {
             components::caption(ui, notice);
@@ -3021,22 +3057,22 @@ impl Module for Purchases {
         if state.purchases.is_empty() {
             components::empty_state_card(
                 ui,
-                "No purchases yet",
-                "Start a purchase before the next trip. Low-stock products can be \
+                "No lists yet",
+                "Start a list before the next trip. Everything that is low can be \
                  added in one click.",
                 180.0,
             );
             return;
         }
 
-        let planned = state
+        let to_buy = state
             .purchases
             .iter()
             .filter(|purchase| purchase.status == PurchaseStatus::Planned)
             .count();
-        let received = state.purchases.len() - planned;
+        let received = state.purchases.len() - to_buy;
         ui.add_space(SPACING.xs);
-        components::caption(ui, &format!("{} planned · {} received", planned, received));
+        components::caption(ui, &format!("{to_buy} to buy · {received} received"));
 
         let needle = state.purchase_search.trim().to_lowercase();
         let visible = visible_purchases(&state.purchases, &needle, state.purchase_filter);
@@ -3051,31 +3087,48 @@ impl Module for Purchases {
         }
 
         let currency = state.currency;
-        let mut action = None;
+        let mut open = None;
         components::card(ui, |ui| {
             ui.set_min_width(ui.available_width());
             purchase_header(ui);
             for &index in &visible {
                 let purchase = &state.purchases[index];
-                if let Some(row_action) = purchase_row(ui, purchase, currency) {
-                    action = Some(row_action);
+                if let Some(id) = purchase_row(ui, purchase, currency) {
+                    open = Some(id);
                 }
             }
         });
 
-        match action {
-            Some(PurchaseAction::Receive(id)) => state.start_receive(id),
-            Some(PurchaseAction::Edit(id)) => state.edit_purchase(id),
-            Some(PurchaseAction::View(id)) => state.open_purchase(id),
-            None => {}
+        if let Some(id) = open {
+            state.edit_purchase(id);
         }
     }
 }
 
-enum PurchaseAction {
-    Receive(i64),
-    Edit(i64),
-    View(i64),
+/// The name of the trip on screen: its supplier, or what kind of trip it is.
+fn purchase_title(state: &State) -> String {
+    if let Some(draft) = &state.purchase_editor {
+        if let Some(supplier) = draft
+            .supplier_id
+            .as_deref()
+            .and_then(|id| state.suppliers.iter().find(|supplier| supplier.id == id))
+        {
+            return supplier.name.clone();
+        }
+        return if draft.id.is_none() {
+            "New list".to_owned()
+        } else {
+            "Market trip".to_owned()
+        };
+    }
+    if let Some(detail) = &state.purchase_view {
+        return detail
+            .purchase
+            .supplier
+            .clone()
+            .unwrap_or_else(|| "Market trip".to_owned());
+    }
+    "Restock".to_owned()
 }
 
 fn purchase_header(ui: &mut egui::Ui) {
@@ -3083,14 +3136,10 @@ fn purchase_header(ui: &mut egui::Ui) {
     components::divider(ui);
 }
 
-/// One trip: what it is and where it stands, with the next action at the edge.
-fn purchase_row(
-    ui: &mut egui::Ui,
-    purchase: &Purchase,
-    currency: money::Currency,
-) -> Option<PurchaseAction> {
+/// One trip: what it is and where it stands, with the one action at the edge.
+fn purchase_row(ui: &mut egui::Ui, purchase: &Purchase, currency: money::Currency) -> Option<i64> {
     let palette = theme::current(ui.ctx());
-    let mut action = None;
+    let mut open = false;
     let title = purchase
         .supplier
         .clone()
@@ -3100,62 +3149,54 @@ fn purchase_row(
         ui.set_min_height(52.0);
         ui.vertical(|ui| {
             ui.label(components::semibold(&title).size(TYPE.body));
-            let detail = if purchase.status == PurchaseStatus::Received {
-                match purchase.received_at.as_deref() {
-                    Some(at) => format!("Received · {at}"),
-                    None => "Received".to_owned(),
-                }
-            } else {
-                format!(
-                    "Planned · {} · {}",
+            let detail = match purchase.status {
+                PurchaseStatus::Planned => format!(
+                    "To buy · {} · {}",
                     purchase.created_at,
-                    purchase.progress()
-                )
+                    purchase.count_label()
+                ),
+                PurchaseStatus::Received => {
+                    let when = purchase.received_at.as_deref().unwrap_or("Received");
+                    format!("Received · {when} · {}", purchase.count_label())
+                }
             };
             components::caption(ui, &detail);
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match purchase.status {
-                PurchaseStatus::Planned => {
-                    if actions::primary_compact(ui, "Receive").clicked() {
-                        action = Some(PurchaseAction::Receive(purchase.id));
-                    }
-                    if purchase.received_count == 0
-                        && components::icon_button(ui, edit_icon(), 32.0)
-                            .on_hover_text("Edit the plan")
-                            .clicked()
-                    {
-                        action = Some(PurchaseAction::Edit(purchase.id));
-                    }
-                }
-                PurchaseStatus::Received => {
-                    if actions::secondary_compact(ui, "View").clicked() {
-                        action = Some(PurchaseAction::View(purchase.id));
-                    }
-                }
+            let response = match purchase.status {
+                PurchaseStatus::Planned => actions::primary_compact(ui, "Open"),
+                PurchaseStatus::Received => actions::secondary_compact(ui, "View"),
+            };
+            if response.clicked() {
+                open = true;
             }
 
             if let Some(cost) = purchase.cost_minor {
-                components::caption(ui, &format!("~{}", Money::new(cost, currency).format()));
+                // A list's total is a guess, a received trip's is what was
+                // actually paid, so only the guess wears the tilde.
+                let money = Money::new(cost, currency).format();
+                let shown = match purchase.status {
+                    PurchaseStatus::Planned => format!("~{money}"),
+                    PurchaseStatus::Received => money,
+                };
+                components::caption(ui, &shown);
             }
-            let (label, color) = if purchase.status == PurchaseStatus::Received {
-                (PurchaseStatus::Received.label(), palette.success)
-            } else if purchase.is_partial() {
-                ("Part received", palette.warning)
+            let color = if purchase.status == PurchaseStatus::Received {
+                palette.success
             } else {
-                (PurchaseStatus::Planned.label(), palette.text_muted)
+                palette.text_muted
             };
-            components::badge(ui, label, color);
+            components::badge(ui, purchase.status.label(), color);
         });
     });
     components::divider(ui);
 
-    action
+    if open { Some(purchase.id) } else { None }
 }
 
 /// Whether a purchase passes the search box. Supplier and note are what a
-/// person remembers about a trip; the product list is on the row itself.
+/// person remembers about a trip; the product list is on the page itself.
 fn purchase_matches(purchase: &Purchase, needle: &str) -> bool {
     needle.is_empty()
         || purchase
@@ -3186,11 +3227,11 @@ fn visible_purchases(purchases: &[Purchase], needle: &str, filter: usize) -> Vec
 
 /// Plan a trip: choose a supplier if there is one, list what to buy, and put
 /// an expected price beside each line so the total is known before leaving.
-pub fn purchase_editor_modal(ctx: &egui::Context, state: &mut State) {
-    if state.purchase_editor.is_none() {
-        return;
-    }
-
+///
+/// The same page counts the goods in. A quantity is a number of units, and the
+/// trip is over when it is marked received, so there is no second screen to
+/// learn at the market with one hand full.
+fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
     let currency = state.currency;
     let suppliers: Vec<(String, String)> = state
         .suppliers
@@ -3198,8 +3239,8 @@ pub fn purchase_editor_modal(ctx: &egui::Context, state: &mut State) {
         .filter(|supplier| !supplier.archived)
         .map(|supplier| (supplier.id.clone(), supplier.name.clone()))
         .collect();
-    // An old plan can point at a supplier that has since been archived. Keep
-    // showing that name rather than silently rewriting the plan to "none".
+    // An old list can point at a supplier that has since been archived. Keep
+    // showing that name rather than silently rewriting the trip to "none".
     let saved_supplier = state
         .purchase_editor
         .as_ref()
@@ -3220,217 +3261,190 @@ pub fn purchase_editor_modal(ctx: &egui::Context, state: &mut State) {
     let Some(draft) = state.purchase_editor.as_mut() else {
         return;
     };
-    let mut save = false;
-    let mut cancel = false;
     let mut delete = false;
     let mut add_low = false;
     let mut add_product = None;
     let mut remove_line = None;
 
-    modal(ctx, egui::Id::new("pos_purchase_editor")).show(ctx, |ui| {
-        ui.set_width(640.0);
-        let heading = if draft.id.is_some() {
-            "Edit purchase"
-        } else {
-            "Plan a purchase"
-        };
-        ui.label(components::semibold(heading).size(TYPE.heading));
-        components::caption(
-            ui,
-            "This is a list, not a stock change. Nothing enters the shelf until \
-             you receive it.",
-        );
-
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.md;
-            ui.vertical(|ui| {
-                components::field_label(ui, "Supplier (optional)");
-                ui.add_space(SPACING.xs);
-                let selected = saved_supplier
-                    .clone()
-                    .unwrap_or_else(|| "No supplier".to_owned());
-                egui::ComboBox::from_id_salt("pos_purchase_supplier")
-                    .width(240.0)
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(draft.supplier_id.is_none(), "No supplier")
-                            .clicked()
-                        {
-                            draft.supplier_id = None;
-                            ui.close();
-                        }
-                        for (id, name) in &suppliers {
-                            let selected = draft.supplier_id.as_deref() == Some(id.as_str());
-                            if ui.selectable_label(selected, name).clicked() {
-                                draft.supplier_id = Some(id.clone());
-                                ui.close();
-                            }
-                        }
-                    });
-            });
-            ui.vertical(|ui| {
-                components::field_label(ui, "Note (optional)");
-                ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.note, "Market, stall, reference", 300.0);
-            });
-        });
-
-        ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            components::field_label(ui, "To buy");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if actions::secondary_compact(ui, "Add low stock").clicked() {
-                    add_low = true;
-                }
-            });
-        });
-        ui.add_space(SPACING.xs);
-
-        if draft.lines.is_empty() {
+    egui::ScrollArea::vertical()
+        .id_salt("pos_purchase_page")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
             components::caption(
                 ui,
-                "Nothing on the list yet. Add a product below, or fill it from low stock.",
+                "A list, not a stock change. Change a quantity to what you \
+                 actually bought, then mark the trip received.",
             );
-        } else {
-            egui::ScrollArea::vertical()
-                .id_salt("pos_purchase_lines")
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for line in &mut draft.lines {
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(44.0);
-                            let name_width = (ui.available_width() - 240.0).max(120.0);
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(name_width, 44.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.label(components::semibold(&line.name).size(TYPE.body));
-                                },
-                            );
-                            text_field(ui, &mut line.qty, "Qty", 70.0);
-                            text_field(ui, &mut line.cost, "Cost", 110.0);
-                            if components::icon_button(ui, Icon::TRASH, 32.0)
-                                .on_hover_text("Remove")
+
+            ui.add_space(SPACING.md);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACING.md;
+                ui.vertical(|ui| {
+                    components::field_label(ui, "Supplier (optional)");
+                    ui.add_space(SPACING.xs);
+                    let selected = saved_supplier
+                        .clone()
+                        .unwrap_or_else(|| "No supplier".to_owned());
+                    egui::ComboBox::from_id_salt("pos_purchase_supplier")
+                        .width(240.0)
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(draft.supplier_id.is_none(), "No supplier")
                                 .clicked()
                             {
-                                remove_line = Some(line.product_id);
+                                draft.supplier_id = None;
+                                ui.close();
+                            }
+                            for (id, name) in &suppliers {
+                                let selected = draft.supplier_id.as_deref() == Some(id.as_str());
+                                if ui.selectable_label(selected, name).clicked() {
+                                    draft.supplier_id = Some(id.clone());
+                                    ui.close();
+                                }
                             }
                         });
+                });
+                ui.vertical(|ui| {
+                    components::field_label(ui, "Note (optional)");
+                    ui.add_space(SPACING.xs);
+                    text_field(ui, &mut draft.note, "Market, stall, reference", 300.0);
+                });
+            });
+
+            ui.add_space(SPACING.md);
+            ui.horizontal(|ui| {
+                components::field_label(ui, "To buy");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if actions::secondary_compact(ui, "Add low stock").clicked() {
+                        add_low = true;
                     }
                 });
-        }
+            });
+            ui.add_space(SPACING.xs);
 
-        let (estimated, missing_cost) = purchase_estimate(&draft.lines, currency);
-        ui.add_space(SPACING.xs);
-        if estimated > 0 {
-            components::caption(
-                ui,
-                &if missing_cost {
-                    format!(
-                        "Estimated total {} · lines without a cost are not counted.",
-                        Money::new(estimated, currency).format()
-                    )
-                } else {
-                    format!(
-                        "Estimated total {}.",
-                        Money::new(estimated, currency).format()
-                    )
-                },
-            );
-        } else {
-            components::caption(ui, "Add a quantity and cost to see the trip total.");
-        }
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Add a product");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut draft.search, "Name or category");
-
-        let needle = draft.search.trim().to_lowercase();
-        let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
-        let matches: Vec<(i64, String, String)> = candidates
-            .iter()
-            .filter(|(id, name, category)| {
-                !already.contains(id)
-                    && (needle.is_empty()
-                        || name.to_lowercase().contains(&needle)
-                        || category.to_lowercase().contains(&needle))
-            })
-            .cloned()
-            .collect();
-
-        ui.add_space(SPACING.xs);
-        if candidates.is_empty() {
-            components::caption(
-                ui,
-                "No tracked products yet. Track stock first, then plan a purchase.",
-            );
-        } else if matches.is_empty() {
-            components::caption(ui, "No other tracked product matches.");
-        } else {
-            egui::ScrollArea::vertical()
-                .id_salt("pos_purchase_product_picker")
-                .max_height(150.0)
-                .show(ui, |ui| {
-                    for (id, name, category) in &matches {
-                        let label = if category.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{name} — {category}")
-                        };
-                        if ui.selectable_label(false, label).clicked() {
-                            add_product = Some(*id);
+            if draft.lines.is_empty() {
+                components::caption(
+                    ui,
+                    "Nothing on the list yet. Add a product below, or fill it from low stock.",
+                );
+            } else {
+                components::divider(ui);
+                for line in &mut draft.lines {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(44.0);
+                        let name_width = (ui.available_width() - 240.0).max(120.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(name_width, 44.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(components::semibold(&line.name).size(TYPE.body));
+                            },
+                        );
+                        text_field(ui, &mut line.qty, "Qty", 70.0);
+                        text_field(ui, &mut line.cost, "Cost", 110.0);
+                        if components::icon_button(ui, Icon::TRASH, 32.0)
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
+                            remove_line = Some(line.product_id);
                         }
-                    }
-                });
-        }
+                    });
+                    components::divider(ui);
+                }
+            }
 
-        if let Some(error) = &draft.error {
+            let (estimated, missing_cost) = purchase_estimate(&draft.lines, currency);
             ui.add_space(SPACING.sm);
-            ui.label(
-                egui::RichText::new(error)
-                    .size(TYPE.small)
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
+            if estimated > 0 {
+                components::caption(
+                    ui,
+                    &if missing_cost {
+                        format!(
+                            "Estimated total {} · lines without a cost are not counted.",
+                            Money::new(estimated, currency).format()
+                        )
+                    } else {
+                        format!(
+                            "Estimated total {}.",
+                            Money::new(estimated, currency).format()
+                        )
+                    },
+                );
+            } else {
+                components::caption(ui, "Add a quantity and cost to see the trip total.");
+            }
 
-        actions::footer(ui, |ui| {
-            if actions::primary(
-                ui,
-                if draft.id.is_some() {
-                    "Save changes"
-                } else {
-                    "Save plan"
-                },
-            )
-            .clicked()
-            {
-                save = true;
+            ui.add_space(SPACING.lg);
+            components::field_label(ui, "Add a product");
+            ui.add_space(SPACING.xs);
+            components::search_field(ui, &mut draft.search, "Name or category");
+
+            let needle = draft.search.trim().to_lowercase();
+            let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
+            let matches: Vec<(i64, String, String)> = candidates
+                .iter()
+                .filter(|(id, name, category)| {
+                    !already.contains(id)
+                        && (needle.is_empty()
+                            || name.to_lowercase().contains(&needle)
+                            || category.to_lowercase().contains(&needle))
+                })
+                .cloned()
+                .collect();
+
+            ui.add_space(SPACING.xs);
+            if candidates.is_empty() {
+                components::caption(
+                    ui,
+                    "No tracked products yet. Track stock first, then plan a purchase.",
+                );
+            } else if matches.is_empty() {
+                components::caption(ui, "No other tracked product matches.");
+            } else {
+                // Eight is enough to pick from without scrolling the page; a
+                // longer catalog is reached by typing, which is faster anyway.
+                for (id, name, category) in matches.iter().take(8) {
+                    let label = if category.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{name} — {category}")
+                    };
+                    if ui.selectable_label(false, label).clicked() {
+                        add_product = Some(*id);
+                    }
+                }
+                if matches.len() > 8 {
+                    components::caption(
+                        ui,
+                        &format!("{} more — keep typing to narrow it.", matches.len() - 8),
+                    );
+                }
             }
-            if actions::secondary(ui, "Cancel").clicked() {
-                cancel = true;
+
+            if let Some(error) = &draft.error {
+                ui.add_space(SPACING.sm);
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(TYPE.small)
+                        .color(ui.visuals().error_fg_color),
+                );
             }
+
             if draft.id.is_some() {
+                ui.add_space(SPACING.lg);
+                components::divider(ui);
+                ui.add_space(SPACING.sm);
                 let label = if draft.confirm_delete {
-                    "Delete plan"
+                    "Tap again to delete this list"
                 } else {
-                    "Delete"
+                    "Delete this list"
                 };
                 if actions::quiet(ui, label).clicked() {
                     delete = true;
                 }
             }
         });
-    });
-
-    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
-        save = true;
-    }
-    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-        cancel = true;
-    }
 
     if add_low {
         state.purchase_add_low_stock();
@@ -3441,13 +3455,10 @@ pub fn purchase_editor_modal(ctx: &egui::Context, state: &mut State) {
     if let Some(product_id) = remove_line {
         state.purchase_remove_line(product_id);
     }
-    if save {
-        state.save_purchase();
-    }
     if delete {
         state.delete_purchase();
     }
-    if cancel {
+    if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
         state.purchase_editor = None;
     }
 }
@@ -3472,329 +3483,81 @@ fn purchase_estimate(lines: &[state::PurchaseLineDraft], currency: money::Curren
     (total, missing)
 }
 
-/// Count what came back from the trip.
+/// A trip that came home, read as a record.
 ///
-/// Each row starts at the quantity still outstanding, but every number is
-/// editable: a market can have less than planned, or one extra the list did not
-/// know about. Leaving a row at zero keeps it planned for another trip; ticking
-/// "Not bought" removes it from the plan.
-pub fn purchase_receive_modal(ctx: &egui::Context, state: &mut State) {
-    if state.purchase_receive.is_none() {
-        return;
-    }
-
-    let currency = state.currency;
-    let candidates: Vec<(i64, String, String)> = state
-        .stock
-        .iter()
-        .map(|item| (item.product_id, item.name.clone(), item.category.clone()))
-        .collect();
-
-    let Some(draft) = state.purchase_receive.as_mut() else {
-        return;
-    };
-    let mut save = false;
-    let mut cancel = false;
-    let mut add_product = None;
-    let mut remove_index = None;
-
-    modal(ctx, egui::Id::new("pos_purchase_receive")).show(ctx, |ui| {
-        ui.set_width(660.0);
-        ui.label(components::semibold("Receive purchase").size(TYPE.heading));
-        let title = draft
-            .supplier
-            .clone()
-            .unwrap_or_else(|| "Market trip".to_owned());
-        components::caption(ui, &format!("{title} · count only what actually arrived."));
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Note (optional)");
-        ui.add_space(SPACING.xs);
-        text_field(
-            ui,
-            &mut draft.note,
-            "What was different at the market",
-            420.0,
-        );
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Received now");
-        ui.add_space(SPACING.xs);
-
-        egui::ScrollArea::vertical()
-            .id_salt("pos_receive_lines")
-            .max_height(260.0)
-            .show(ui, |ui| {
-                for (index, line) in draft.lines.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(48.0);
-                        let name_width = (ui.available_width() - 270.0).max(120.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(name_width, 48.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(components::semibold(&line.name).size(TYPE.body));
-                                    let detail = if line.line_id.is_some() {
-                                        format!(
-                                            "{} of {} already received",
-                                            line.already, line.ordered
-                                        )
-                                    } else {
-                                        "Not on the plan".to_owned()
-                                    };
-                                    components::caption(ui, &detail);
-                                });
-                            },
-                        );
-
-                        if line.removed {
-                            components::caption(ui, "Not bought");
-                        } else {
-                            text_field(ui, &mut line.qty, "Qty", 70.0);
-                            text_field(ui, &mut line.cost, "Cost", 110.0);
-                        }
-
-                        if line.line_id.is_some() {
-                            // A line that already has goods against it cannot be
-                            // removed; the ledger movement would be left pointing
-                            // at nothing. It can only be received further.
-                            if line.already == 0 {
-                                ui.checkbox(&mut line.removed, "Not bought");
-                            }
-                        } else if components::icon_button(ui, Icon::TRASH, 32.0)
-                            .on_hover_text("Remove")
-                            .clicked()
-                        {
-                            remove_index = Some(index);
-                        }
-                    });
-                    components::divider(ui);
-                }
-            });
-
-        let (units, cost, missing) = receive_estimate(&draft.lines, currency);
-        ui.add_space(SPACING.xs);
-        components::caption(
-            ui,
-            &if units == 0 {
-                "Nothing is set to arrive. Leave it planned or tick Not bought.".to_owned()
-            } else if cost > 0 {
-                if missing {
-                    format!(
-                        "{units} unit{} · at least {} so far",
-                        if units == 1 { "" } else { "s" },
-                        Money::new(cost, currency).format()
-                    )
-                } else {
-                    format!(
-                        "{units} unit{} · {}",
-                        if units == 1 { "" } else { "s" },
-                        Money::new(cost, currency).format()
-                    )
-                }
-            } else {
-                format!("{units} unit{}", if units == 1 { "" } else { "s" })
-            },
-        );
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Add something picked up");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut draft.search, "Name or category");
-
-        let needle = draft.search.trim().to_lowercase();
-        let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
-        let matches: Vec<(i64, String, String)> = candidates
-            .iter()
-            .filter(|(id, name, category)| {
-                !already.contains(id)
-                    && (needle.is_empty()
-                        || name.to_lowercase().contains(&needle)
-                        || category.to_lowercase().contains(&needle))
-            })
-            .cloned()
-            .collect();
-
-        ui.add_space(SPACING.xs);
-        if matches.is_empty() {
-            components::caption(ui, "No other tracked product matches.");
-        } else {
-            egui::ScrollArea::vertical()
-                .id_salt("pos_receive_product_picker")
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    for (id, name, category) in &matches {
-                        let label = if category.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{name} — {category}")
-                        };
-                        if ui.selectable_label(false, label).clicked() {
-                            add_product = Some(*id);
-                        }
-                    }
-                });
-        }
-
-        if let Some(error) = &draft.error {
-            ui.add_space(SPACING.sm);
-            ui.label(
-                egui::RichText::new(error)
-                    .size(TYPE.small)
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
-
-        actions::footer(ui, |ui| {
-            if actions::primary(ui, "Receive").clicked() {
-                save = true;
-            }
-            if actions::secondary(ui, "Cancel").clicked() {
-                cancel = true;
-            }
-        });
-    });
-
-    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
-        save = true;
-    }
-    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-        cancel = true;
-    }
-
-    if let Some(product_id) = add_product {
-        state.receive_add_product(product_id);
-    }
-    if let Some(index) = remove_index {
-        state.receive_remove_line(index);
-    }
-    if save {
-        state.save_receive();
-    }
-    if cancel {
-        state.purchase_receive = None;
-    }
-}
-
-/// Units and cost that will be written now. Lines ticked "Not bought" are
-/// ignored; so are zero quantities, which stay open on the plan.
-fn receive_estimate(
-    lines: &[state::ReceiveLineDraft],
-    currency: money::Currency,
-) -> (i64, i64, bool) {
-    let mut units = 0_i64;
-    let mut cost = 0_i64;
-    let mut missing = false;
-    for line in lines {
-        if line.removed {
-            continue;
-        }
-        let qty = line.qty.trim().parse::<i64>().ok().filter(|qty| *qty > 0);
-        let unit_cost = Money::parse(&line.cost, currency)
-            .ok()
-            .map(|money| money.minor())
-            .filter(|cost| *cost >= 0);
-        if let Some(qty) = qty {
-            units += qty;
-            match unit_cost {
-                Some(unit_cost) => cost += qty * unit_cost,
-                None => missing = true,
-            }
-        }
-    }
-    (units, cost, missing)
-}
-
-/// Read one purchase, usually a finished one, without offering an edit.
-pub fn purchase_view_modal(ctx: &egui::Context, state: &mut State) {
+/// There is nothing to change here: the goods are on the shelf and the ledger
+/// has moved. This page answers "what did we buy and what did it cost", which
+/// is the question a week later.
+fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
     let Some(detail) = state.purchase_view.as_ref() else {
         return;
     };
     let currency = state.currency;
-    let mut close = false;
 
-    modal(ctx, egui::Id::new("pos_purchase_view")).show(ctx, |ui| {
-        ui.set_width(560.0);
-        let title = detail
-            .purchase
-            .supplier
-            .clone()
-            .unwrap_or_else(|| "Market trip".to_owned());
-        ui.label(components::semibold(title).size(TYPE.heading));
-        let detail_line = if detail.purchase.status == PurchaseStatus::Received {
-            match detail.purchase.received_at.as_deref() {
-                Some(at) => format!("Received · {at}"),
-                None => "Received".to_owned(),
+    egui::ScrollArea::vertical()
+        .id_salt("pos_purchase_received")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let status = match detail.purchase.received_at.as_deref() {
+                Some(at) => format!("Received {at} · {}", detail.purchase.count_label()),
+                None => format!("Received · {}", detail.purchase.count_label()),
+            };
+            components::caption(ui, &status);
+            if let Some(note) = detail.purchase.note.as_deref() {
+                components::caption(ui, note);
             }
-        } else {
-            format!(
-                "Planned · {} · {}",
-                detail.purchase.created_at,
-                detail.purchase.progress()
-            )
-        };
-        components::caption(ui, &detail_line);
-        if let Some(note) = detail.purchase.note.as_deref() {
-            components::caption(ui, note);
-        }
 
-        ui.add_space(SPACING.md);
-        if detail.lines.is_empty() {
-            components::caption(ui, "No lines on this purchase.");
-        } else {
-            egui::ScrollArea::vertical()
-                .id_salt("pos_purchase_view_lines")
-                .max_height(300.0)
-                .show(ui, |ui| {
-                    for line in &detail.lines {
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(40.0);
-                            ui.vertical(|ui| {
-                                ui.label(components::semibold(&line.name).size(TYPE.body));
+            ui.add_space(SPACING.md);
+            if detail.lines.is_empty() {
+                components::caption(ui, "No lines on this trip.");
+            } else {
+                components::divider(ui);
+                for line in &detail.lines {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(44.0);
+                        ui.vertical(|ui| {
+                            ui.label(components::semibold(&line.name).size(TYPE.body));
+                            components::caption(ui, &bought_label(line));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(cost) = line.unit_cost_minor {
                                 components::caption(
                                     ui,
-                                    &format!(
-                                        "{} ordered · {} received",
-                                        line.qty_ordered, line.qty_received
-                                    ),
+                                    &format!("{} each", Money::new(cost, currency).format()),
                                 );
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if let Some(cost) = line.unit_cost_minor {
-                                        components::caption(
-                                            ui,
-                                            &format!(
-                                                "{} each",
-                                                Money::new(cost, currency).format()
-                                            ),
-                                        );
-                                    }
-                                },
-                            );
+                            }
                         });
-                        components::divider(ui);
-                    }
-                });
-            if let Some(cost) = detail.purchase.cost_minor {
-                components::caption(
+                    });
+                    components::divider(ui);
+                }
+            }
+
+            ui.add_space(SPACING.sm);
+            match detail.purchase.cost_minor {
+                Some(cost) => components::caption(
                     ui,
                     &format!("Trip total {}.", Money::new(cost, currency).format()),
-                );
-            }
-        }
-
-        actions::footer(ui, |ui| {
-            if actions::secondary(ui, "Close").clicked() {
-                close = true;
+                ),
+                None => components::caption(ui, "No cost was recorded for this trip."),
             }
         });
-    });
 
-    if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+    if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
         state.purchase_view = None;
+    }
+}
+
+/// What came home on one line, in the fewest words that are still true.
+///
+/// Buying more than planned is not a shortfall, so only a genuine short count
+/// spells out both numbers.
+fn bought_label(line: &crate::db::PurchaseLine) -> String {
+    if line.qty_received == 0 {
+        "not bought".to_owned()
+    } else if line.qty_received < line.qty_ordered {
+        format!("{} of {} bought", line.qty_received, line.qty_ordered)
+    } else {
+        format!("{} bought", line.qty_received)
     }
 }
 

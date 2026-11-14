@@ -30,7 +30,7 @@ apps/desktop/src/
   db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
   modules.rs    Sell / Dashboard / Products / Sales / Settings / Suppliers /
-                Inventory / Purchases
+                Inventory / Restock
   checkout.rs   the payment modal and its change panel
   auth.rs       roles, credentials, lockout, lock screen, approvals, staff card
   commands.rs   the Ctrl+P palette
@@ -110,8 +110,15 @@ The split that keeps it coherent:
 A purchase is intent; a movement is physical truth. `receive_purchase()` is the
 only writer that turns one into the other: it updates `qty_received`, inserts one
 `receive` movement per counted line, updates `products.cost_minor` when a cost was
-given, and closes the purchase when no line is still open. It runs in one
+given, and closes the purchase. Receiving is one act — there is no half-received
+status, so the goods cannot be counted in twice. A line counted at zero stays on
+the record as not bought; the shortfall reads as "3 of 5 bought". It runs in one
 transaction, so a half-written trip cannot exist.
+
+Migration 15 closes the trips an earlier build left at `planned` with stock
+already received, dating `received_at` from the last movement that arrived.
+`receive_purchase()` also refuses a purchase whose lines already carry a count,
+because a database file is something a person can edit.
 
 `products.cost_minor` stores the last known cost, not a valuation. `record_sale()`
 copies it into `sale_lines.cost_minor`; the Dashboard's `margin()` sums only the
@@ -119,11 +126,10 @@ lines that have a cost and reports the coverage beside the figure. Rows sold
 before their product had a cost are excluded from both revenue and cost, never
 treated as pure profit.
 
-A plan with `qty_received = 0` on every line can be edited or deleted. Once any
-movement points at a line, the plan is continued by receiving only — replacing
-lines would orphan the ledger entry. Incoming on the stock screen is
-`SUM(qty_ordered - qty_received)` over planned lines, and the suggested quantity
-is `target - on_hand - incoming`, floored at zero.
+A planned purchase can be edited or deleted. A received one opens read-only —
+replacing a line a movement points at would orphan the ledger entry. Incoming on
+the stock screen is `SUM(qty_ordered - qty_received)` over planned lines, and the
+suggested quantity is `target - on_hand - incoming`, floored at zero.
 
 Purchases are local-only for now: they are not in the sync/export surface.
 
