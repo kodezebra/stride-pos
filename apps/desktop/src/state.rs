@@ -747,6 +747,13 @@ pub struct State {
     /// the same reason deleting a product asks in its row: the card is where
     /// the button was.
     pub backup_confirm: bool,
+    /// Why the last automatic backup did not happen, if it did not.
+    ///
+    /// Kept for the Backup card rather than shown as a toast: a shop whose
+    /// copies have been failing for a month needs to know that on the screen
+    /// where it can be fixed, not in a line that vanished with the sale behind
+    /// it. Cleared by the next copy that works.
+    pub auto_backup_error: Option<String>,
 
     /// What the Settings screen is editing. Committed by [`State::save_shop_name`],
     /// so a half-typed name is never written to disk.
@@ -921,6 +928,7 @@ impl State {
             file_notice: None,
             file_path: None,
             backup_confirm: false,
+            auto_backup_error: None,
             shop_draft,
             receipt_draft,
             tax_draft,

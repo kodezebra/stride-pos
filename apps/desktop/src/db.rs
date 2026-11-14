@@ -4018,6 +4018,86 @@ pub fn backup(store: &storage::Store, dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(target)
 }
 
+/// A backup, unless the newest one is younger than `hours`.
+///
+/// The file name is the record: every backup is named by the local clock it was
+/// taken with, so "when did we last copy this" needs no row of its own — and a
+/// database restored from a backup answers it from the files beside it, which
+/// is exactly when a fresh copy is wanted.
+///
+/// `None` means a recent copy is already there and nothing was written. Errors
+/// are returned: a scheduled backup that did not happen has to reach a person.
+pub fn backup_if_due(
+    store: &storage::Store,
+    dir: &Path,
+    hours: i64,
+) -> anyhow::Result<Option<PathBuf>> {
+    let cutoff = stamp_before(store, hours)?;
+    match newest_backup(dir)? {
+        Some(newest) if newest >= cutoff => Ok(None),
+        _ => backup(store, dir).map(Some),
+    }
+}
+
+/// The local clock `hours` ago, in the sortable form [`stamp`] writes.
+///
+/// Asked of SQLite so the subtraction uses the same clock and the same daylight
+/// rules as the formatting; two clocks disagreeing about an hour would make the
+/// check wrong twice a year.
+fn stamp_before(store: &storage::Store, hours: i64) -> anyhow::Result<String> {
+    let modifier = format!("-{hours} hours");
+    store
+        .conn()
+        .query_row(
+            "SELECT strftime('%Y%m%d-%H%M%S', 'now', 'localtime', ?1)",
+            [modifier],
+            |row| row.get::<_, String>(0),
+        )
+        .context("reading the clock")
+}
+
+/// The stamp of the newest backup in `dir`, if the directory has any.
+///
+/// Read from the name, not the modification time: the name is what a person
+/// sorts by, and the sequence suffix means two backups in one second still
+/// order the way they were taken.
+fn newest_backup(dir: &Path) -> anyhow::Result<Option<String>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // A till that has never backed up has no folder yet. That is "none",
+        // not a failure to look.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
+    };
+
+    let mut newest: Option<String> = None;
+    for entry in entries.filter_map(Result::ok) {
+        if !is_backup(&entry.path()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(BACKUP_PREFIX))
+        else {
+            continue;
+        };
+        // `<YYYYMMDD>-<HHMMSS>-<NNNN>.db`: the stamp is the first two parts.
+        let mut parts = rest.split('-');
+        let (Some(day), Some(clock)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if day.len() != 8 || clock.len() != 6 {
+            continue;
+        }
+        let stamp = format!("{day}-{clock}");
+        if newest.as_ref().is_none_or(|current| stamp > *current) {
+            newest = Some(stamp);
+        }
+    }
+    Ok(newest)
+}
+
 /// The next name in this second's run.
 ///
 /// The stamp has second resolution, so two backups in one second would otherwise
@@ -5630,6 +5710,67 @@ mod tests {
         files.sort();
         assert_eq!(files, expected);
         assert!(files.contains(&written[11]), "the newest survives");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A till that has never been copied gets a backup on the first check, and
+    /// the check creates the folder it needs.
+    #[test]
+    fn a_till_that_was_never_backed_up_gets_one() {
+        let (store, path) = store("backup-first");
+        let dir = std::env::temp_dir().join(format!("pos-backup-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let written = backup_if_due(&store, &dir, 24)
+            .expect("backup")
+            .expect("a copy");
+        assert!(written.exists(), "the copy is on disk");
+        assert!(newest_backup(&dir).expect("newest").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The second check of the same day writes nothing: a backup is a copy of
+    /// everything, and one every ten minutes would keep ten copies of the last
+    /// hour and none of last week.
+    #[test]
+    fn a_recent_backup_is_not_taken_twice() {
+        let (store, path) = store("backup-twice");
+        let dir = std::env::temp_dir().join(format!("pos-backup-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        backup_if_due(&store, &dir, 24).expect("first");
+        assert!(
+            backup_if_due(&store, &dir, 24).expect("second").is_none(),
+            "a copy from a moment ago is recent enough"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A copy older than the window is history: the check writes a fresh one.
+    /// The planted name comes from the same clock helper the check uses, so the
+    /// test does not depend on how long it takes to run.
+    #[test]
+    fn a_stale_backup_is_replaced() {
+        let (store, path) = store("backup-stale");
+        let dir = std::env::temp_dir().join(format!("pos-backup-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("make directory");
+
+        let old = stamp_before(&store, 48).expect("clock");
+        std::fs::write(dir.join(format!("{BACKUP_PREFIX}{old}-0001.db")), b"").expect("plant");
+        // A file that is not a backup must not answer the question either way.
+        std::fs::write(dir.join("notes.txt"), b"a note").expect("plant");
+
+        assert!(
+            backup_if_due(&store, &dir, 24).expect("backup").is_some(),
+            "two days is older than a day"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(path);
