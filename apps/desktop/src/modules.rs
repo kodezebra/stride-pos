@@ -6,13 +6,13 @@
 //! the rail all agree on what "module 2" means without a registry.
 //!
 //! Adding a module: add a struct here, add it to [`all`] in the same position as
-//! its index constant, pick a key in the F1–F8 band, and add its index to
-//! [`rail_order`] for the roles that should see it. Everything else — rail
-//! entry, tooltip, palette entry, persistence index — follows from those edits.
+//! its index constant, and list its index in [`tabs`] under the view it belongs
+//! to. Everything else — rail entry, tab strip, palette entry, persistence index
+//! — follows from those edits.
 //!
-//! Purchases is F7 and Settings is F8, so the rail reads top to bottom in key
-//! order with Settings last. This is documented here and nowhere else so the
-//! pair cannot drift.
+//! There are three keys, not eight: F1, F2 and F3 open the three views, and the
+//! tabs inside a view are clicked. A key per page does not survive contact with
+//! a fourth page, and a till has no room for a function-key crib sheet.
 
 use std::path::Path;
 
@@ -30,8 +30,9 @@ use crate::db::{Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplie
 use crate::picker::ExportKind;
 use crate::state::{self, SellView, State};
 
-// Indices into `all()`. Order is the activity-bar order and the persisted value,
-// so these numbers are as permanent as the module list.
+// Indices into `all()`. Order is the persisted value, so these numbers are as
+// permanent as the module list. It is not the order anything is drawn in: see
+// [`views`] for the rail and [`tabs`] for what sits inside each view.
 pub const SELL: usize = 0;
 pub const DASHBOARD: usize = 1;
 pub const PRODUCTS: usize = 2;
@@ -44,6 +45,58 @@ pub const PURCHASES: usize = 7;
 /// Number of modules. Used to clamp a persisted index from an older or newer
 /// build before it is used as an array index.
 pub const COUNT: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Views and tabs
+// ---------------------------------------------------------------------------
+
+/// The three places a till has.
+///
+/// A view is a whole way of working, not a page: Sell is the counter, Day is
+/// what the shop did, Shop is what the shop is. A tab is one page of that job,
+/// so it is flat — nothing hides behind a tab, and nothing behind a tab hides
+/// behind another one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Sell,
+    Day,
+    Shop,
+}
+
+impl View {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sell => "Sell",
+            Self::Day => "Day",
+            Self::Shop => "Shop",
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Self::Sell => Icon::CART,
+            Self::Day => Icon::DASHBOARD,
+            Self::Shop => Icon::BOXES,
+        }
+    }
+
+    /// The key that jumps here. Three keys, no modifiers: the whole rail fits
+    /// under the left hand.
+    pub fn hotkey(self) -> egui::Key {
+        match self {
+            Self::Sell => egui::Key::F1,
+            Self::Day => egui::Key::F2,
+            Self::Shop => egui::Key::F3,
+        }
+    }
+}
+
+/// Day's tabs: the sales that happened, and what they add up to.
+const DAY_TABS: [usize; 2] = [SALES, DASHBOARD];
+
+/// Shop's tabs: what is for sale, what is on the shelf, what is coming in, who
+/// brings it, and how the till itself is set up.
+const SHOP_TABS: [usize; 5] = [PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS, SETTINGS];
 
 /// Width of the cart column inside the Sell workspace.
 ///
@@ -81,15 +134,6 @@ const MONTHS: [&str; 12] = [
 ];
 
 pub trait Module {
-    /// Activity-bar tooltip, palette label, and sidebar heading.
-    fn title(&self) -> &'static str;
-
-    fn icon(&self) -> Icon;
-
-    /// The key that jumps here. F-keys are global and cheap: no modifier, no
-    /// chord, and a cashier can hit them without looking.
-    fn hotkey(&self) -> egui::Key;
-
     /// A fixed sidebar width, or `None` to let the user drag it.
     fn fixed_sidebar(&self) -> Option<f32> {
         None
@@ -158,8 +202,8 @@ fn action_bar(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 /// Every module, in stable index order. Must stay in sync with the index
 /// constants above.
 ///
-/// This is the persisted order, not the activity bar's order: see
-/// [`rail_order`] for what each role sees, top to bottom.
+/// This is the persisted order, not the order anything is drawn in: see
+/// [`views`] for the rail and [`tabs`] for what each view holds.
 pub fn all() -> Vec<Box<dyn Module>> {
     vec![
         Box::new(Sell),
@@ -175,25 +219,86 @@ pub fn all() -> Vec<Box<dyn Module>> {
 
 /// The activity bar for a role, top to bottom.
 ///
-/// Indices stay stable across releases; only this presentation order changes.
-/// Keep the order aligned with the F-keys: the first item is F1, the next F2,
-/// and so on. Settings sits last because it is a back-office screen, so
-/// Purchases takes F7 and Settings takes F8.
+/// Three entries, because a till has three jobs: take money, know what the day
+/// did, and keep the shop stocked. Everything that used to be its own rail row
+/// is a tab inside one of these — a bar that grows a row per screen is a menu,
+/// and a menu is something the cashier has to read instead of the cart.
 ///
-/// A cashier sees only the screens their work needs. Hiding Products,
-/// Suppliers and Settings is not the permission boundary — [`open`] is — but a
-/// navigation bar that offers doors the person cannot walk through is a dead
-/// end, and a dead end teaches a cashier to stop using the bar.
-pub fn rail_order(role: crate::auth::Role) -> &'static [usize] {
-    const CASHIER: [usize; 4] = [SELL, SALES, INVENTORY, DASHBOARD];
-    const MANAGER: [usize; 8] = [
-        SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, PURCHASES, SETTINGS,
-    ];
+/// A cashier sees only the screens their work needs. Hiding Shop is not the
+/// permission boundary — [`open`] is — but a navigation bar that offers doors
+/// the person cannot walk through is a dead end, and a dead end teaches a
+/// cashier to stop using the bar.
+pub fn views(role: crate::auth::Role) -> &'static [View] {
+    const CASHIER: [View; 2] = [View::Sell, View::Day];
+    const MANAGER: [View; 3] = [View::Sell, View::Day, View::Shop];
 
     if role >= crate::auth::Role::Manager {
         &MANAGER
     } else {
         &CASHIER
+    }
+}
+
+/// The tabs of one view, left to right. The first one is where the view lands.
+///
+/// A cashier reads the day's own sales; the trends that read the shop's whole
+/// history are the manager's screen.
+pub fn tabs(view: View, role: crate::auth::Role) -> &'static [usize] {
+    const CASHIER_DAY: [usize; 1] = [SALES];
+
+    match view {
+        View::Sell => &[],
+        View::Day if role >= crate::auth::Role::Manager => &DAY_TABS,
+        View::Day => &CASHIER_DAY,
+        View::Shop if role >= crate::auth::Role::Manager => &SHOP_TABS,
+        // The back office is the manager's, all of it.
+        View::Shop => &[],
+    }
+}
+
+/// The module a view opens on. Pressing the view's key lands here.
+pub fn landing(view: View) -> usize {
+    match view {
+        View::Sell => SELL,
+        View::Day => SALES,
+        View::Shop => PRODUCTS,
+    }
+}
+
+/// Which view a module belongs to.
+pub fn view_of(module: usize) -> View {
+    match module {
+        SELL => View::Sell,
+        SALES | DASHBOARD => View::Day,
+        _ => View::Shop,
+    }
+}
+
+/// Whether this role can reach a module at all.
+///
+/// Used to pull a persisted index back inside the rail after a sign-in, so a
+/// cashier never inherits the manager's screen from the last session.
+pub fn reachable(role: crate::auth::Role, module: usize) -> bool {
+    let view = view_of(module);
+    // A view with one page has no tab to point at, so its landing module is the
+    // page. Every other module has to be listed on the strip.
+    views(role).contains(&view) && (landing(view) == module || tabs(view, role).contains(&module))
+}
+
+/// What a tab is called on the strip and in the palette.
+///
+/// The label names the job, not the table: "Restock" is a thing a person does,
+/// "Purchases" is a thing the database records.
+pub fn tab_label(module: usize) -> &'static str {
+    match module {
+        SELL => "Sell",
+        SALES => "Today",
+        DASHBOARD => "Trends",
+        PRODUCTS => "Catalog",
+        INVENTORY => "Stock",
+        PURCHASES => "Restock",
+        SUPPLIERS => "Suppliers",
+        _ => "Setup",
     }
 }
 
@@ -205,18 +310,6 @@ pub fn rail_order(role: crate::auth::Role) -> &'static [usize] {
 struct Sell;
 
 impl Module for Sell {
-    fn title(&self) -> &'static str {
-        "Sell"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::CART
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F1
-    }
-
     /// Fixed: a drag that starts as a missed category button and ends as a
     /// 40 px sidebar is a mistake the cashier pays for.
     fn fixed_sidebar(&self) -> Option<f32> {
@@ -856,18 +949,6 @@ pub(crate) fn amount_row(ui: &mut egui::Ui, label: &str, amount: &str, strong: b
 struct Dashboard;
 
 impl Module for Dashboard {
-    fn title(&self) -> &'static str {
-        "Dashboard"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::DASHBOARD
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F4
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Range");
         for (index, range) in state::RANGES.iter().enumerate() {
@@ -879,7 +960,7 @@ impl Module for Dashboard {
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let mut all_sales = false;
-        action_bar(ui, state::range_caption(state.range), |ui| {
+        action_bar(ui, "Trends", |ui| {
             if components::icon_button(ui, Icon::RECEIPT, 32.0)
                 .on_hover_text("Open all sales in this range")
                 .clicked()
@@ -906,10 +987,17 @@ impl Module for Dashboard {
         let previous_units = crate::db::previous_items_sold(&state.store, state.range, user);
         let peak = crate::db::peak_hour(&state.store, state.range, user);
 
-        // The range is the toolbar title now. The comparison is stated once,
-        // under it: a caption on every card would repeat it four times and
-        // squeeze the figures.
-        components::caption(ui, comparison_caption(state.range, shop));
+        // The range is named once, on the line under the page title: the
+        // sidebar highlights it, but a collapsed sidebar must not leave the
+        // figures undated.
+        components::caption(
+            ui,
+            &format!(
+                "{} · {}",
+                state::range_caption(state.range),
+                comparison_caption(state.range, shop)
+            ),
+        );
         ui.add_space(SPACING.sm);
 
         let (revenue_sub, revenue_trend) =
@@ -1293,24 +1381,28 @@ fn change(now: i64, before: Option<i64>, money: bool) -> (String, Trend) {
     }
 }
 
-/// What the cards are being compared with, said once under the range title.
+/// What the cards are being compared with, said once under the page title.
+///
+/// A continuation, not a sentence: it is joined to the range name on the same
+/// line, so the page reads "Last 7 days · compared with the 7 days before"
+/// rather than stacking two headings.
 ///
 /// All time has no previous window, so its line says what the figures are
 /// instead of promising a comparison.
 fn comparison_caption(range: usize, shop: bool) -> &'static str {
     if shop {
         match range {
-            0 => "Compared with yesterday",
-            1 => "Compared with the previous 7 days",
-            2 => "Compared with the previous 30 days",
-            _ => "All recorded sales",
+            0 => "compared with yesterday",
+            1 => "compared with the 7 days before",
+            2 => "compared with the 30 days before",
+            _ => "everything the shop has sold",
         }
     } else {
         match range {
-            0 => "Only your sales · compared with yesterday",
-            1 => "Only your sales · compared with the previous 7 days",
-            2 => "Only your sales · compared with the previous 30 days",
-            _ => "Only your sales · all recorded",
+            0 => "only your sales · compared with yesterday",
+            1 => "only your sales · compared with the 7 days before",
+            2 => "only your sales · compared with the 30 days before",
+            _ => "only your sales",
         }
     }
 }
@@ -1916,18 +2008,6 @@ fn export_icon() -> Icon {
 struct Products;
 
 impl Module for Products {
-    fn title(&self) -> &'static str {
-        "Products"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::PACKAGE
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F5
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         categories_sidebar(ui, state);
 
@@ -2998,20 +3078,6 @@ fn field(
 struct Purchases;
 
 impl Module for Purchases {
-    fn title(&self) -> &'static str {
-        "Purchases"
-    }
-
-    fn icon(&self) -> Icon {
-        // A basket, not the cart. Sell already owns the cart, and Products owns
-        // the parcel; the basket is the one icon that reads as "buying stock".
-        Icon::named("shopping-basket").unwrap_or(Icon::PACKAGE)
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F7
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Buying");
         components::field_label(ui, "Search");
@@ -3038,7 +3104,7 @@ impl Module for Purchases {
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
         let mut new = false;
-        action_bar(ui, "Purchases", |ui| {
+        action_bar(ui, "Restock", |ui| {
             if !can_manage {
                 return;
             }
@@ -3888,18 +3954,6 @@ pub fn open(state: &mut State, index: usize) {
 struct Suppliers;
 
 impl Module for Suppliers {
-    fn title(&self) -> &'static str {
-        "Suppliers"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::TRUCK
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F6
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Directory");
         components::field_label(ui, "Search");
@@ -4154,18 +4208,6 @@ fn restore_icon() -> Icon {
 struct Inventory;
 
 impl Module for Inventory {
-    fn title(&self) -> &'static str {
-        "Inventory"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::BOXES
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F3
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Stock");
         components::field_label(ui, "Search");
@@ -4191,7 +4233,7 @@ impl Module for Inventory {
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
         let mut track = false;
-        action_bar(ui, "Inventory", |ui| {
+        action_bar(ui, "Stock", |ui| {
             if !can_manage {
                 return;
             }
@@ -4778,18 +4820,6 @@ fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovement) {
 struct Sales;
 
 impl Module for Sales {
-    fn title(&self) -> &'static str {
-        "Sales"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::RECEIPT
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F2
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Range");
         for (index, range) in state::RANGES.iter().enumerate() {
@@ -4875,18 +4905,6 @@ impl Module for Sales {
 struct Settings;
 
 impl Module for Settings {
-    fn title(&self) -> &'static str {
-        "Settings"
-    }
-
-    fn icon(&self) -> Icon {
-        Icon::SETTINGS
-    }
-
-    fn hotkey(&self) -> egui::Key {
-        egui::Key::F8
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Settings");
         for (index, section) in state::SETTINGS_SECTIONS.iter().enumerate() {
@@ -6212,82 +6230,100 @@ fn receipt_sample(ui: &mut egui::Ui, state: &State) {
 mod tests {
     use super::*;
 
-    /// The F-band is the till's whole keyboard contract, and `COUNT` is what
-    /// keeps a persisted index inside the list. Both are easy to break when a
-    /// module is added, and neither breakage is visible until a cashier hits a
-    /// stale key — so pin them here.
+    /// `COUNT` keeps a persisted index inside the list, and the view map is
+    /// what keeps that index reachable. Both are easy to break when a module is
+    /// added, and neither breakage is visible until a cashier lands on a screen
+    /// the rail cannot show them — so pin them here.
     #[test]
-    fn the_module_table_matches_its_index_and_hotkey_band() {
-        let modules = all();
-
+    fn the_module_table_matches_its_index() {
         assert_eq!(
-            modules.len(),
+            all().len(),
             COUNT,
             "COUNT must equal the number of modules or a saved index can point past the end"
         );
-
-        let mut keys: Vec<u8> = modules.iter().map(|module| module.hotkey() as u8).collect();
-        let f1 = egui::Key::F1 as u8;
-        let f7 = egui::Key::F7 as u8;
-        let f8 = egui::Key::F8 as u8;
-
-        for key in &keys {
-            assert!((*key >= f1) && (*key <= f8), "hotkeys live in F1-F8");
-        }
-        assert!(keys.contains(&f7), "F7 belongs to Purchases now");
-        assert!(keys.contains(&f8), "F8 belongs to Settings now");
-
-        let before = keys.len();
-        keys.sort_unstable();
-        keys.dedup();
-        assert_eq!(before, keys.len(), "two modules must never share a hotkey");
     }
 
     #[test]
-    fn the_rail_puts_settings_last_and_keeps_hotkeys_in_order() {
-        let modules = all();
-        let manager = rail_order(crate::auth::Role::Manager);
+    fn the_rail_is_three_views_with_the_keys_in_order() {
+        let manager = views(crate::auth::Role::Manager);
+        assert_eq!(manager, &[View::Sell, View::Day, View::Shop][..]);
 
-        assert_eq!(
-            manager,
-            &[
-                SELL, SALES, INVENTORY, DASHBOARD, PRODUCTS, SUPPLIERS, PURCHASES, SETTINGS
-            ][..]
-        );
-        assert_eq!(
-            manager.last().copied(),
-            Some(SETTINGS),
-            "Settings is the back-office screen and sits last"
-        );
-
-        // The rail's order and the F-keys are one contract: the first row is
-        // F1, and a manager can walk the whole bar without looking for a gap.
-        for (offset, &index) in manager.iter().enumerate() {
+        // Three keys, in rail order, with no gaps: F1, F2, F3.
+        for (offset, view) in manager.iter().enumerate() {
             assert_eq!(
-                modules[index].hotkey() as u8,
+                view.hotkey() as u8,
                 egui::Key::F1 as u8 + offset as u8,
                 "{} should be F{}",
-                modules[index].title(),
+                view.label(),
                 offset + 1
             );
         }
 
-        let cashier = rail_order(crate::auth::Role::Cashier);
-        assert_eq!(cashier, &[SELL, SALES, INVENTORY, DASHBOARD][..]);
-        for admin_only in [PRODUCTS, SUPPLIERS, SETTINGS, PURCHASES] {
+        let cashier = views(crate::auth::Role::Cashier);
+        assert_eq!(cashier, &[View::Sell, View::Day][..]);
+        assert!(
+            !cashier.contains(&View::Shop),
+            "a cashier rail must not offer the back office"
+        );
+    }
+
+    #[test]
+    fn every_module_is_a_tab_of_exactly_one_view() {
+        for view in views(crate::auth::Role::Manager) {
+            let tabs = tabs(*view, crate::auth::Role::Manager);
+            // A view lands on its first tab, and a single-page view has none to
+            // draw — but it still has a landing module.
+            if let Some(first) = tabs.first() {
+                assert_eq!(
+                    *first,
+                    landing(*view),
+                    "{} lands on its first tab",
+                    view.label()
+                );
+            }
+            for &index in tabs {
+                assert_eq!(
+                    view_of(index),
+                    *view,
+                    "{} is on the wrong view",
+                    tab_label(index)
+                );
+            }
+        }
+
+        // No module is orphaned: each one is either the landing page of its
+        // view or a tab on it.
+        for index in 0..COUNT {
+            let view = view_of(index);
             assert!(
-                !cashier.contains(&admin_only),
-                "a cashier rail must not offer an admin-only module"
+                landing(view) == index || tabs(view, crate::auth::Role::Manager).contains(&index),
+                "{} has no tab to live on",
+                tab_label(index)
             );
         }
     }
 
     #[test]
-    fn every_module_has_a_title() {
-        // The rail and the palette both read `title`; an empty one is a blank
-        // button that is impossible to diagnose from a screenshot.
-        for module in all() {
-            assert!(!module.title().is_empty());
+    fn the_tabs_of_a_view_are_named_and_ordered() {
+        assert_eq!(
+            tabs(View::Day, crate::auth::Role::Manager),
+            &[SALES, DASHBOARD][..]
+        );
+        assert_eq!(
+            tabs(View::Shop, crate::auth::Role::Manager),
+            &[PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS, SETTINGS][..]
+        );
+
+        // A cashier reads the day's own sales; the trends that read the shop's
+        // whole history are the manager's screen.
+        assert_eq!(tabs(View::Day, crate::auth::Role::Cashier), &[SALES][..]);
+        assert!(!reachable(crate::auth::Role::Cashier, DASHBOARD));
+        assert!(!reachable(crate::auth::Role::Cashier, SETTINGS));
+        assert!(reachable(crate::auth::Role::Cashier, SELL));
+        assert!(reachable(crate::auth::Role::Manager, SETTINGS));
+
+        for index in 0..COUNT {
+            assert!(!tab_label(index).is_empty());
         }
     }
 
@@ -6350,20 +6386,17 @@ mod tests {
 
     #[test]
     fn the_comparison_says_the_window_and_whether_it_is_the_shop() {
-        assert_eq!(comparison_caption(0, true), "Compared with yesterday");
+        assert_eq!(comparison_caption(0, true), "compared with yesterday");
         assert_eq!(
             comparison_caption(1, true),
-            "Compared with the previous 7 days"
+            "compared with the 7 days before"
         );
-        assert_eq!(comparison_caption(3, true), "All recorded sales");
+        assert_eq!(comparison_caption(3, true), "everything the shop has sold");
         assert_eq!(
             comparison_caption(1, false),
-            "Only your sales · compared with the previous 7 days"
+            "only your sales · compared with the 7 days before"
         );
-        assert_eq!(
-            comparison_caption(3, false),
-            "Only your sales · all recorded"
-        );
+        assert_eq!(comparison_caption(3, false), "only your sales");
         // Only all time needs to admit that its chart is capped.
         assert_eq!(chart_caption(0), None);
         assert_eq!(chart_caption(3), Some("The latest 30 selling days"));

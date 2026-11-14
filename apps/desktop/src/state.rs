@@ -1250,7 +1250,7 @@ impl State {
                 // A shared till must not inherit a screen the new person cannot
                 // use. A cashier who signs in after a manager was in Settings
                 // lands on Sell instead of a locked door.
-                if !crate::modules::rail_order(user.role).contains(&self.module) {
+                if !crate::modules::reachable(user.role, self.module) {
                     self.select(crate::modules::SELL);
                 }
             }

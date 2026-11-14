@@ -10,7 +10,7 @@
 //!
 //! | Key         | Action                    |
 //! |-------------|---------------------------|
-//! | `F1`..`F8`  | Switch to a visible module |
+//! | `F1`..`F3`  | Sell, Day, Shop           |
 //! | `Ctrl+B`    | Collapse/expand sidebar   |
 //! | `Ctrl+P`    | Command palette           |
 //! | `Ctrl+Enter`| Take payment              |
@@ -325,14 +325,14 @@ impl PosShell {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let mut jump = None;
-        let order = modules::rail_order(self.current_role());
+        let order = modules::views(self.current_role());
         ctx.input(|input| {
             // Walk the visible rail, not the whole module table: an F-key for a
             // destination this role cannot use should do nothing, not open a
             // manager prompt from a key the cashier pressed by accident.
-            for &index in order {
-                if input.key_pressed(self.modules[index].hotkey()) {
-                    jump = Some(index);
+            for &view in order {
+                if input.key_pressed(view.hotkey()) {
+                    jump = Some(modules::landing(view));
                 }
             }
         });
@@ -407,29 +407,27 @@ impl PosShell {
             .as_ref()
             .map(|session| session.role)
             .unwrap_or(Role::Cashier);
-        let order = modules::rail_order(role);
+        let order = modules::views(role);
         let rail: Vec<RailItem> = order
             .iter()
-            .map(|&index| {
-                let module = &modules[index];
-                RailItem {
-                    icon: module.icon(),
-                    label: module.title(),
-                    hotkey: module.hotkey().name(),
-                }
+            .map(|&view| RailItem {
+                icon: view.icon(),
+                label: view.label(),
+                hotkey: view.hotkey().name(),
             })
             .collect();
         let selected = order
             .iter()
-            .position(|&index| index == active)
+            .position(|&view| view == modules::view_of(active))
             .unwrap_or(usize::MAX);
 
         regions::status(ui, |ui| status_bar(ui, state));
 
-        // The rail's index is the visible row, not the module index. The order
-        // is role-filtered, so those two numbers only agree for a manager.
+        // The rail's index is the visible row, not the view: the order is
+        // role-filtered, so row 1 is Day for everyone and row 2 only exists for
+        // a manager.
         if let Some(next) = regions::rail(ui, &rail, selected) {
-            modules::open(state, order[next]);
+            modules::open(state, modules::landing(order[next]));
         }
 
         let module = &mut modules[active];
@@ -445,10 +443,21 @@ impl PosShell {
         state.set_sidebar_open(active, open);
 
         regions::workspace(ui, |ui| {
+            // A view with more than one page shows its tabs where a page title
+            // would go. Sell has one page, so it gets no strip at all: the
+            // counter is the counter.
+            let tabs = modules::tabs(modules::view_of(state.module), role);
+            if tabs.len() > 1
+                && let Some(index) = tab_strip(ui, tabs, state.module)
+            {
+                modules::open(state, index);
+            }
+
             // Pages scroll as a whole: the dashboard's 30-day chart and the
             // staff list both run past the fold, and a page that cannot scroll
             // hides the bottom of itself. Sell opts out — its cart is pinned to
             // the pane, and an unbounded height would un-pin it.
+            let active = state.module;
             let module = &mut modules[active];
             // Pinned actions sit outside the scroll area: a long list must not
             // take "New product" or "Export" past the fold with it.
@@ -663,4 +672,73 @@ fn currency_group(
         }
     }
     ui.add_space(SPACING.sm);
+}
+
+/// The tabs of the current view, as one flat row.
+///
+/// A tab is a page of the same job, so it sits where a page title would: a
+/// single row of words, the active one underlined. Nothing is hidden behind a
+/// tab and nothing behind it hides another one — that is the whole point of
+/// collapsing eight rail rows into three views.
+///
+/// Returns the tab that was clicked, if any. The caller opens it before drawing
+/// the page, so the switch lands in the same frame: the only thing left over
+/// from the old page is the sidebar, which the next repaint corrects.
+fn tab_strip(ui: &mut egui::Ui, tabs: &[usize], active: usize) -> Option<usize> {
+    const HEIGHT: f32 = 36.0;
+
+    let palette = ui_kit::theme::current(ui.ctx());
+    let full = ui.available_rect_before_wrap();
+    let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), HEIGHT));
+
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = SPACING.xs;
+
+    let mut clicked = None;
+    for &index in tabs {
+        let selected = index == active;
+        let ink = if selected {
+            egui::Color32::from(palette.accent_ink())
+        } else {
+            egui::Color32::from(palette.text_muted)
+        };
+
+        let response = row
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(modules::tab_label(index))
+                        .size(TYPE.body)
+                        .color(ink),
+                )
+                .frame(false)
+                .min_size(egui::vec2(0.0, HEIGHT)),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        if selected {
+            // The underline is the only rule on this row: the page below draws
+            // its own hairline, and two lines a button apart read as a table
+            // header rather than as navigation.
+            let underline = egui::Rect::from_min_size(
+                egui::pos2(response.rect.left() + 4.0, response.rect.bottom() - 3.0),
+                egui::vec2((response.rect.width() - 8.0).max(0.0), 2.0),
+            );
+            row.painter().rect_filled(
+                underline,
+                egui::CornerRadius::same(1),
+                egui::Color32::from(palette.accent_ink()),
+            );
+        }
+
+        if response.clicked() {
+            clicked = Some(index);
+        }
+    }
+
+    ui.advance_cursor_after_rect(rect);
+    clicked
 }
