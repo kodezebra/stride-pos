@@ -13,6 +13,10 @@ use crate::sync::protocol as sync_proto;
 /// A completed sale, as the history table shows it.
 pub struct Sale {
     pub id: i64,
+    /// The number on the paper. `None` on a sale written before numbers
+    /// carried a device; the list falls back to the row id, which is what that
+    /// slip said.
+    pub receipt_no: Option<String>,
     /// What the customer actually paid: the exact total plus cash rounding.
     pub paid_minor: i64,
     /// Rendered in the till's local time, minute precision (`01/11 09:15`):
@@ -36,6 +40,10 @@ pub struct Sale {
 /// whatever the screen happened to show.
 pub struct ExportSale {
     pub id: i64,
+    /// The number on the paper the customer holds, so a slip quoted at the
+    /// counter can be found in the file. Empty on sales written before numbers
+    /// carried a device.
+    pub receipt_no: Option<String>,
     /// Local time, whole seconds: a file is compared against another system's
     /// books, so the minute the screen shows is not precise enough.
     pub created_at: String,
@@ -1011,6 +1019,25 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON sales (shift_uid) WHERE shift_uid IS NOT NULL;
         "#,
     },
+    // A receipt number the customer can quote, and the till can find.
+    //
+    // The row id was a local counter: two tills syncing to each other both have
+    // a sale 42, and the slip in the customer's hand has to be one number. The
+    // number is written when the sale is, and never recomputed — a receipt that
+    // renumbers itself when a peer's sale arrives is not a receipt.
+    //
+    // Nullable, and left null on every row already written: those slips were
+    // printed with `#42` on them, and the archive has to keep saying `#42`. New
+    // sales carry `<device>-<day>-<seq>`.
+    Migration {
+        version: 14,
+        name: "receipt_numbers",
+        sql: r#"
+            ALTER TABLE sales ADD COLUMN receipt_no TEXT;
+            CREATE UNIQUE INDEX IF NOT EXISTS sales_receipt_no
+                ON sales (origin_device, receipt_no) WHERE receipt_no IS NOT NULL;
+        "#,
+    },
 ];
 
 /// Repair a `suppliers` table left behind by an intermediate build of the
@@ -1317,6 +1344,74 @@ pub fn bump_change_seq(transaction: &rusqlite::Transaction<'_>) -> anyhow::Resul
     Ok(seq)
 }
 
+/// The receipt number a sale is printed with: `<device>-<day>-<seq>`.
+///
+/// The row id is a local counter — two tills syncing to each other both have a
+/// sale 42 — so the customer's copy needs a number that is theirs alone. The
+/// device prefix makes it unique between tills, the day makes it findable in a
+/// box of paper, and the sequence restarts every morning so it stays short.
+///
+/// Read and bumped inside the sale's own transaction: two sales can never share
+/// a number, and a number is never reused. A deleted sale does not give its
+/// number back, which is why the count lives in `meta` rather than being a
+/// `COUNT(*)` of the rows that remain.
+pub fn next_receipt_no(
+    transaction: &rusqlite::Transaction<'_>,
+    device: &str,
+) -> anyhow::Result<String> {
+    let day: String =
+        transaction.query_row("SELECT strftime('%Y%m%d', 'now', 'localtime')", [], |row| {
+            row.get(0)
+        })?;
+
+    let stored: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'receipt_day'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let last: i64 = if stored.as_deref() == Some(day.as_str()) {
+        transaction
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'receipt_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let seq = last + 1;
+    put_meta(transaction, "receipt_day", &day)?;
+    put_meta(transaction, "receipt_seq", &seq.to_string())?;
+    Ok(format!("{}-{day}-{seq:03}", device_short(device)))
+}
+
+/// Four characters of a device id, for the front of a receipt number.
+///
+/// The tail, not the head: a UUIDv7 leads with a timestamp, so two tills
+/// commissioned the same day would share a prefix and the number would not say
+/// which one sold. Uniqueness does not rest on these four characters — the
+/// sequence is per device — so a short collision costs nothing but a shrug.
+fn device_short(device: &str) -> String {
+    let compact: String = device.chars().filter(char::is_ascii_hexdigit).collect();
+    let start = compact.len().saturating_sub(4);
+    compact[start..].to_ascii_uppercase()
+}
+
+/// One `meta` value, written inside a transaction.
+fn put_meta(transaction: &rusqlite::Transaction<'_>, key: &str, value: &str) -> anyhow::Result<()> {
+    transaction.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )?;
+    Ok(())
+}
+
 /// Mark the catalog as changed for peers that compare versions before pulling.
 ///
 /// Table writes bump it through triggers in migration 10. Values that live
@@ -1511,7 +1606,8 @@ pub fn pull_sales(
         let mut statement = conn.prepare(
             "SELECT id, change_seq, uid, COALESCE(origin_device, ''),
                     is_offline, user_id, total_minor, rounding_minor, tax_minor,
-                    COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), '')
+                    COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), ''),
+                    receipt_no
              FROM sales
              WHERE uid IS NOT NULL AND change_seq IS NOT NULL AND change_seq > ?1
              ORDER BY change_seq ASC
@@ -1530,6 +1626,7 @@ pub fn pull_sales(
                     total_minor: row.get(6)?,
                     rounding_minor: row.get(7)?,
                     tax_minor: row.get(8)?,
+                    receipt_no: row.get(10)?,
                     lines: Vec::new(),
                     payments: Vec::new(),
                     movements: Vec::new(),
@@ -3036,12 +3133,13 @@ pub fn record_sale(
     let change_seq = bump_change_seq(&transaction)?;
 
     let sale_uid = uuid::Uuid::now_v7().to_string();
+    let receipt_no = next_receipt_no(&transaction, &origin_device)?;
 
     transaction.execute(
         "INSERT INTO sales
              (total_minor, rounding_minor, tax_minor, user_id, uid, origin_device,
-              change_seq, shift_uid)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              change_seq, shift_uid, receipt_no)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
             total_minor,
             rounding_minor,
@@ -3051,6 +3149,7 @@ pub fn record_sale(
             origin_device.as_str(),
             change_seq,
             shift_uid,
+            receipt_no.as_str(),
         ),
     )?;
     let id = transaction.last_insert_rowid();
@@ -3499,7 +3598,7 @@ pub fn peak_hour(store: &storage::Store, range: usize, user: Option<&str>) -> Op
 /// the cards above it did not count.
 pub fn sales(store: &storage::Store, range: usize, limit: i64, user: Option<&str>) -> Vec<Sale> {
     let sql = format!(
-        "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name
+        "SELECT s.id, s.total_minor + s.rounding_minor, strftime('%d/%m %H:%M', s.created_at, 'localtime'), u.name, s.receipt_no
          FROM sales s LEFT JOIN users u ON u.id = s.user_id
          WHERE {}
          ORDER BY s.id DESC LIMIT ?2",
@@ -3520,6 +3619,7 @@ pub fn sales(store: &storage::Store, range: usize, limit: i64, user: Option<&str
             paid_minor: row.get(1)?,
             created_at: row.get(2)?,
             cashier: row.get(3)?,
+            receipt_no: row.get(4)?,
         })
     });
 
@@ -3553,7 +3653,7 @@ pub fn export_sales(
     let sql = format!(
         "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
                 s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
-                COALESCE(GROUP_CONCAT(DISTINCT p.method), '')
+                COALESCE(GROUP_CONCAT(DISTINCT p.method), ''), s.receipt_no
          FROM sales s
          LEFT JOIN users u ON u.id = s.user_id
          LEFT JOIN payments p ON p.sale_id = s.id
@@ -3576,6 +3676,7 @@ pub fn export_sales(
                 rounding_minor: row.get(4)?,
                 paid_minor: row.get(5)?,
                 method: row.get(6)?,
+                receipt_no: row.get(7)?,
             })
         })
         .context("reading the sales export")?;
@@ -3624,6 +3725,10 @@ pub struct DetailLine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaleDetail {
     pub id: i64,
+    /// The number on the paper: `<device>-<day>-<seq>`, or `None` on a sale
+    /// written before numbers carried a device. The receipt prints the row id
+    /// in that case, because that is what the slip in the customer's hand says.
+    pub receipt_no: Option<String>,
     pub cashier: Option<String>,
     /// Local time, like the list shows: the stored value stays UTC.
     pub created_at: String,
@@ -3654,7 +3759,7 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
 
     let head = match conn.query_row(
         "SELECT s.total_minor, s.rounding_minor, s.tax_minor, \
-         strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name
+         strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name, s.receipt_no
          FROM sales s LEFT JOIN users u ON u.id = s.user_id
          WHERE s.id = ?1",
         [id],
@@ -3665,6 +3770,7 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         },
     ) {
@@ -3731,6 +3837,7 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
 
     Some(SaleDetail {
         id,
+        receipt_no: head.5,
         cashier: head.4,
         created_at: head.3,
         total_minor: head.0,
@@ -5185,6 +5292,104 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sale_lines", [], |row| row.get(0))
             .expect("count lines");
         assert_eq!(line_count, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A receipt number says which till, which day and which sale. The row id
+    /// alone is the same 42 on two tills that sync, and the slip in the
+    /// customer's hand has to be one number.
+    #[test]
+    fn a_sale_is_numbered_by_its_device_and_its_day() {
+        let (store, path) = store("receipt-number");
+        let line = || SaleLine {
+            product_id: None,
+            name: "Milk".to_owned(),
+            qty: 1,
+            unit_minor: 2_000,
+        };
+
+        let first = record_sale(&store, &[line()], 0, 0, 2_000, None, None).expect("first");
+        let second = record_sale(&store, &[line()], 0, 0, 2_000, None, None).expect("second");
+
+        let device = ensure_device_id(&store).expect("device");
+        let short = device_short(&device);
+        let day: String = store
+            .conn()
+            .query_row("SELECT strftime('%Y%m%d', 'now', 'localtime')", [], |row| {
+                row.get(0)
+            })
+            .expect("the clock");
+
+        let numbers: Vec<String> = [first.id, second.id]
+            .into_iter()
+            .map(|id| {
+                sale_detail(&store, id)
+                    .expect("detail")
+                    .receipt_no
+                    .expect("a new sale is numbered")
+            })
+            .collect();
+
+        assert_eq!(numbers[0], format!("{short}-{day}-001"));
+        assert_eq!(numbers[1], format!("{short}-{day}-002"));
+        assert_eq!(short.len(), 4, "four characters of the device, no more");
+        assert!(
+            short
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "the prefix is safe to read aloud: {short}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A new morning starts the count at one. The day is stored beside the
+    /// count, so there is no reset job that can be forgotten.
+    #[test]
+    fn the_count_starts_over_on_a_new_day() {
+        let (store, path) = store("receipt-new-day");
+        set_meta(&store, "receipt_day", "20200101").expect("yesterday");
+        set_meta(&store, "receipt_seq", "37").expect("a busy day");
+
+        let sale = record_sale(
+            &store,
+            &[SaleLine {
+                product_id: None,
+                name: "Milk".to_owned(),
+                qty: 1,
+                unit_minor: 2_000,
+            }],
+            0,
+            0,
+            2_000,
+            None,
+            None,
+        )
+        .expect("sale");
+        let number = sale_detail(&store, sale.id)
+            .expect("detail")
+            .receipt_no
+            .expect("numbered");
+
+        assert!(number.ends_with("-001"), "{number}");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A sale written before numbers carried a device keeps the row id it was
+    /// printed with, and the detail says so rather than inventing a number.
+    #[test]
+    fn an_old_sale_has_no_device_number() {
+        let (store, path) = store("receipt-old");
+        store
+            .conn()
+            .execute("INSERT INTO sales (total_minor) VALUES (1000)", [])
+            .expect("plant");
+        let id = store.conn().last_insert_rowid();
+
+        let detail = sale_detail(&store, id).expect("detail");
+        assert_eq!(detail.receipt_no, None);
 
         let _ = std::fs::remove_file(path);
     }

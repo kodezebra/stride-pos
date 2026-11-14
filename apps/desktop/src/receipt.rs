@@ -71,6 +71,7 @@ impl<'a> Paper<'a> {
 pub fn sample() -> SaleDetail {
     SaleDetail {
         id: 1042,
+        receipt_no: Some("18CA-20261102-042".to_owned()),
         cashier: Some("Amina".to_owned()),
         created_at: "02/11/2026 14:03".to_owned(),
         total_minor: 14_750,
@@ -150,7 +151,8 @@ pub fn body(
     // lines of metadata cost a third of a narrow slip before the first item,
     // and the customer only needs to find the receipt number and the cashier.
     let (date, time) = stamp_parts(&detail.created_at);
-    meta_row(ui, &format!("Receipt #{}", detail.id), &date);
+    let number = receipt_number(detail);
+    meta_row(ui, &number, &date);
     let left = meta_left(&time, detail);
     let right = if paper.show_cashier {
         cashier(detail)
@@ -271,7 +273,7 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
     }
     out.push('\n');
     let (date, time) = stamp_parts(&detail.created_at);
-    push_pair(&mut out, &format!("Receipt #{}", detail.id), &date);
+    push_pair(&mut out, &receipt_number(detail), &date);
     let left = meta_left(&time, detail);
     let right = if paper.show_cashier {
         cashier(detail)
@@ -458,6 +460,19 @@ fn item_count_text(detail: &SaleDetail) -> String {
 /// Either half can be missing on an old or hand-edited sale, so the cell
 /// degrades to the half that exists rather than printing a separator around
 /// nothing.
+/// What the slip calls itself: the device's number, or the row id it was
+/// printed with before numbers carried a device.
+///
+/// One helper for both renderers because the screen and the text version are
+/// the same paper: a customer who was told `#42` on screen must not find
+/// `18CA-20261114-003` in the message they were sent.
+fn receipt_number(detail: &SaleDetail) -> String {
+    match detail.receipt_no.as_deref() {
+        Some(number) => format!("Receipt #{number}"),
+        None => format!("Receipt #{}", detail.id),
+    }
+}
+
 fn meta_left(time: &str, detail: &SaleDetail) -> String {
     let count = item_count(detail);
     match (time.is_empty(), count) {
@@ -639,6 +654,9 @@ mod tests {
     fn sale() -> SaleDetail {
         SaleDetail {
             id: 12,
+            // Deliberately the old form: this is a sale written before
+            // numbers carried a device, and it must keep saying `#12`.
+            receipt_no: None,
             cashier: Some("Amina".to_owned()),
             created_at: "2026-11-02 14:03".to_owned(),
             total_minor: 12_400,

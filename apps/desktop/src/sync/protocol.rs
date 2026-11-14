@@ -36,6 +36,10 @@ pub struct SaleDto {
     pub rounding_minor: i64,
     #[serde(default)]
     pub tax_minor: i64,
+    /// The number on the paper at the origin. Absent from a peer too old to
+    /// send one, and from a sale written before numbers carried a device.
+    #[serde(default)]
+    pub receipt_no: Option<String>,
     pub lines: Vec<LineDto>,
     pub payments: Vec<PaymentDto>,
     #[serde(default)]

@@ -254,8 +254,8 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
         "INSERT INTO sales
              (uid, origin_device, is_offline, clock_skew, created_at,
               received_at, change_seq, user_id, total_minor, rounding_minor,
-              tax_minor)
-         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10)
+              tax_minor, receipt_no)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT DO NOTHING",
         rusqlite::params![
             sale.uid.trim(),
@@ -268,6 +268,9 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
             sale.total_minor,
             sale.rounding_minor,
             sale.tax_minor,
+            // The origin's number, kept as it was printed. A peer too old to
+            // send one leaves it null and the slip falls back to the row id.
+            sale.receipt_no.as_deref(),
         ],
     )?;
 

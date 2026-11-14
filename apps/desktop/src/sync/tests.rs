@@ -160,6 +160,49 @@ fn a_relayed_sale_keeps_its_origin_device() {
 }
 
 #[test]
+fn a_synced_sale_keeps_the_number_it_was_printed_with() {
+    let a = Fixture::new("receipt-a");
+    let b = Fixture::new("receipt-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    record_tea(a.db());
+
+    let sale = pulled(a.db());
+    let printed = sale.receipt_no.clone().expect("A numbers its sales");
+    ingest_sales(b.db(), &offer(vec![sale])).expect("a to b");
+
+    // B's own counter must not be touched: it did not sell anything, so its
+    // next sale is still number one. The relayed slip keeps A's number.
+    let stored: Option<String> = b
+        .db()
+        .conn()
+        .query_row("SELECT receipt_no FROM sales", [], |row| row.get(0))
+        .expect("stored number");
+    assert_eq!(stored.as_deref(), Some(printed.as_str()));
+
+    let relayed = pulled(b.db());
+    assert_eq!(relayed.receipt_no.as_deref(), Some(printed.as_str()));
+
+    record_tea(b.db());
+    let own: String = b
+        .db()
+        .conn()
+        .query_row(
+            "SELECT receipt_no FROM sales ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("B's own sale");
+    assert_ne!(own, printed, "B does not reuse A's number");
+    assert!(own.ends_with("-001"), "B's counter starts at one: {own}");
+    assert_eq!(
+        own.split('-').next().map(str::len),
+        Some(4),
+        "four characters of B's device: {own}"
+    );
+}
+
+#[test]
 fn a_tampered_total_is_refused_and_kept_for_inspection() {
     let a = Fixture::new("bad-total-a");
     let b = Fixture::new("bad-total-b");
