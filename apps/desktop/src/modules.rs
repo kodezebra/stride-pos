@@ -4899,7 +4899,7 @@ impl Module for Sales {
         action_bar(ui, title, |ui| {
             if components::icon_button(ui, export_icon(), 32.0)
                 .on_hover_text(
-                    "Export sales as sale_id, when, cashier, total, rounding, paid, method",
+                    "Export sales as sale_id, receipt, when, cashier, total, rounding, paid, method",
                 )
                 .clicked()
             {
@@ -4946,9 +4946,15 @@ impl Module for Sales {
             ui.set_min_width(ui.available_width());
             table_row(ui, "Sale", "When", "By", "Total", true, false);
             for (index, sale) in sales.iter().enumerate() {
+                // The number the customer's slip carries. A sale from before
+                // numbers had a device keeps the row id it was printed with.
+                let receipt = sale
+                    .receipt_no
+                    .clone()
+                    .unwrap_or_else(|| format!("#{}", sale.id));
                 if table_row(
                     ui,
-                    &format!("#{}", sale.id),
+                    &receipt,
                     &sale.created_at,
                     sale.cashier.as_deref().unwrap_or("-"),
                     &state.money(sale.paid_minor),
