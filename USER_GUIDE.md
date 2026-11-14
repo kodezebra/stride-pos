@@ -74,7 +74,7 @@ one file on that machine.
 | F4 | Dashboard | takings and best sellers for today / 7 / 30 days / all time |
 | F5 | Products | the catalogue: add, edit, import, export |
 | F6 | Suppliers | who the shop buys from |
-| F7 | Purchases | plan a restocking trip, then receive what arrived |
+| F7 | Restock | plan a restocking trip, then receive what arrived |
 | F8 | Settings | appearance, receipt preview, scanner, staff, backup |
 
 **The status bar (bottom)** shows: "local only", shortcut hints, the app version,
@@ -271,12 +271,12 @@ one-minute approval rather than handing over PINs.
 ### 5.4 A restocking trip, end to end
 
 The shop does not wait for a supplier to deliver. The owner goes to town with a
-list, buys what is available, and counts it in when they get back. Purchases
-records both halves of that trip.
+list, buys what is available, and counts it in when they get back. **Restock**
+(F7) records both halves of that trip, on one page.
 
 **Before leaving**
 
-1. Press F7 **Purchases** → **New purchase**.
+1. Press F7 **Restock** → **New list**.
 2. Name the supplier if there is one; it is optional. Add a note such as
    "Saturday market".
 3. Press **Add low stock** to fill the list with everything at or under its
@@ -284,30 +284,33 @@ records both halves of that trip.
    level, after counting what is already on the shelf and already on its way.
 4. Adjust any quantity, or search for another product and add it. A product can
    be added even if it is not low — the list is a plan, not a rule.
-5. Leave the cost empty if you do not know it yet. **Save**.
+5. Leave the cost empty if you do not know it yet. **Save** reads the list back
+   as **Planned**; `← Restock` goes back without saving.
 
 **At the market**
 
 Print the list or copy it down; the plan is already saved on the till and needs
-no network. Buy what is there. If something is unavailable, you will remove it
-when you receive.
+no network. Buy what is there. If something is unavailable, you will count it at
+zero when you receive.
 
 **When the goods come back**
 
-1. F7 **Purchases** → open the planned trip → **Receive**.
-2. Each row starts at the quantity still outstanding. Change it to what actually
-   arrived. Enter the unit cost if you know it — this becomes the product's last
-   known cost, and profit on future sales uses it.
-3. Tick **Not bought** on a line you did not find. It is removed from the plan.
-4. If you bought something not on the list, use **Add product** and enter the
-   quantity and cost. It is recorded as fully received.
-5. **Receive**. Each line writes one stock movement, and the shelf count goes up.
+1. F7 **Restock** → open the planned list.
+2. Each row starts at the planned quantity. Change it to what actually arrived.
+   A line you did not find is set to **0**: it stays on the record as not bought.
+   Enter the unit cost if you know it — this becomes the product's last known
+   cost, and profit on future sales uses it.
+3. If you bought something not on the list, add it from the search at the bottom
+   of the page with its quantity and cost.
+4. Press **Received**. Each line writes one stock movement, and the shelf count
+   goes up.
 
-A purchase reads **Planned** until the first goods arrive, then **Part received**
-with a progress count such as "3 of 5 received", then **Received** when every
-remaining line is complete. A plan with nothing received can still be edited or
-deleted; once receiving has started, it can only be continued, so the ledger and
-the plan cannot drift apart.
+Receiving is one act. A list reads **Planned** until the trip comes home, then
+**Received**; there is no half-received state to come back to, so the same goods
+cannot be counted in twice. A trip that came home short says so — "3 of 5 bought".
+The shortfall is not turned into a new list for you: plan the next trip from
+**Add low stock**. A planned list can still be edited or deleted; a received one
+opens read-only, because a stock movement points at its lines.
 
 **If a product is not tracked yet:** track it first (F3 **Inventory** → **Track
 stock**), because a purchase line needs a shelf count to move. Counting it at the
@@ -713,7 +716,7 @@ sale.
 ### 9.2 Command palette (Ctrl+P)
 
 Go to Sell · Go to Dashboard · Go to Products · Go to Sales · Go to Settings ·
-Go to Suppliers · Go to Inventory · Go to Purchases · Toggle sidebar · Toggle
+Go to Suppliers · Go to Inventory · Go to Restock · Toggle sidebar · Toggle
 theme · Take payment · Clear cart · Lock till.
 
 ### 9.3 Files and folders
