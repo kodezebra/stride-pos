@@ -822,7 +822,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                             // would read plus, count, minus — "more" before
                             // "less", which is the opposite of every other
                             // stepper in the app.
-                            let step = ui
+                            let (step, _count) = ui
                                 .with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| components::stepper(ui, line.qty),
