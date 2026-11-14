@@ -81,6 +81,7 @@ fn record_tea(store: &storage::Store) -> db::RecordedSale {
         0,
         1_000,
         None,
+        None,
     )
     .expect("record sale")
 }

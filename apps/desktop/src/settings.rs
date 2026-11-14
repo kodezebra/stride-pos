@@ -39,6 +39,12 @@ pub struct Settings {
     /// customer pays, and the receipt breaks the tax out underneath the total.
     /// Default `0` because some small stores are not VAT-registered.
     pub tax_rate_percent: i64,
+    /// The change that sits in the drawer before the first sale, in minor units.
+    /// It is not takings: the day's count is compared against this float plus
+    /// the cash rung up, so a shop that starts with change does not read its own
+    /// float as a surplus every evening. Zero is the honest default for a shop
+    /// that opens an empty drawer.
+    pub cash_float_minor: i64,
     /// The shop's business type: `supermarket`, `pharmacy`, `stationery`, or
     /// `None` when not yet chosen. It selects which category seed list the
     /// product form offers as suggestions; it never auto-inserts anything.

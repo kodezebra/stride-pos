@@ -89,6 +89,65 @@ impl RecordedSale {
     }
 }
 
+/// A drawer session: the stretch of time one count of the cash covers.
+///
+/// Not a rota and not a person. It opens by itself when the first sale of the
+/// day is rung up and closes when somebody counts the drawer, so the till never
+/// asks the operator to start work before serving a customer. Who took each sale
+/// is already on `sales.user_id`; this knows only about money.
+#[derive(Clone, Debug)]
+pub struct Shift {
+    /// Portable identity, carried on every sale the shift contains.
+    pub uid: String,
+    /// Local time, minute precision: the card reads "opened 08:14".
+    pub opened_at: String,
+    pub opened_by: Option<String>,
+    /// The change that was in the drawer before the first sale.
+    pub float_minor: i64,
+    /// `None` while the drawer is still open.
+    pub closed_at: Option<String>,
+    pub counted_minor: Option<i64>,
+}
+
+impl Shift {
+    pub fn is_open(&self) -> bool {
+        self.closed_at.is_none()
+    }
+}
+
+/// What one shift's cash adds up to.
+#[derive(Clone, Debug, Default)]
+pub struct DrawerTotals {
+    /// Cash that went into the drawer: what customers paid, not what they
+    /// handed over — the change left the drawer in the same breath.
+    pub cash_minor: i64,
+    pub sales_count: i64,
+}
+
+/// A shift and its cash, read together because the card never shows one
+/// without the other.
+#[derive(Clone, Debug)]
+pub struct Drawer {
+    pub shift: Shift,
+    pub totals: DrawerTotals,
+}
+
+impl Drawer {
+    /// What the drawer should hold: the float plus every cash sale.
+    pub fn expected_minor(&self) -> i64 {
+        self.shift
+            .float_minor
+            .saturating_add(self.totals.cash_minor)
+    }
+
+    /// Counted minus expected. Positive is a surplus, `None` until counted.
+    pub fn difference_minor(&self) -> Option<i64> {
+        self.shift
+            .counted_minor
+            .map(|counted| counted - self.expected_minor())
+    }
+}
+
 /// One thing the shop sells, as the catalog stores it.
 ///
 /// `price_minor` is in the till's currency, like every other amount: there is no
@@ -909,6 +968,47 @@ pub const MIGRATIONS: &[Migration] = &[
 
             ALTER TABLE sale_lines ADD COLUMN cost_minor INTEGER
                 CHECK (cost_minor >= 0);
+        "#,
+    },
+    // The drawer: one row per stretch of time the till is accountable for cash.
+    //
+    // A shift is not a rota and not a person. It opens by itself on the first
+    // sale of the day and closes when the cash is counted, so the operator is
+    // never asked to start work before serving a customer. Who rang up each
+    // sale is already on `sales.user_id`; this table only knows about money.
+    //
+    // `float_minor` is the change that was in the drawer before the first sale.
+    // It is copied from settings at open rather than read at close, because the
+    // count must be compared against what was actually there that day, not
+    // against whatever the setting says months later.
+    //
+    // The partial unique index is the rule "one open drawer", enforced where it
+    // cannot be forgotten: a second insert while one is open fails. `uid` is the
+    // identity a sale carries, so a sale that reaches another till does not
+    // point at that till's row 7.
+    Migration {
+        version: 13,
+        name: "cash_drawer",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS shifts (
+                id            INTEGER PRIMARY KEY,
+                uid           TEXT    NOT NULL,
+                opened_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+                closed_at     TEXT,
+                opened_by     TEXT REFERENCES users(id),
+                closed_by     TEXT REFERENCES users(id),
+                float_minor   INTEGER NOT NULL DEFAULT 0 CHECK (float_minor >= 0),
+                counted_minor INTEGER CHECK (counted_minor >= 0)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS shifts_uid ON shifts (uid);
+            CREATE UNIQUE INDEX IF NOT EXISTS shifts_one_open
+                ON shifts ((closed_at IS NULL)) WHERE closed_at IS NULL;
+            CREATE INDEX IF NOT EXISTS shifts_closed ON shifts (closed_at);
+
+            ALTER TABLE sales ADD COLUMN shift_uid TEXT;
+            CREATE INDEX IF NOT EXISTS sales_shift
+                ON sales (shift_uid) WHERE shift_uid IS NOT NULL;
         "#,
     },
 ];
@@ -2878,6 +2978,10 @@ fn insert_purchase_lines(
 /// sale recorded while the till has no staff accounts, which cannot happen once
 /// the owner exists.
 ///
+/// `shift_uid` is the drawer the cash went into. `None` when the drawer could
+/// not be opened — a sale is never blocked by bookkeeping, and an unattributed
+/// sale is a gap in a count, not a lost sale.
+///
 /// Each line for a tracked product also writes a negative `sale` movement to
 /// the stock ledger, inside the same transaction.
 pub fn record_sale(
@@ -2887,6 +2991,7 @@ pub fn record_sale(
     tax_minor: i64,
     tendered_minor: i64,
     user_id: Option<&str>,
+    shift_uid: Option<&str>,
 ) -> anyhow::Result<RecordedSale> {
     anyhow::ensure!(!lines.is_empty(), "a sale needs at least one line");
 
@@ -2934,8 +3039,9 @@ pub fn record_sale(
 
     transaction.execute(
         "INSERT INTO sales
-             (total_minor, rounding_minor, tax_minor, user_id, uid, origin_device, change_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (total_minor, rounding_minor, tax_minor, user_id, uid, origin_device,
+              change_seq, shift_uid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             total_minor,
             rounding_minor,
@@ -2944,6 +3050,7 @@ pub fn record_sale(
             sale_uid.as_str(),
             origin_device.as_str(),
             change_seq,
+            shift_uid,
         ),
     )?;
     let id = transaction.last_insert_rowid();
@@ -3033,6 +3140,149 @@ pub fn record_sale(
         tendered_minor,
         change_minor,
     })
+}
+
+// ---------------------------------------------------------------------------
+// The cash drawer
+// ---------------------------------------------------------------------------
+
+/// The columns every shift read selects, in the order [`shift_from_row`] wants.
+const SHIFT_COLUMNS: &str = "s.uid, strftime('%d/%m %H:%M', s.opened_at, 'localtime'), u.name,
+     s.float_minor, s.closed_at, s.counted_minor
+     FROM shifts s LEFT JOIN users u ON u.id = s.opened_by";
+
+fn shift_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Shift> {
+    Ok(Shift {
+        uid: row.get(0)?,
+        opened_at: row.get(1)?,
+        opened_by: row.get(2)?,
+        float_minor: row.get(3)?,
+        closed_at: row.get(4)?,
+        counted_minor: row.get(5)?,
+    })
+}
+
+/// The drawer this till is accountable for: the open shift, or one that was
+/// counted today.
+///
+/// A shift closed yesterday is history, and history lives in the Day list. The
+/// card on Today's page is about the money in the drawer right now, so it must
+/// not sit there for ever saying "closed".
+pub fn drawer(store: &storage::Store) -> Option<Drawer> {
+    let shift = match store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {SHIFT_COLUMNS}
+                 WHERE s.closed_at IS NULL
+                    OR date(s.closed_at, 'localtime') = date('now', 'localtime')
+                 ORDER BY s.id DESC LIMIT 1"
+            ),
+            [],
+            shift_from_row,
+        )
+        .optional()
+    {
+        Ok(shift) => shift?,
+        Err(err) => {
+            tracing::warn!(error = %err, "the drawer could not be read");
+            return None;
+        }
+    };
+
+    let totals = drawer_totals(store, &shift.uid);
+    Some(Drawer { shift, totals })
+}
+
+/// The shift whose drawer is still open, if any.
+fn open_shift(store: &storage::Store) -> Option<Shift> {
+    match store
+        .conn()
+        .query_row(
+            &format!("SELECT {SHIFT_COLUMNS} WHERE s.closed_at IS NULL"),
+            [],
+            shift_from_row,
+        )
+        .optional()
+    {
+        Ok(shift) => shift,
+        Err(err) => {
+            tracing::warn!(error = %err, "the open shift could not be read");
+            None
+        }
+    }
+}
+
+/// Open the drawer, or hand back the one that is already open.
+///
+/// Called on the way into the first sale of the day, so the caller never has to
+/// know whether the drawer is open. Idempotent on purpose: a retried sale must
+/// not split one day's cash across two shifts, and the partial unique index in
+/// migration 13 makes that a database rule rather than a convention.
+pub fn ensure_open_shift(
+    store: &storage::Store,
+    float_minor: i64,
+    user_id: Option<&str>,
+) -> anyhow::Result<Shift> {
+    if let Some(open) = open_shift(store) {
+        return Ok(open);
+    }
+
+    let uid = uuid::Uuid::now_v7().to_string();
+    store.conn().execute(
+        "INSERT INTO shifts (uid, opened_by, float_minor) VALUES (?1, ?2, ?3)",
+        (uid.as_str(), user_id, float_minor.max(0)),
+    )?;
+
+    open_shift(store).context("the drawer was opened but could not be read back")
+}
+
+/// Cash rung up in a shift, and how many sales that was.
+///
+/// `payments.amount_minor` is what the customer paid, which is exactly what the
+/// drawer gained: the change was counted out of the same drawer.
+pub fn drawer_totals(store: &storage::Store, shift_uid: &str) -> DrawerTotals {
+    match store.conn().query_row(
+        "SELECT COALESCE(SUM(p.amount_minor), 0), COUNT(DISTINCT s.id)
+         FROM sales s JOIN payments p ON p.sale_id = s.id
+         WHERE s.shift_uid = ?1",
+        [shift_uid],
+        |row| {
+            Ok(DrawerTotals {
+                cash_minor: row.get(0)?,
+                sales_count: row.get(1)?,
+            })
+        },
+    ) {
+        Ok(totals) => totals,
+        Err(err) => {
+            tracing::warn!(error = %err, "the drawer totals could not be read");
+            DrawerTotals::default()
+        }
+    }
+}
+
+/// Count the drawer and close the shift.
+///
+/// One update, guarded on `closed_at IS NULL`, so two taps on "Close day" close
+/// it once and the second one is an error the card can report instead of
+/// silently overwriting the count somebody just made.
+pub fn close_shift(
+    store: &storage::Store,
+    shift_uid: &str,
+    counted_minor: i64,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(counted_minor >= 0, "a cash count cannot be negative");
+
+    let changed = store.conn().execute(
+        "UPDATE shifts
+            SET closed_at = datetime('now'), closed_by = ?2, counted_minor = ?3
+          WHERE uid = ?1 AND closed_at IS NULL",
+        (shift_uid, user_id, counted_minor),
+    )?;
+    anyhow::ensure!(changed == 1, "that drawer has already been counted");
+    Ok(())
 }
 
 /// The SQL window a range index covers, or `None` for all time.
@@ -4594,7 +4844,7 @@ mod tests {
         ];
 
         // 2800 + 1000 = 3800 exact; rounded down 20 to the 100 shilling coin.
-        let sale = record_sale(&store, &lines, -20, 0, 4_000, None).expect("record");
+        let sale = record_sale(&store, &lines, -20, 0, 4_000, None, None).expect("record");
 
         assert_eq!(sale.total_minor, 3_800, "the exact total is kept exact");
         assert_eq!(sale.paid_minor(), 3_780);
@@ -4630,6 +4880,86 @@ mod tests {
         assert_eq!(method, "cash");
         assert_eq!(amount, 3_780);
         assert_eq!(tendered, 4_000);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_drawer_opens_once_and_counts_its_cash() {
+        let (store, path) = store("drawer-counts");
+
+        // Nothing to count before the first sale, so nothing is drawn.
+        assert!(drawer(&store).is_none());
+
+        let shift = ensure_open_shift(&store, 5_000, None).expect("open");
+        assert!(shift.is_open());
+        assert_eq!(shift.float_minor, 5_000, "the float it opened with");
+
+        // A retried open hands back the same drawer rather than splitting the
+        // day's cash in two.
+        let again = ensure_open_shift(&store, 9_999, None).expect("reopen");
+        assert_eq!(again.uid, shift.uid);
+        assert_eq!(again.float_minor, 5_000);
+
+        let line = |unit_minor: i64| SaleLine {
+            product_id: None,
+            name: "Bun".to_owned(),
+            qty: 1,
+            unit_minor,
+        };
+        record_sale(&store, &[line(2_000)], 0, 0, 2_000, None, Some(&shift.uid))
+            .expect("first sale");
+        record_sale(&store, &[line(2_000)], 0, 0, 2_000, None, Some(&shift.uid))
+            .expect("second sale");
+        // A sale the drawer could not be opened for still records. It is a gap
+        // in a count, not a lost sale, so it must not appear in the totals.
+        record_sale(&store, &[line(700)], 0, 0, 700, None, None).expect("unattributed");
+
+        let open = drawer(&store).expect("drawer");
+        assert_eq!(open.totals.cash_minor, 4_000);
+        assert_eq!(open.totals.sales_count, 2);
+        assert_eq!(open.expected_minor(), 9_000, "float plus cash taken");
+        assert_eq!(open.difference_minor(), None, "nothing counted yet");
+
+        close_shift(&store, &shift.uid, 8_900, None).expect("close");
+
+        let closed = drawer(&store).expect("a count from today is still today's");
+        assert!(!closed.shift.is_open());
+        assert_eq!(closed.shift.counted_minor, Some(8_900));
+        assert_eq!(closed.difference_minor(), Some(-100), "short by 100");
+        assert!(
+            close_shift(&store, &shift.uid, 8_900, None).is_err(),
+            "a count is made once"
+        );
+
+        // The next sale opens a new drawer; the count starts again.
+        let next = ensure_open_shift(&store, 5_000, None).expect("reopen after close");
+        assert_ne!(next.uid, shift.uid);
+        assert!(next.is_open());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn yesterdays_drawer_is_history_not_todays_card() {
+        let (store, path) = store("drawer-ages-out");
+
+        let shift = ensure_open_shift(&store, 0, None).expect("open");
+        close_shift(&store, &shift.uid, 0, None).expect("close");
+        assert!(drawer(&store).is_some(), "closed today, so still the day's");
+
+        store
+            .conn()
+            .execute(
+                "UPDATE shifts SET closed_at = datetime('now', '-2 days') WHERE uid = ?1",
+                [&shift.uid],
+            )
+            .expect("age the count");
+
+        assert!(
+            drawer(&store).is_none(),
+            "an old count belongs in history, not at the top of Today"
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -4711,6 +5041,7 @@ mod tests {
             0,
             4_000,
             Some(&cashier.id),
+            None,
         )
         .expect("sale");
 
@@ -4810,6 +5141,7 @@ mod tests {
             0,
             4_000,
             None,
+            None,
         )
         .expect("the till sells even when the count says it cannot");
 
@@ -4855,7 +5187,7 @@ mod tests {
         }];
 
         assert!(
-            record_sale(&store, &lines, 0, 0, 2_000, None).is_err(),
+            record_sale(&store, &lines, 0, 0, 2_000, None, None).is_err(),
             "2000 does not cover 2800"
         );
 
@@ -4875,7 +5207,7 @@ mod tests {
     fn an_empty_cart_is_not_a_sale() {
         let (store, path) = store("empty-cart");
 
-        assert!(record_sale(&store, &[], 0, 0, 0, None).is_err());
+        assert!(record_sale(&store, &[], 0, 0, 0, None, None).is_err());
         assert_eq!(totals(&store, 3, None), (0, 0));
 
         let _ = std::fs::remove_file(path);
@@ -4898,6 +5230,7 @@ mod tests {
             0,
             0,
             3_400,
+            None,
             None,
         )
         .expect("record");
@@ -4936,9 +5269,9 @@ mod tests {
             qty: 1,
             unit_minor: 1_000,
         };
-        let first =
-            record_sale(&store, std::slice::from_ref(&line), 0, 0, 1_000, None).expect("first");
-        let second = record_sale(&store, &[line], 0, 0, 1_000, None).expect("second");
+        let first = record_sale(&store, std::slice::from_ref(&line), 0, 0, 1_000, None, None)
+            .expect("first");
+        let second = record_sale(&store, &[line], 0, 0, 1_000, None, None).expect("second");
 
         assert_ne!(first.uid, second.uid);
         assert!(uuid::Uuid::parse_str(&first.uid).is_ok(), "{}", first.uid);
@@ -5089,6 +5422,7 @@ mod tests {
             0,
             500,
             Some(&brian.id),
+            None,
         )
         .expect("record");
 
@@ -5177,6 +5511,7 @@ mod tests {
             0,
             16_600,
             Some(&brian.id),
+            None,
         )
         .expect("record");
 
@@ -5219,6 +5554,7 @@ mod tests {
             0,
             0,
             1_000,
+            None,
             None,
         )
         .expect("record");
@@ -5267,6 +5603,7 @@ mod tests {
             0,
             5_000,
             Some(&brian.id),
+            None,
         )
         .expect("record");
         record_sale(
@@ -5281,6 +5618,7 @@ mod tests {
             0,
             400,
             Some(&brian.id),
+            None,
         )
         .expect("record");
         // Amina, one sale, before staff existed this would land under "-".
@@ -5296,6 +5634,7 @@ mod tests {
             0,
             12_000,
             Some(&amina.id),
+            None,
         )
         .expect("record");
 
@@ -5331,6 +5670,7 @@ mod tests {
             0,
             500,
             None,
+            None,
         )
         .expect("record");
 
@@ -5362,6 +5702,7 @@ mod tests {
             0,
             1_000,
             None,
+            None,
         )
         .expect("record a rounded sale");
         record_sale(
@@ -5375,6 +5716,7 @@ mod tests {
             0,
             0,
             500,
+            None,
             None,
         )
         .expect("record an exact sale");

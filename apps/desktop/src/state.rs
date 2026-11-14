@@ -711,6 +711,20 @@ pub struct State {
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
 
+    /// The drawer this till is accountable for: the open shift, or one counted
+    /// earlier today. `None` before the first sale of the day, which is also
+    /// when there is nothing to count.
+    pub drawer: Option<crate::db::Drawer>,
+    /// The cash count as typed at close. Committed by [`State::close_day`], so
+    /// a half-typed figure is never compared against the takings.
+    pub drawer_count: String,
+    /// Why the last close failed. Shown in the card rather than a dialog, for
+    /// the same reason a rejected tender stays in the cart.
+    pub drawer_error: Option<String>,
+    /// The change float as typed in Settings. Committed by
+    /// [`State::save_cash_float`].
+    pub float_draft: String,
+
     /// The sale the operator tapped in a list, read in full for the detail
     /// modal. `None` while every list is just a list.
     pub sale_open: Option<crate::db::SaleDetail>,
@@ -824,6 +838,7 @@ impl State {
         let shop_draft = settings.shop_name.trim().to_owned();
         let receipt_draft = settings.receipt.clone();
         let tax_draft = settings.tax_rate_percent.to_string();
+        let float_draft = plain_amount(settings.cash_float_minor, currency);
         let business_draft = settings.business_type.clone().unwrap_or_default();
         // A till upgraded from a build without the scanner has no token yet. A
         // token is not a pairing decision, so generate it on boot and let the
@@ -840,6 +855,7 @@ impl State {
         let stock = crate::db::stock(&store);
         let purchases = crate::db::purchases(&store);
         let users = crate::db::users(&store);
+        let drawer = crate::db::drawer(&store);
         Self {
             store,
             cart: Vec::new(),
@@ -891,6 +907,10 @@ impl State {
             purchase_receive: None,
             purchase_view: None,
             payment: None,
+            drawer,
+            drawer_count: String::new(),
+            drawer_error: None,
+            float_draft,
             sale_open: None,
             notice: None,
             file_notice: None,
@@ -1111,6 +1131,97 @@ impl State {
         if self.settings.tax_rate_percent != rate {
             self.settings.tax_rate_percent = rate;
             self.settings_dirty = true;
+        }
+    }
+
+    /// Commit the change float typed in Settings.
+    ///
+    /// It is the cash that sits in the drawer before the first sale, so the
+    /// evening count is compared against takings plus this rather than against
+    /// takings alone. A figure that does not parse is ignored rather than
+    /// written: the float is a statement about real money.
+    pub fn save_cash_float(&mut self) {
+        let Ok(amount) = Money::parse(self.float_draft.trim(), self.currency) else {
+            return;
+        };
+        let minor = amount.minor().max(0);
+        self.float_draft = plain_amount(minor, self.currency);
+        if self.settings.cash_float_minor != minor {
+            self.settings.cash_float_minor = minor;
+            self.settings_dirty = true;
+        }
+    }
+
+    /// The drawer a sale is about to land in, opened if the day has not started.
+    ///
+    /// A failure is logged and the sale goes through unattributed. Bookkeeping
+    /// must never refuse a sale: a gap in a count is recoverable, a customer
+    /// turned away is not.
+    fn ensure_shift(&mut self) -> Option<String> {
+        if let Some(drawer) = self.drawer.as_ref()
+            && drawer.shift.is_open()
+        {
+            return Some(drawer.shift.uid.clone());
+        }
+
+        let user = self.session.as_ref().map(|session| session.user_id.clone());
+        match crate::db::ensure_open_shift(
+            &self.store,
+            self.settings.cash_float_minor,
+            user.as_deref(),
+        ) {
+            Ok(shift) => {
+                let uid = shift.uid.clone();
+                self.refresh_drawer();
+                Some(uid)
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "opening the drawer failed");
+                None
+            }
+        }
+    }
+
+    /// Re-read the drawer after a sale or a close, so the card shows the money
+    /// that is actually in it.
+    pub fn refresh_drawer(&mut self) {
+        self.drawer = crate::db::drawer(&self.store);
+    }
+
+    /// Count the drawer and close the day.
+    ///
+    /// One number, one tap: the operator types what is in the drawer and the
+    /// till works out what should have been there. A count that does not parse
+    /// leaves the field and the card open rather than closing on a guess, and a
+    /// second tap cannot overwrite a count that was already made.
+    pub fn close_day(&mut self) {
+        let Some(drawer) = self.drawer.as_ref() else {
+            return;
+        };
+        if !drawer.shift.is_open() {
+            return;
+        }
+
+        let counted = match Money::parse(self.drawer_count.trim(), self.currency) {
+            Ok(amount) => amount.minor(),
+            Err(_) => {
+                self.drawer_error = Some("Type the cash you counted.".to_owned());
+                return;
+            }
+        };
+
+        let uid = drawer.shift.uid.clone();
+        let user = self.session.as_ref().map(|session| session.user_id.clone());
+        match crate::db::close_shift(&self.store, &uid, counted, user.as_deref()) {
+            Ok(()) => {
+                self.drawer_error = None;
+                self.drawer_count.clear();
+                self.refresh_drawer();
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "closing the drawer failed");
+                self.drawer_error = Some(error.to_string());
+            }
         }
     }
 
@@ -3057,6 +3168,11 @@ impl State {
             })
             .collect();
 
+        // The drawer the cash is about to land in. Opened here, on the way into
+        // the first sale of the day, so nobody has to press "start shift"
+        // before serving a customer.
+        let shift_uid = self.ensure_shift();
+
         match crate::db::record_sale(
             &self.store,
             &lines,
@@ -3066,6 +3182,7 @@ impl State {
             self.session
                 .as_ref()
                 .map(|session| session.user_id.as_str()),
+            shift_uid.as_deref(),
         ) {
             Ok(sale) => {
                 self.cart.clear();
@@ -3073,6 +3190,9 @@ impl State {
                 // same transaction. Re-read the sums now so the Inventory list
                 // agrees with what just happened.
                 self.reload_stock();
+                // The drawer gained this sale's cash; the card on Today must
+                // say so without waiting for a restart.
+                self.refresh_drawer();
                 // Read the sale back once, here, so the confirmation can print
                 // a receipt instead of four remembered numbers. The cart is
                 // already empty: this is the only copy of what was sold.
@@ -3143,7 +3263,7 @@ pub const SETTINGS_SECTIONS: &[&str] = &[
     "Terminal",
     "Receipt",
     "Scanner",
-    "Tax",
+    "Money",
     "Staff",
     "Sync",
 ];
