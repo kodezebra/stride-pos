@@ -954,313 +954,190 @@ struct Dashboard;
 impl Module for Dashboard {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Range");
-        for (index, range) in state::RANGES.iter().enumerate() {
-            if regions::nav_item(ui, state.range == index, range).clicked() {
-                state.range = index;
+        for (index, label) in state::TREND_RANGES.iter().enumerate() {
+            if regions::nav_item(ui, state.trend_range == index, label).clicked() {
+                state.trend_range = index;
             }
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        let mut all_sales = false;
-        action_bar(ui, "Trends", |ui| {
-            if components::icon_button(ui, Icon::RECEIPT, 32.0)
-                .on_hover_text("Open all sales in this range")
-                .clicked()
-            {
-                all_sales = true;
-            }
-        });
-        if all_sales {
-            state.select(SALES);
-        }
+    fn toolbar(&mut self, ui: &mut egui::Ui, _state: &mut State) {
+        // No actions: every figure on the page is already in the range the
+        // sidebar chose, and a trends page has nothing to add or export. The bar
+        // stays because the page title has to sit where every other page's does.
+        action_bar(ui, "Trends", |_ui| {});
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        // The scope borrows the session, but the sections below borrow the state
-        // mutably to open a sale; take an owned copy of both halves up front.
+        let range = state::trend_window(state.trend_range);
         let scope = state.report_scope();
         let shop = scope.is_shop();
         let user = scope.user().map(str::to_owned);
         let user = user.as_deref();
 
-        let (count, revenue) = crate::db::totals(&state.store, state.range, user);
-        let previous = crate::db::previous_totals(&state.store, state.range, user);
-        let units = crate::db::items_sold(&state.store, state.range, user);
-        let previous_units = crate::db::previous_items_sold(&state.store, state.range, user);
-        let peak = crate::db::peak_hour(&state.store, state.range, user);
+        let (count, takings) = crate::db::totals(&state.store, range, user);
+        let previous = crate::db::previous_totals(&state.store, range, user);
+        let margin = crate::db::margin(&state.store, range, user);
 
-        // The range is named once, on the line under the page title: the
-        // sidebar highlights it, but a collapsed sidebar must not leave the
-        // figures undated.
         components::caption(
             ui,
             &format!(
                 "{} · {}",
-                state::range_caption(state.range),
-                comparison_caption(state.range, shop)
+                state::range_caption(range),
+                comparison_caption(range, shop)
             ),
         );
-        ui.add_space(SPACING.sm);
+        ui.add_space(SPACING.md);
 
-        let (revenue_sub, revenue_trend) =
-            change(revenue, previous.map(|(_, revenue)| revenue), true);
-        let (sales_sub, sales_trend) = change(count, previous.map(|(count, _)| count), false);
-        let (items_sub, items_trend) = change(units, previous_units, false);
-        let (peak_value, peak_sub) = match peak {
-            Some(peak) => (
-                format!("{:02}:00", peak.hour),
-                format!(
-                    "{} {}",
-                    peak.sales,
-                    if peak.sales == 1 { "sale" } else { "sales" }
-                ),
-            ),
-            None => ("—".to_owned(), "no sales".to_owned()),
-        };
-
-        kpi_row(
-            ui,
-            &[
-                Kpi {
-                    label: "Revenue",
-                    value: state.money(revenue),
-                    sub: revenue_sub,
-                    trend: revenue_trend,
-                },
-                Kpi {
-                    label: "Sales",
-                    value: count.to_string(),
-                    sub: sales_sub,
-                    trend: sales_trend,
-                },
-                Kpi {
-                    label: "Items sold",
-                    value: units.to_string(),
-                    sub: items_sub,
-                    trend: items_trend,
-                },
-                Kpi {
-                    label: "Busiest hour",
-                    value: peak_value,
-                    sub: peak_sub,
-                    trend: Trend::Flat,
-                },
-            ],
-        );
-
-        // What was taken, by method. Deliberately not a cash-up: with no opening
-        // float and no counted close, "expected in the drawer" would be a figure
-        // the till cannot know. What the payments add up to, it does.
-        ui.add_space(SPACING.lg);
-        components::section_title(
-            ui,
-            if shop {
-                "Payments taken"
-            } else {
-                "Your payments"
-            },
-        );
-        let methods = crate::db::by_method(&state.store, state.range, user);
-        if methods.is_empty() {
-            components::empty_state_card(
-                ui,
-                "No money taken yet in this range",
-                "Each method totals up here as soon as a sale is paid.",
-                140.0,
-            );
-        } else {
-            components::card(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                components::caption(ui, taken_caption(state.range));
-
-                // One method is one figure, not a table with a single row and a
-                // total that repeats it.
-                if let [only] = methods.as_slice() {
-                    ui.add_space(SPACING.sm);
-                    amount_row(
-                        ui,
-                        &method_label(&only.method, only.sales),
-                        &state.money(only.amount_minor),
-                        true,
-                    );
-                } else {
-                    for method in &methods {
-                        amount_row(
-                            ui,
-                            &method_label(&method.method, method.sales),
-                            &state.money(method.amount_minor),
-                            false,
-                        );
-                    }
-                    let taken: i64 = methods.iter().map(|method| method.amount_minor).sum();
-                    components::divider(ui);
-                    amount_row(ui, "Total", &state.money(taken), true);
-                }
-            });
-        }
-
-        // Profit, but only where the shop knows the cost. A line sold before its
-        // product had a cost is left out of both sides: calling its revenue
-        // profit would overstate the margin, and guessing the cost would invent
-        // one. The coverage line says how much of the range the figure speaks
-        // for, which is more honest than a total that quietly assumes zero.
-        ui.add_space(SPACING.lg);
-        components::section_title(ui, "Profit");
-        let margin = crate::db::margin(&state.store, state.range, user);
-        if !margin.has_cost() {
-            components::empty_state_card(
-                ui,
-                "No costs recorded yet",
-                "Receive a purchase with a unit cost, and profit appears here for \
-                 everything sold after that.",
-                150.0,
-            );
-        } else {
-            components::card(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                amount_row(
-                    ui,
-                    "Revenue with a known cost",
-                    &state.money(margin.revenue_minor),
-                    false,
-                );
-                amount_row(
-                    ui,
-                    "Cost of those items",
-                    &state.money(margin.cost_minor),
-                    false,
-                );
-                components::divider(ui);
-                amount_row(ui, "Profit", &state.money(margin.profit_minor()), true);
-
-                let coverage = if margin.is_complete() {
-                    "Every sale line in this range had a cost.".to_owned()
-                } else {
-                    format!(
-                        "{} of {} sale lines had a cost; the rest are not counted.",
-                        margin.costed_lines, margin.total_lines
-                    )
-                };
-                let share = if margin.revenue_minor > 0 {
-                    format!(
-                        " · {:.0}% margin",
-                        margin.profit_minor() as f64 * 100.0 / margin.revenue_minor as f64
-                    )
-                } else {
-                    String::new()
-                };
-                components::caption(ui, &format!("{coverage}{share}"));
-            });
-        }
-
-        // The shape of the range, as a chart: one bar per day, oldest on the
-        // left so the range reads like a calendar, and a round axis above the
-        // busiest day. A fixed range draws zero days too; all time draws only
-        // the days that sold, and says so.
-        ui.add_space(SPACING.lg);
-        components::section_title(ui, if shop { "By day" } else { "Your sales by day" });
-        if let Some(caption) = chart_caption(state.range) {
-            components::caption(ui, caption);
-        }
-        // Keyed on the sale count, not on the bars: a zero-filled week is still
-        // seven bars, and "no sales" is a friendlier answer than seven empty
-        // ones.
         if count == 0 {
             components::empty_state_card(
                 ui,
                 "No sales yet in this range",
-                "Each day that takes money grows a bar here.",
-                160.0,
-            );
-        } else {
-            let days = crate::db::by_day(&state.store, state.range, user);
-            components::card(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                day_chart(ui, state, &days);
-            });
-        }
-
-        ui.add_space(SPACING.lg);
-        components::section_title(
-            ui,
-            if shop {
-                "Latest sales"
-            } else {
-                "Your latest sales"
-            },
-        );
-        let sales = crate::db::sales(&state.store, state.range, 5, user);
-        if sales.is_empty() {
-            components::empty_state_card(
-                ui,
-                "No sales recorded",
-                "Completed sales appear here, newest first, as soon as the cart is paid.",
+                "Take a sale, and the shop's numbers start here.",
                 200.0,
             );
             return;
         }
 
+        // Six figures and no more. A shopkeeper asks four questions of a month:
+        // what came in, what was kept, how many people paid, and what each of
+        // them spent. The other two — how they paid, and what they bought — are
+        // tables below, because a total cannot answer them.
+        let (takings_sub, takings_trend) =
+            change(takings, previous.map(|(_, revenue)| revenue), true);
+        let (sales_sub, sales_trend) = change(count, previous.map(|(count, _)| count), false);
+        let mut cards = vec![
+            Kpi {
+                label: "Takings",
+                value: state.money(takings),
+                sub: takings_sub,
+                trend: takings_trend,
+            },
+            Kpi {
+                label: "Sales",
+                value: count.to_string(),
+                sub: sales_sub,
+                trend: sales_trend,
+            },
+            Kpi {
+                label: "Average basket",
+                value: state.money(takings / count),
+                sub: "per sale".to_owned(),
+                trend: Trend::Flat,
+            },
+        ];
+        // Margin only where the shop records costs, and only over the items that
+        // have one: a percentage across uncosted sales would be a guess wearing
+        // a decimal point.
+        if margin.has_cost() && margin.revenue_minor > 0 {
+            let profit = margin.profit_minor();
+            cards.push(Kpi {
+                label: "Gross margin",
+                value: format!(
+                    "{:.0}%",
+                    profit as f64 * 100.0 / margin.revenue_minor as f64
+                ),
+                sub: format!("{} kept", state.money(profit)),
+                trend: Trend::Flat,
+            });
+        }
+        kpi_row(ui, &cards);
+
+        if margin.has_cost() && !margin.is_complete() {
+            components::caption(
+                ui,
+                &format!(
+                    "Margin covers {} of {} sale lines; the rest were sold before \
+                     their cost was known.",
+                    margin.costed_lines, margin.total_lines
+                ),
+            );
+        }
+
+        // Cash or not, because that is what decides whether the drawer has to be
+        // counted tonight.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "How it was paid");
+        let methods = crate::db::by_method(&state.store, range, user);
         components::card(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            table_row(ui, "Sale", "When", "By", "Total", true, false);
-            for (index, sale) in sales.iter().enumerate() {
-                if table_row(
+            tally_row(ui, "Method", "Taken", "Share", true, false);
+            for (index, method) in methods.iter().enumerate() {
+                let share = if takings > 0 {
+                    format!(
+                        "{:.0}%",
+                        method.amount_minor as f64 * 100.0 / takings as f64
+                    )
+                } else {
+                    "—".to_owned()
+                };
+                tally_row(
                     ui,
-                    &format!("#{}", sale.id),
-                    &sale.created_at,
-                    sale.cashier.as_deref().unwrap_or("-"),
-                    &state.money(sale.paid_minor),
+                    &method_label(&method.method, method.sales),
+                    &state.money(method.amount_minor),
+                    &share,
                     false,
                     index % 2 == 1,
-                )
-                .clicked()
-                {
-                    state.open_sale(sale.id);
-                }
+                );
             }
         });
 
-        // End-of-shift is not about the shop: it is about who took what. A
-        // cashier has no business reading a colleague's takings, and their own
-        // row would only repeat the cards above, so the block belongs to the
-        // shop view.
-        if shop {
+        // One chart, because a shopkeeper reads a shape, not a spreadsheet. All
+        // time has no calendar to draw, so its chart is capped and says so.
+        ui.add_space(SPACING.lg);
+        components::section_title(ui, "By day");
+        if let Some(caption) = chart_caption(range) {
+            components::caption(ui, caption);
+        }
+        let days = crate::db::by_day(&state.store, range, user);
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            day_chart(ui, state, &days);
+        });
+
+        // Two sentences, because the numbers above do not say themselves out
+        // loud: when the money came in, and what took the most of it.
+        let busiest = days
+            .iter()
+            .max_by_key(|day| day.revenue)
+            .filter(|day| day.revenue > 0);
+        let peak = crate::db::peak_hour(&state.store, range, user);
+        if busiest.is_some() || peak.is_some() {
             ui.add_space(SPACING.lg);
-            components::section_title(ui, "By person");
-            let people = crate::db::by_person(&state.store, state.range, user);
-            if people.is_empty() {
-                components::empty_state_card(
-                    ui,
-                    "No sales yet in this range",
-                    "Whoever takes the money shows up here, with their share.",
-                    160.0,
-                );
-            } else {
-                components::card(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    tally_row(ui, "Person", "Sales", "Total", true, false);
-                    for (index, person) in people.iter().enumerate() {
-                        tally_row(
-                            ui,
-                            &person.name,
-                            &person.sales.to_string(),
-                            &state.money(person.revenue),
-                            false,
-                            index % 2 == 1,
-                        );
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if let Some(busiest) = busiest {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} took the most: {}, {:.0}% of takings.",
+                            weekday_sentence(busiest.weekday),
+                            state.money(busiest.revenue),
+                            busiest.revenue as f64 * 100.0 / takings as f64
+                        ))
+                        .size(TYPE.body),
+                    );
+                }
+                if let Some(peak) = peak {
+                    if busiest.is_some() {
+                        ui.add_space(SPACING.xs);
                     }
-                });
-            }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Most sales land around {:02}:00 — {} of them.",
+                            peak.hour, peak.sales
+                        ))
+                        .size(TYPE.body),
+                    );
+                }
+            });
         }
 
         // What actually sells. Ranked by the money each name took, with the
-        // units beside it — neither number alone is the story: many cheap
-        // units can out-earn a few dear ones, and either way the owner wants
-        // both.
+        // units beside it — neither number alone is the story: many cheap units
+        // can out-earn a few dear ones, and either way the owner wants both.
         ui.add_space(SPACING.lg);
         components::section_title(ui, if shop { "Top items" } else { "Your top items" });
-        let items = crate::db::top_items(&state.store, state.range, 5, user);
+        let items = crate::db::top_items(&state.store, range, 5, user);
         if items.is_empty() {
             components::empty_state_card(
                 ui,
@@ -1287,13 +1164,6 @@ impl Module for Dashboard {
     }
 }
 
-/// Cards laid out by width arithmetic, not by wrapping.
-///
-/// `horizontal_wrapped` decides where to break from the *parent's* available
-/// width, which on a panel that already overflowed stays wrong for the rest of
-/// the frame — the row spills past the window edge and drags every centred
-/// widget below it out of place. Columns here are a function of the panel width,
-/// so the row always sums to what is on screen.
 /// How a figure moved against the window before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trend {
@@ -1306,15 +1176,27 @@ enum Trend {
 struct Kpi {
     label: &'static str,
     value: String,
-    /// The change against the previous window, or what the busiest hour took.
+    /// The change against the previous window, or a plain reading of the figure
+    /// ("per sale").
     sub: String,
     trend: Trend,
 }
 
+/// Cards laid out by width arithmetic, not by wrapping.
+///
+/// `horizontal_wrapped` decides where to break from the *parent's* available
+/// width, which on a panel that already overflowed stays wrong for the rest of
+/// the frame — the row spills past the window edge and drags every centred
+/// widget below it out of place. Columns here are a function of the panel width,
+/// so the row always sums to what is on screen.
 fn kpi_row(ui: &mut egui::Ui, cards: &[Kpi]) {
     let gap = SPACING.sm;
     let available = ui.available_width();
-    let columns = (((available + gap) / (140.0 + gap)).floor() as usize).clamp(1, 4);
+    // Three figures in a four-column grid would leave a hole where the fourth
+    // belongs, so the row never has more columns than it has cards.
+    let columns = (((available + gap) / (140.0 + gap)).floor() as usize)
+        .clamp(1, 4)
+        .min(cards.len().max(1));
     let card = ((available - (columns as f32 - 1.0) * gap) / columns as f32).floor();
 
     for chunk in cards.chunks(columns) {
@@ -1418,22 +1300,9 @@ fn chart_caption(range: usize) -> Option<&'static str> {
     }
 }
 
-/// The range, as the payments card states it.
-///
-/// Repeated inside the card because the range is chosen in the sidebar: a
-/// screenshot of the card has to answer "taken when?" without it.
-fn taken_caption(range: usize) -> &'static str {
-    match range {
-        0 => "Taken today",
-        1 => "Taken in the last 7 days",
-        2 => "Taken in the last 30 days",
-        _ => "Taken over all time",
-    }
-}
-
-/// `cash` as `Cash · 2 sales`: the column stores what the payment code writes,
-/// and the card prints it the way a person would, with the count that makes the
-/// figure mean something.
+/// `cash` as `Cash · 12 sales`: the column stores what the payment code writes,
+/// and the page prints it the way a person would, with the count that says
+/// whether the money came in one big sale or a dozen small ones.
 fn method_label(method: &str, sales: i64) -> String {
     let mut chars = method.chars();
     let name: String = match chars.next() {
@@ -1991,6 +1860,21 @@ fn month_name(day: &crate::db::DayTotal) -> &'static str {
 
 fn weekday_name(weekday: u8) -> &'static str {
     WEEKDAYS[(weekday as usize).min(WEEKDAYS.len() - 1)]
+}
+
+/// The same day, spelled out, for the sentences under the chart. A tick can say
+/// `Fri`; a sentence cannot.
+fn weekday_sentence(weekday: u8) -> &'static str {
+    const NAMES: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    NAMES[(weekday as usize).min(NAMES.len() - 1)]
 }
 
 /// The import glyph, resolved by name because the shared vocabulary does not

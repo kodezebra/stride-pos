@@ -3445,40 +3445,6 @@ pub fn margin(store: &storage::Store, range: usize, user: Option<&str>) -> Margi
     }
 }
 
-/// Units sold in a range: the `qty` on every line, not the number of sales.
-pub fn items_sold(store: &storage::Store, range: usize, user: Option<&str>) -> i64 {
-    items_sold_in(store, &window_clause(range, "s.created_at"), user)
-}
-
-/// [`items_sold`] for the window before the range.
-pub fn previous_items_sold(
-    store: &storage::Store,
-    range: usize,
-    user: Option<&str>,
-) -> Option<i64> {
-    let clause = previous_window_clause(range, "s.created_at")?;
-    Some(items_sold_in(store, &clause, user))
-}
-
-fn items_sold_in(store: &storage::Store, clause: &str, user: Option<&str>) -> i64 {
-    let sql = format!(
-        "SELECT COALESCE(SUM(l.qty), 0)
-         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-         WHERE {clause}"
-    );
-
-    match store
-        .conn()
-        .query_row(&sql, [user], |row| row.get::<_, i64>(0))
-    {
-        Ok(items) => items,
-        Err(err) => {
-            tracing::warn!(error = %err, "items sold query failed");
-            0
-        }
-    }
-}
-
 /// The hour that rang the most sales, and how many.
 ///
 /// Ranked by sale count, because "busiest" on a till means the queue, not the
@@ -3782,53 +3748,6 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     })
 }
 
-/// Revenue and sale count per person, for the range — the end-of-shift view.
-///
-/// Revenue is what the drawer took, `total + rounding`, the same figure the
-/// list shows per sale. The name is joined not copied, so a renamed person's
-/// history renames with them; "system" sales that predate staff, and sales
-/// whose account was removed, land in one unpromising row under `-`.
-pub struct PersonTotal {
-    pub name: String,
-    pub sales: i64,
-    pub revenue: i64,
-}
-
-pub fn by_person(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<PersonTotal> {
-    let sql = format!(
-        "SELECT COALESCE(u.name, '-'), COUNT(*), SUM(s.total_minor + s.rounding_minor)
-         FROM sales s LEFT JOIN users u ON u.id = s.user_id
-         WHERE {}
-         GROUP BY s.user_id
-         ORDER BY 3 DESC",
-        window_clause(range, "s.created_at")
-    );
-
-    let mut statement = match store.conn().prepare(&sql) {
-        Ok(statement) => statement,
-        Err(err) => {
-            tracing::warn!(error = %err, "by person prepare failed");
-            return Vec::new();
-        }
-    };
-
-    let rows = statement.query_map([user], |row| {
-        Ok(PersonTotal {
-            name: row.get(0)?,
-            sales: row.get(1)?,
-            revenue: row.get(2)?,
-        })
-    });
-
-    match rows {
-        Ok(rows) => rows.filter_map(Result::ok).collect(),
-        Err(err) => {
-            tracing::warn!(error = %err, "by person query failed");
-            Vec::new()
-        }
-    }
-}
-
 /// One local day's totals — the trend behind the range.
 ///
 /// Revenue is `total + rounding`, the drawer figure `totals` and the list
@@ -4009,11 +3928,11 @@ pub struct MethodTotal {
     pub amount_minor: i64,
 }
 
-/// Money in, grouped by how it was paid, in the same range the dashboard shows.
+/// Money in, grouped by how it was paid, in the same range the page shows.
 ///
-/// This is *taken*, not *expected in the drawer*: without an opening float and a
-/// counted close there is nothing to be expected against. The word stays out of
-/// the query and out of the screen copy.
+/// This is *taken*, not *expected in the drawer*: the drawer's expectation
+/// belongs to one shift and one count, not to a range of days, so the word stays
+/// out of the query and out of the screen copy.
 pub fn by_method(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<MethodTotal> {
     let sql = format!(
         "SELECT p.method, COUNT(DISTINCT p.sale_id), COALESCE(SUM(p.amount_minor), 0)
@@ -4257,10 +4176,6 @@ mod tests {
             "nothing came before all time"
         );
 
-        assert_eq!(previous_items_sold(&store, 1, None), Some(2));
-        assert_eq!(previous_items_sold(&store, 2, None), Some(4));
-        assert_eq!(previous_items_sold(&store, 3, None), None);
-
         let _ = std::fs::remove_file(path);
     }
 
@@ -4332,19 +4247,12 @@ mod tests {
         assert_eq!(totals(&store, 3, Some(&alice.id)), (2, 500));
         assert_eq!(totals(&store, 3, Some(&bob.id)), (1, 500));
 
-        assert_eq!(items_sold(&store, 3, None), 6);
-        assert_eq!(items_sold(&store, 3, Some(&alice.id)), 5);
-
         assert_eq!(sales(&store, 3, 10, Some(&alice.id)).len(), 2);
         assert!(
             sales(&store, 3, 10, Some(&alice.id))
                 .iter()
                 .all(|sale| sale.cashier.as_deref() == Some("Alice"))
         );
-
-        let people = by_person(&store, 3, None);
-        assert_eq!(people.len(), 2, "the shop view names both cashiers");
-        assert_eq!(by_person(&store, 3, Some(&alice.id)).len(), 1);
 
         let items = top_items(&store, 3, 10, Some(&alice.id));
         assert_eq!(items.len(), 1);
@@ -4438,7 +4346,6 @@ mod tests {
 
         assert_eq!(totals(&store, 0, None), (0, 0));
         assert_eq!(previous_totals(&store, 0, None), Some((0, 0)));
-        assert_eq!(items_sold(&store, 0, None), 0);
         assert!(sales(&store, 3, 5, None).is_empty());
         assert!(by_day(&store, 3, None).is_empty());
         assert_eq!(
@@ -4449,7 +4356,6 @@ mod tests {
         assert_eq!(by_day(&store, 1, None)[0].revenue, 0);
         assert!(peak_hour(&store, 0, None).is_none());
         assert!(top_items(&store, 3, 5, None).is_empty());
-        assert!(by_person(&store, 3, None).is_empty());
         assert!(by_method(&store, 3, None).is_empty());
 
         let _ = std::fs::remove_file(path);
@@ -5565,120 +5471,6 @@ mod tests {
         // A sale written before the till had staff still opens: the receipt is
         // the record, and "someone" is honest enough for its header.
         assert_eq!(detail.cashier, None);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn the_shift_totals_reach_the_person_who_took_the_money() {
-        let (store, path) = store("by-person");
-        let brian = insert_user(
-            &store,
-            "Brian",
-            Role::Cashier,
-            CredentialKind::Pin,
-            "$argon2id$brian",
-        )
-        .expect("cashier");
-        let amina = insert_user(
-            &store,
-            "Amina",
-            Role::Owner,
-            CredentialKind::Password,
-            "$argon2id$amina",
-        )
-        .expect("owner");
-
-        // Brian, two sales: 5 000 exact and 340 with rounding up 60 — the
-        // UGX-denomination case that made this column worth having.
-        record_sale(
-            &store,
-            &[SaleLine {
-                product_id: None,
-                name: "Tea".to_owned(),
-                qty: 1,
-                unit_minor: 5_000,
-            }],
-            0,
-            0,
-            5_000,
-            Some(&brian.id),
-            None,
-        )
-        .expect("record");
-        record_sale(
-            &store,
-            &[SaleLine {
-                product_id: None,
-                name: "Sugar".to_owned(),
-                qty: 1,
-                unit_minor: 340,
-            }],
-            60,
-            0,
-            400,
-            Some(&brian.id),
-            None,
-        )
-        .expect("record");
-        // Amina, one sale, before staff existed this would land under "-".
-        record_sale(
-            &store,
-            &[SaleLine {
-                product_id: None,
-                name: "Rice".to_owned(),
-                qty: 1,
-                unit_minor: 12_000,
-            }],
-            0,
-            0,
-            12_000,
-            Some(&amina.id),
-            None,
-        )
-        .expect("record");
-
-        let people = by_person(&store, 3, None);
-        // Ordered by revenue, not by count: Amina takes fewer, bigger sales.
-        assert_eq!(people.len(), 2);
-        assert_eq!(people[0].name, "Amina");
-        assert_eq!(people[0].sales, 1);
-        assert_eq!(people[0].revenue, 12_000);
-        assert_eq!(people[1].name, "Brian");
-        assert_eq!(people[1].sales, 2);
-        assert_eq!(
-            people[1].revenue, 5_400,
-            "5 000 exact plus 400 that the drawer took for a 340 sale"
-        );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn a_sale_that_predates_staff_totals_under_a_dash() {
-        let (store, path) = store("by-person-dash");
-
-        record_sale(
-            &store,
-            &[SaleLine {
-                product_id: None,
-                name: "Tea".to_owned(),
-                qty: 1,
-                unit_minor: 500,
-            }],
-            0,
-            0,
-            500,
-            None,
-            None,
-        )
-        .expect("record");
-
-        let people = by_person(&store, 3, None);
-        assert_eq!(people.len(), 1);
-        assert_eq!(people[0].name, "-");
-        assert_eq!(people[0].sales, 1);
-        assert_eq!(people[0].revenue, 500);
 
         let _ = std::fs::remove_file(path);
     }

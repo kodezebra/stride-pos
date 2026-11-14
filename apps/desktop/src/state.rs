@@ -639,6 +639,9 @@ pub struct State {
     /// into a list the app invented.
     pub category: Option<String>,
     pub range: usize,
+    /// Trends has its own window, because one day is not a trend. Index into
+    /// [`TREND_RANGES`], which starts where `RANGES` stops being a single day.
+    pub trend_range: usize,
     pub settings_section: usize,
 
     /// The catalog, read once and re-read after every write. Filtering happens
@@ -880,6 +883,8 @@ impl State {
             firewall_allow_requested: false,
             category: None,
             range: 0,
+            // A month is the shortest window a shopkeeper calls a trend.
+            trend_range: 1,
             settings_section: 0,
             products,
             categories,
@@ -3245,6 +3250,18 @@ pub(crate) fn plain_amount(minor: i64, currency: Currency) -> String {
 /// Date ranges offered by Dashboard and Sales. The index is what `db` turns
 /// into a SQL window, so the label and the numbers can never drift apart.
 pub const RANGES: &[&str] = &["Today", "7 days", "30 days", "All time"];
+
+/// The windows Trends offers. Today is not among them: a chart of one day is a
+/// number with a border, and the comparison would be against yesterday alone.
+///
+/// The index is an offset into [`RANGES`] from its first multi-day window, so
+/// Trends and Today share one definition of what "7 days" means.
+pub const TREND_RANGES: &[&str] = &["7 days", "30 days", "All time"];
+
+/// The `RANGES` index a Trends window points at.
+pub fn trend_window(trend_range: usize) -> usize {
+    1 + trend_range.min(TREND_RANGES.len() - 1)
+}
 
 /// How a range reads as a section heading above the cards.
 pub fn range_caption(range: usize) -> &'static str {
