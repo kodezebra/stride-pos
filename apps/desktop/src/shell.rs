@@ -53,6 +53,10 @@ pub struct PosShell {
     /// Whether the host firewall is dropping the port the listener is on, and
     /// the privileged step that opens it. Owned here for the same reason.
     firewall: crate::firewall::Service,
+    /// When the automatic backup was last *looked at*. Not when one was last
+    /// written: the file name is that record, and a restored database carries
+    /// its own.
+    backup_checked: Option<std::time::Instant>,
 }
 
 impl PosShell {
@@ -70,6 +74,40 @@ impl PosShell {
             lan: crate::lan::Service::new(db_path.clone()),
             sync: crate::sync::service::Service::new(db_path),
             firewall: crate::firewall::Service::new(),
+            backup_checked: None,
+        }
+    }
+
+    /// A copy of the database once a day, without being asked.
+    ///
+    /// Checking is a directory listing and a string comparison, so it is polled
+    /// rather than scheduled; the poll is throttled because the answer only
+    /// changes once a day. The work is done on this thread: the store hands out
+    /// one shared connection, and a second writer is a bigger risk than a
+    /// hundred milliseconds on the first frame of a shift.
+    fn auto_backup(&mut self) {
+        const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+        const KEEP_HOURS: i64 = 24;
+
+        let now = std::time::Instant::now();
+        if let Some(checked) = self.backup_checked
+            && now.duration_since(checked) < CHECK_EVERY
+        {
+            return;
+        }
+        self.backup_checked = Some(now);
+
+        let folder = self.state.paths.data.join("backups");
+        match crate::db::backup_if_due(&self.state.store, &folder, KEEP_HOURS) {
+            Ok(Some(path)) => {
+                tracing::info!(path = %path.display(), "wrote the day's backup");
+                self.state.auto_backup_error = None;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(error = %format!("{err:#}"), "automatic backup failed");
+                self.state.auto_backup_error = Some(format!("{err:#}"));
+            }
         }
     }
 
@@ -92,6 +130,11 @@ impl PosShell {
         // Time passes even when nobody touches anything: the idle clock is what
         // puts the till on the lock screen.
         self.state.tick(ui.ctx());
+
+        // The shop's whole record is one file, and the person running the till
+        // will not remember to copy it. Runs before anything is drawn so a slow
+        // `VACUUM` delays the first frame, not a click.
+        self.auto_backup();
 
         // The phone scanner and till-to-till sync live for the process, not for
         // the screen that enabled them. Sync first so a switch flipped on the

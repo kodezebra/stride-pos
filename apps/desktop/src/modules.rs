@@ -6155,12 +6155,13 @@ fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
 /// happen is worse than none.
 fn backup_card(ui: &mut egui::Ui, state: &mut State) {
     let folder = state.paths.data.join("backups");
+    let palette = theme::current(ui.ctx());
 
     components::card(ui, |ui| {
         ui.set_min_width(ui.available_width());
         components::caption(
             ui,
-            "A copy of the database, written beside it. The newest 10 are kept.",
+            "A copy of the database, written beside it. One is taken every day by itself, and the newest 10 are kept.",
         );
         ui.add_space(SPACING.md);
 
@@ -6191,6 +6192,14 @@ fn backup_card(ui: &mut egui::Ui, state: &mut State) {
 
         ui.add_space(SPACING.xs);
         components::caption(ui, &format!("Folder: {}", folder.display()));
+        if let Some(error) = state.auto_backup_error.clone() {
+            ui.add_space(SPACING.xs);
+            ui.label(
+                egui::RichText::new(format!("The automatic backup did not happen: {error}"))
+                    .size(TYPE.small)
+                    .color(palette.danger),
+            );
+        }
         if state.file_notice.is_some() {
             ui.add_space(SPACING.xs);
             file_feedback(ui, state);
