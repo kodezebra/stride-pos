@@ -384,7 +384,7 @@ The progress line reads "3 of 5 received" when part of a line is still outstandi
 4. Press **Pay** (or `Ctrl+Enter` / `F12`).
 5. Type the cash received, or tap a quick-tender chip.
 6. Press **Complete sale** (or `Enter`).
-7. Hand over the change, then press **New sale** (or `Enter` / `Space`).
+7. Hand over the change. The cart is empty and the cursor is back in **Scan or search** — scan the next customer's first item.
 
 ### 4.2 Putting items in the cart
 
@@ -425,13 +425,13 @@ The sale still records the exact price-list total and stores the rounding differ
 
 ### 4.5 After the sale
 
-The confirmation shows **Paid**, the **Change** in large type, and the receipt.
+Pressing **Complete sale** writes the sale, takes the stock out, empties the cart, and puts the cursor back in **Scan or search**. There is no confirmation panel and nothing to dismiss — the next customer's first item can be scanned immediately.
 
-- **Copy receipt** copies the slip as text. Use it for a WhatsApp confirmation or a dispute.
-- **New sale** (`Enter` or `Space`) starts the next customer.
-- `Escape` closes the confirmation.
+- The **Change** you read before completing is what you hand over.
+- The slip is kept on the sale: `F2` **Sales** → open the sale, which shows lines, amount paid, method and change. **Copy receipt** puts it on the clipboard as text, for a WhatsApp confirmation or a dispute.
+- Receipts cannot be printed in this build. Say so plainly and offer the copied text.
 
-Receipts cannot be printed in this build. Say so plainly and offer the copied text.
+**If the queue is long:** the cart is already empty after a sale, so `Enter` on the scanner's next barcode starts the next sale. No keypress is needed to "start a new sale".
 
 ### 4.6 Fixing mistakes
 
@@ -618,7 +618,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Do:* Ring Sale A.
 
-*Check:* Total 10,000, change 0, confirmation says **Paid**.
+*Check:* Total 10,000, change 0, and the screen is ready for the next scan.
 
 **S13 — Change and rounding**
 
@@ -626,7 +626,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Do:* Ring Sale B.
 
-*Check:* Subtotal 8,550; cash total 8,600; change 1,400; receipt shows **Rounded up 50**.
+*Check:* Subtotal 8,550; cash total 8,600; change 1,400; the sale detail in `F2` shows **Rounded up 50**.
 
 **S14 — The barcode will not scan**
 
@@ -648,7 +648,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The first sale is paid; the next customer is already waiting.
 
-*Do:* Press **New sale** (`Enter` or `Space`) instead of closing the app.
+*Do:* Scan the next customer's first item. The cart cleared itself; there is no **New sale** button to press and nothing to close.
 
 *Check:* The cart is empty and the search field is ready.
 
@@ -792,14 +792,15 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 SIGN IN      pick your name → 6-digit PIN → Sign in
 LOCK         Ctrl+L          (cart survives)
 SCREENS      F1 Sell  F2 Sales  F3 Inventory  F4 Dashboard
-             F5 Products  F6 Suppliers  F7 Purchases  F8 Settings
+             F5 Products  F6 Suppliers  F7 Restock  F8 Settings
 
 ONE SALE     F1 → scan / search / tap → Pay (Ctrl+Enter)
              → cash received or Exact chip → Complete sale
-             → give change → New sale (Enter / Space)
+             → give change → scan the next customer's first item
 FIX CART     − / + on the line; below 1 removes it
              Ctrl+P → Clear cart
 CHANGE       green = give back; red = still short
+             the slip stays on the sale: F2 → open it → Copy receipt
 
 ROUNDING     UGX/KES nearest 100 · TZS nearest 5,000
              cash only; the exact total is still recorded

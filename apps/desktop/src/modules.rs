@@ -411,18 +411,6 @@ impl Sell {
         let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             || std::mem::take(&mut state.scan_submit);
         let submitted = submitted && !state.is_tendering();
-        // A finished sale hands the keyboard back to the scanner: the next
-        // barcode is the next customer's first item, and nobody should have to
-        // click anything before the scanner works again. Only when nothing else
-        // holds focus, so it cannot fight the change readout's button.
-        if state
-            .payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_some())
-            && ui.memory(|memory| memory.focused().is_none())
-        {
-            response.request_focus();
-        }
         ui.add_space(SPACING.md);
 
         // A till with an empty catalog is not a bug in the product panel: it is a
@@ -707,10 +695,6 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
     let footer = match state.payment.as_ref() {
-        // The ghost: change, sale number, one button, and the line the copy
-        // confirmation lands on. It is reserved even when nothing is copied, so
-        // the panel does not jump the moment the cashier copies the slip.
-        Some(payment) if payment.done.is_some() => 232.0,
         Some(_) => {
             410.0
                 + if rounding_minor != 0 {

@@ -214,11 +214,12 @@ This is the whole counter flow, from idle till to done.
    - records the sale (`#123`), the lines (name and price snapshotted), and the
      cash payment, in one transaction;
    - subtracts tracked stock for the items sold;
-   - shows the confirmation: green "Paid", **Change** in big type, and the
-     receipt.
-9. Hand over the change. Optionally **Copy receipt** (copies the slip as text),
-   then **New sale** (`Enter`/`Space`) to start the next one, or `Escape` to
-   close.
+   - clears the cart and puts the cursor back in **Scan or search** for the next
+     customer. There is no confirmation panel to dismiss: the change you read in
+     step 7 is what you hand over, and the receipt is kept on the sale.
+9. Open `F2` **Sales** → the sale whenever you need the slip again — lines,
+   amount paid, method, change. **Copy receipt** puts it on the clipboard as
+   text.
 10. Questions mid-sale? The cart stays put — even if the till auto-locks after
     five idle minutes, nothing is lost.
 

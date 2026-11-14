@@ -14,7 +14,7 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
-use crate::db::{Product, RecordedSale, SaleLine, StockItem, Supplier};
+use crate::db::{Product, SaleLine, StockItem, Supplier};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
 
@@ -362,7 +362,7 @@ pub struct ImportDraft {
     pub error: Option<String>,
 }
 
-/// The payment screen, open as a modal over the app.
+/// The payment panel, open in the cart footer.
 ///
 /// Cash received is text, for the same reason a price is: it is mid-edit, and
 /// parsing on every keystroke would eat a half-typed `5000`. Empty means "the
@@ -370,13 +370,6 @@ pub struct ImportDraft {
 pub struct Payment {
     pub tendered: String,
     pub error: Option<String>,
-    /// Set once the sale is written. The modal then shows the change instead of
-    /// the form, so the cashier reads the number before the drawer opens.
-    pub done: Option<RecordedSale>,
-    /// The same sale read back with its lines and header. `done` drives the
-    /// screen; this is what the receipt says, and it can only be filled from
-    /// the ledger, never from the cart that has just been emptied.
-    pub detail: Option<crate::db::SaleDetail>,
     /// Put the cursor in the cash field on the first frame.
     pub focus: bool,
 }
@@ -1850,16 +1843,6 @@ impl State {
     /// silently reprice something already in the basket.
     pub fn add_to_cart(&mut self, product: &Product) {
         self.notice = None;
-        // A finished sale leaves its change on the cart until the next item.
-        // Adding that item is the signal to let it go: the ghost was never a
-        // screen to dismiss, only a readout that has now been read.
-        if self
-            .payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_some())
-        {
-            self.payment = None;
-        }
         match self
             .cart
             .iter_mut()
@@ -3051,6 +3034,7 @@ impl State {
 
     pub fn clear_cart(&mut self) {
         self.cart.clear();
+        self.payment = None;
         self.cart_quantity = None;
         self.notice = None;
     }
@@ -3106,13 +3090,11 @@ impl State {
 
     /// Whether the basket is being paid for right now.
     ///
-    /// A finished sale keeps its [`Payment`] for the change readout, but it is
-    /// not tendering: the cart is empty and the next scan is a new customer.
-    /// Everything that freezes the till asks this, not `payment.is_some()`.
+    /// The payment exists only while the tender panel is open. A written sale
+    /// clears it before the next frame, so the till is never frozen behind a
+    /// finished sale.
     pub fn is_tendering(&self) -> bool {
-        self.payment
-            .as_ref()
-            .is_some_and(|payment| payment.done.is_none())
+        self.payment.is_some()
     }
 
     /// Open the payment screen. Does nothing when the cart is empty or the
@@ -3133,8 +3115,6 @@ impl State {
         self.payment = Some(Payment {
             tendered: String::new(),
             error: None,
-            done: None,
-            detail: None,
             focus: true,
         });
     }
@@ -3148,9 +3128,6 @@ impl State {
         let Some(payment) = self.payment.as_ref() else {
             return;
         };
-        if payment.done.is_some() {
-            return;
-        }
 
         let due_minor = self.due_minor();
         let tendered_text = payment.tendered.trim().to_owned();
@@ -3197,8 +3174,15 @@ impl State {
                 .map(|session| session.user_id.as_str()),
             shift_uid.as_deref(),
         ) {
-            Ok(sale) => {
+            Ok(_) => {
                 self.cart.clear();
+                // The sale is written, so the tender panel has done its job.
+                // Leaving a change readout behind would make an empty cart look
+                // like a cart that never cleared; the change is on the sale.
+                self.payment = None;
+                // Hand the keyboard back to the scanner: the next barcode is
+                // the next customer's first item.
+                self.scan_focus = true;
                 // The sale wrote one negative movement per tracked line, in the
                 // same transaction. Re-read the sums now so the Inventory list
                 // agrees with what just happened.
@@ -3206,16 +3190,6 @@ impl State {
                 // The drawer gained this sale's cash; the card on Today must
                 // say so without waiting for a restart.
                 self.refresh_drawer();
-                // Read the sale back once, here, so the confirmation can print
-                // a receipt instead of four remembered numbers. The cart is
-                // already empty: this is the only copy of what was sold.
-                let detail = crate::db::sale_detail(&self.store, sale.id);
-                if let Some(payment) = self.payment.as_mut() {
-                    payment.error = None;
-                    payment.done = Some(sale);
-                    payment.detail = detail;
-                    payment.focus = true;
-                }
             }
             Err(error) => {
                 tracing::error!(error = %error, "recording a sale failed");
@@ -3475,7 +3449,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sale_empties_the_cart_and_reports_the_change() {
+    fn a_sale_empties_the_cart_and_closes_the_payment() {
         let (mut state, path) = state("paid", Currency::UGX);
         state.cart = vec![line("Sugar", 1, 340), line("Soap", 2, 500)];
 
@@ -3483,28 +3457,22 @@ mod tests {
         state.payment.as_mut().expect("open").tendered = "2000".to_owned();
         state.confirm_payment();
 
-        let sale = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.done.clone())
-            .expect("the sale was recorded");
-        assert_eq!(sale.total_minor, 1_340);
-        assert_eq!(sale.rounding_minor, -40, "1340 rounds down to 1300");
-        assert_eq!(sale.paid_minor(), 1_300);
-        assert_eq!(sale.change_minor, 700);
+        assert!(
+            state.payment.is_none(),
+            "the tender panel closes with the sale"
+        );
+        assert!(state.cart.is_empty(), "the till is ready for the next sale");
 
-        // The confirmation prints the receipt, so the lines have to come back
-        // from the ledger — the cart they came from is already empty.
-        let detail = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.detail.as_ref())
-            .expect("the sale was read back");
+        // The cart is already empty, so the sale is read back from the ledger.
+        let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+        let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+        assert_eq!(detail.total_minor, 1_340);
+        assert_eq!(detail.rounding_minor, -40, "1340 rounds down to 1300");
+        assert_eq!(detail.paid_minor, 1_300);
+        assert_eq!(detail.change_minor, 700);
         assert_eq!(detail.lines.len(), 2);
         assert_eq!(detail.lines[0].name, "Sugar");
-        assert_eq!(detail.change_minor, 700);
 
-        assert!(state.cart.is_empty(), "the till is ready for the next sale");
         assert_eq!(crate::db::totals(&state.store, 3, None), (1, 1_300));
         // The sale carries the person, not the shop: a till with three cashiers
         // has to be able to say which of them took this money.
@@ -3526,13 +3494,11 @@ mod tests {
         state.start_payment();
         state.confirm_payment();
 
-        let sale = state
-            .payment
-            .as_ref()
-            .and_then(|payment| payment.done.clone())
-            .expect("the sale was recorded");
-        assert_eq!(sale.tendered_minor, 300);
-        assert_eq!(sale.change_minor, 0);
+        assert!(state.payment.is_none());
+        let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+        let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+        assert_eq!(detail.tendered_minor, 300);
+        assert_eq!(detail.change_minor, 0);
 
         let _ = std::fs::remove_file(path);
     }
@@ -3549,7 +3515,6 @@ mod tests {
         state.confirm_payment();
 
         let payment = state.payment.as_ref().expect("still open");
-        assert!(payment.done.is_none(), "nothing was recorded");
         assert_eq!(payment.error.as_deref(), Some("That is USh 100 short."));
         assert_eq!(state.cart.len(), 1, "the basket is untouched");
         assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
@@ -3557,7 +3522,7 @@ mod tests {
         // Correcting the field completes the sale.
         state.payment.as_mut().expect("open").tendered = "500".to_owned();
         state.confirm_payment();
-        assert!(state.payment.as_ref().expect("open").done.is_some());
+        assert!(state.payment.is_none());
         assert!(state.cart.is_empty());
 
         let _ = std::fs::remove_file(path);

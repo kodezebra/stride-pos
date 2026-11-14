@@ -72,8 +72,8 @@ pub struct SaleLine {
 
 /// A sale after it is written.
 ///
-/// The amounts are the ones the cashier reads out, so the confirmation screen
-/// does not have to re-derive them from a cart that is now empty.
+/// The amounts are the ones the cashier reads out, so a caller does not have to
+/// re-derive them from a cart that is now empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSale {
     pub id: i64,
@@ -92,6 +92,7 @@ pub struct RecordedSale {
 
 impl RecordedSale {
     /// What the customer paid, and what the drawer gained.
+    #[cfg(test)]
     pub fn paid_minor(&self) -> i64 {
         self.total_minor + self.rounding_minor
     }
