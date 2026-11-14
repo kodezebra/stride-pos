@@ -791,25 +791,12 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                     // Quantity and unit price under the name, the stepper under
                     // the amount: the control belongs to the number it changes.
                     //
-                    // The count is a boxed button, not muted text: a till is a
-                    // touch screen, so there is no hover to reveal that the
-                    // count is editable. Tapping it opens the keypad, which is
-                    // how a cashier sells ten of something without tapping `+`
-                    // ten times.
+                    // The count in the middle of the stepper is a button. A till
+                    // is a touch screen, so there is no hover to reveal that the
+                    // quantity is editable; tapping the number opens the keypad,
+                    // which is how a cashier sells ten of something without
+                    // tapping `+` ten times.
                     ui.horizontal(|ui| {
-                        let qty = ui
-                            .add(
-                                egui::Button::new(
-                                    components::numeric(format!("Qty {}", line.qty))
-                                        .size(TYPE.small),
-                                )
-                                .min_size(egui::vec2(0.0, 26.0))
-                                .corner_radius(egui::CornerRadius::same(RADII.sm as u8)),
-                            )
-                            .on_hover_text("Set quantity");
-                        if qty.clicked() {
-                            edit = Some(index);
-                        }
                         ui.label(
                             components::numeric(format!("× {}", state.money(line.unit_minor)))
                                 .size(TYPE.small)
@@ -822,12 +809,15 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                             // would read plus, count, minus — "more" before
                             // "less", which is the opposite of every other
                             // stepper in the app.
-                            let (step, _count) = ui
+                            let (step, count) = ui
                                 .with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| components::stepper(ui, line.qty),
                                 )
                                 .inner;
+                            if count.on_hover_text("Set quantity").clicked() {
+                                edit = Some(index);
+                            }
                             if step != components::Step::None {
                                 steps.push((index, step));
                             }
