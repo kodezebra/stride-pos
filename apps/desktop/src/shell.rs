@@ -439,7 +439,17 @@ impl PosShell {
         // `show_collapsible` flips this flag when the user drags the sidebar
         // shut, so the state is committed after the frame rather than read once.
         let mut open = state.sidebar_open(active);
-        regions::sidebar(ui, spec, &mut open, |ui| module.sidebar(ui, state));
+        // The sidebar is part of the map, not of the cart: while the tender owns
+        // the screen it dims with the grid. On Sell that stops a category tap
+        // from re-filtering the products behind the panel the cashier is reading.
+        let tendering = state.is_tendering();
+        regions::sidebar(ui, spec, &mut open, |ui| {
+            if tendering {
+                ui.set_opacity(0.35);
+                ui.disable();
+            }
+            module.sidebar(ui, state);
+        });
         state.set_sidebar_open(active, open);
 
         regions::workspace(ui, |ui| {

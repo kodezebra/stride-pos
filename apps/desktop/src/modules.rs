@@ -413,8 +413,8 @@ impl Sell {
         let submitted = submitted && !state.is_tendering();
         // A finished sale hands the keyboard back to the scanner: the next
         // barcode is the next customer's first item, and nobody should have to
-        // click "Done" before the scanner works again. Only when nothing else
-        // holds focus, so it cannot fight the change readout's buttons.
+        // click anything before the scanner works again. Only when nothing else
+        // holds focus, so it cannot fight the change readout's button.
         if state
             .payment
             .as_ref()
@@ -707,8 +707,10 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
     let footer = match state.payment.as_ref() {
-        // The ghost: change, sale number, two buttons.
-        Some(payment) if payment.done.is_some() => 280.0,
+        // The ghost: change, sale number, one button, and the line the copy
+        // confirmation lands on. It is reserved even when nothing is copied, so
+        // the panel does not jump the moment the cashier copies the slip.
+        Some(payment) if payment.done.is_some() => 232.0,
         Some(_) => {
             410.0
                 + if rounding_minor != 0 {
@@ -814,7 +816,18 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                                 .color(palette.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let step = components::stepper(ui, line.qty);
+                            // The stepper is minus, count, plus everywhere else it
+                            // appears. `horizontal` inherits the parent's
+                            // direction, so inside this right-to-left row it
+                            // would read plus, count, minus — "more" before
+                            // "less", which is the opposite of every other
+                            // stepper in the app.
+                            let step = ui
+                                .with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| components::stepper(ui, line.qty),
+                                )
+                                .inner;
                             if step != components::Step::None {
                                 steps.push((index, step));
                             }

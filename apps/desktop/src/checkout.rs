@@ -65,7 +65,6 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
         let palette = theme::current(ui.ctx());
         let success = egui::Color32::from(palette.success);
         let mut copied = false;
-        let mut dismiss = false;
 
         ui.add_space(SPACING.sm);
         components::divider(ui);
@@ -89,6 +88,10 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
 
         // The slip as text, because a customer who wants the receipt usually
         // wants it in a message, not read aloud across the counter.
+        //
+        // This is the ghost's only action, and deliberately so: it is a readout,
+        // not a screen. The next scan ends it. A till that waits to be told the
+        // customer has gone is a till with a step in it.
         if let Some(text) = &copy_text
             && actions::secondary(ui, "Copy receipt")
                 .on_hover_text("Copy this slip as text")
@@ -97,26 +100,15 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
             ui.ctx().copy_text(text.clone());
             copied = true;
         }
-        if actions::quiet(ui, "Done")
-            .on_hover_text("Clear the change and keep selling")
-            .clicked()
-        {
-            dismiss = true;
+
+        // The confirmation replaces nothing: the ghost has no hint line of its
+        // own, because the empty cart above already says what to do next. This
+        // only appears after a copy, so it is feedback, never instruction.
+        if copied {
+            ui.add_space(SPACING.xs);
+            components::caption(ui, "Copied to the clipboard.");
         }
 
-        ui.add_space(SPACING.xs);
-        components::caption(
-            ui,
-            if copied {
-                "Copied to the clipboard."
-            } else {
-                "Scan the next item to start a new sale."
-            },
-        );
-
-        if dismiss {
-            state.close_payment();
-        }
         return;
     }
 
