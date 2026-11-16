@@ -22,7 +22,7 @@ use money::Currency;
 use ui_kit::components;
 use ui_kit::icons::Icon;
 use ui_kit::theme::Theme;
-use ui_kit::tokens::{SPACING, TYPE};
+use ui_kit::tokens::{RADII, SPACING, TYPE};
 use ui_shell::egui;
 use ui_shell::regions::{self, Command, Palette, RailItem, Sidebar, size};
 
@@ -754,25 +754,34 @@ fn tab_strip(ui: &mut egui::Ui, tabs: &[usize], active: usize) -> Option<usize> 
             egui::Color32::from(palette.text_muted)
         };
 
+        let mut text = egui::RichText::new(modules::tab_label(index))
+            .size(TYPE.body)
+            .color(ink);
+        if selected {
+            text = text.family(ui_kit::theme::semibold());
+        }
+
         let response = row
             .add(
-                egui::Button::new(
-                    egui::RichText::new(modules::tab_label(index))
-                        .size(TYPE.body)
-                        .color(ink),
-                )
-                .frame(false)
-                .min_size(egui::vec2(0.0, HEIGHT)),
+                egui::Button::new(text)
+                    .frame(false)
+                    .min_size(egui::vec2(0.0, HEIGHT)),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
 
+        if response.hovered() && !selected {
+            row.painter().rect_filled(
+                response.rect.shrink2(egui::vec2(0.0, 4.0)),
+                egui::CornerRadius::same(RADII.sm as u8),
+                ui.visuals().widgets.hovered.bg_fill,
+            );
+        }
+
         if selected {
-            // The underline is the only rule on this row: the page below draws
-            // its own hairline, and two lines a button apart read as a table
-            // header rather than as navigation.
+            // Flush indicator along the bottom of the tab strip.
             let underline = egui::Rect::from_min_size(
-                egui::pos2(response.rect.left() + 4.0, response.rect.bottom() - 3.0),
-                egui::vec2((response.rect.width() - 8.0).max(0.0), 2.0),
+                egui::pos2(response.rect.left() + 2.0, response.rect.bottom() - 2.0),
+                egui::vec2((response.rect.width() - 4.0).max(0.0), 2.0),
             );
             row.painter().rect_filled(
                 underline,
