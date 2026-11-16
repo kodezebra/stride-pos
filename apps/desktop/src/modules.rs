@@ -2310,12 +2310,12 @@ fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
 
 /// The edit glyph for a catalogue row.
 ///
-/// A pencil is the edit affordance the rest of the desktop uses. It is in the
-/// Lucide set but not yet in `ui-kit`'s vocabulary, so it is resolved by name —
-/// the same lookup a settings file uses. The fallback means a renamed glyph
-/// costs a different icon, never a missing button.
+/// `settings-2` is the edit affordance the desktop uses. It is in the Lucide
+/// set but not yet in `ui-kit`'s vocabulary, so it is resolved by name — the
+/// same lookup a settings file uses. The fallback means a renamed glyph costs a
+/// different icon, never a missing button.
 fn edit_icon() -> Icon {
-    Icon::named("pencil").unwrap_or(Icon::SETTINGS)
+    Icon::named("settings-2").unwrap_or(Icon::SETTINGS)
 }
 
 enum ProductAction {
@@ -4108,13 +4108,10 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
         (palette.success, "In stock")
     };
 
-    // Pin the scope to one control row: a badge frame in a right-to-left
-    // layout otherwise inherits the row's full height.
+    // The badge pins its own height, so the scope here only exists to give the
+    // pill a response to hang the tooltip on.
     let badge = ui
-        .scope(|ui| {
-            ui.set_height(ui.spacing().interact_size.y);
-            components::badge(ui, &item.on_hand.to_string(), color)
-        })
+        .scope(|ui| components::badge(ui, &item.on_hand.to_string(), color))
         .response;
     badge.on_hover_text(hint);
     if can_manage
