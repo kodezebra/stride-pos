@@ -58,24 +58,25 @@ one file on that machine.
 ```
 ┌─────┬──────────────────┬─────────────────────────────────┐
 │ rail│ sidebar          │ workspace                       │
-│ F1–8│ (module-specific)│ (the module you opened)         │
+│ F1–4│ (module-specific)│ (the module you opened)         │
 ├─────┴──────────────────┴─────────────────────────────────┤
 │ status bar: local only · shortcuts · version · name/role │
 └──────────────────────────────────────────────────────────┘
 ```
 
-**The rail (left edge) — the eight sections:**
+**The rail (left edge) — four sections, and only two of them for a cashier:**
 
 | Key | Section | What it is |
 |---|---|---|
 | F1 | Sell | the till screen: search/scan, cart, payment |
-| F2 | Sales | every completed sale, newest first |
-| F3 | Inventory | what is on the shelf, per tracked product |
-| F4 | Dashboard | takings and best sellers for today / 7 / 30 days / all time |
-| F5 | Products | the catalogue: add, edit, import, export |
-| F6 | Suppliers | who the shop buys from |
-| F7 | Restock | plan a restocking trip, then receive what arrived |
-| F8 | Settings | appearance, receipt preview, scanner, staff, backup |
+| F2 | Day | today's takings and every sale, then the trends |
+| F3 | Shop | the catalogue, stock, restocking and suppliers |
+| F4 | Settings | appearance, receipt preview, scanner, staff, backup |
+
+The second level is a tab above the page, not another key: `F2` lands on
+**Today** (with **Trends** beside it), `F3` on **Catalog** (with **Stock**,
+**Restock** and **Suppliers**). **Settings** puts its sections in the sidebar.
+A cashier sees `F1` and `F2`; the shop and its setup are the manager's.
 
 **The status bar (bottom)** shows: "local only", shortcut hints, the app version,
 your name and role (or "no cashier" if nobody is signed in), and the current cart
@@ -88,16 +89,18 @@ command palette (type a few letters of any destination: "dash", "sales", "lock"�
 
 | Key | Does |
 |---|---|
-| `F1` … `F8` | switch between the eight sections |
+| `F1` … `F4` | switch between the views (`F1`–`F2` for a cashier) |
 | `Ctrl+Enter` or `F12` | take payment for the cart |
 | `Ctrl+L` | lock the till now |
 | `Ctrl+P` | command palette |
 | `Ctrl+B` | show / hide the sidebar |
+| `Ctrl+F` | focus the page's search field |
 | `Ctrl+T` | light / dark |
 
 Inside forms and modals, `Enter` saves and `Escape` cancels. In the payment
 modal, `Enter` completes the sale and `Escape` returns to the cart. After a sale,
-`Enter` or `Space` starts the next sale.
+`Enter` or `Space` starts the next sale. In a page's search field, `Escape`
+empties it and keeps the cursor there, ready for the next scan.
 
 ---
 
@@ -171,9 +174,9 @@ Do this once, in order. Budget about twenty minutes.
    person who actually works it). The owner account stays as the back office.
    For each person added, the till generates a six-digit PIN and shows it once —
    write it down before navigating away.
-7. **Add products.** Either one at a time (Products → **New product**), or import
-   the shop's spreadsheet: Products → **More → Save a template**, fill in the
-   template, then **Import CSV**. See §6.10.
+7. **Add products.** Either one at a time (**Catalog** → **New product**), or
+   import the shop's spreadsheet: **Import / Export ▾ → Import from CSV…** →
+   **Save a template**, fill in the template, then import it. See §6.10.
 8. **Check the receipt layout** (Settings → Receipt): the preview shows your shop
    name and sample lines. Any change to the shop name appears here immediately.
 9. **Back up.** Settings → Terminal → **Back up now**. The copy lands in
@@ -196,8 +199,8 @@ This is the whole counter flow, from idle till to done.
 2. Sell screen (F1) opens with the product grid, search field focused.
 3. Items go into the cart three ways, mixed freely:
    - scan a barcode (phone or USB scanner) — exact barcode wins over search;
-   - type part of a name or barcode in **Scan or search** — the grid narrows as
-     you type;
+   - type part of a name or barcode in the search field at the top of the
+     screen — the grid narrows as you type;
    - tap a tile in the grid.
 4. Same product twice merges into one line at the next quantity. Use the **− / +**
    stepper on a line to change quantity; going below 1 removes the line.
@@ -214,10 +217,10 @@ This is the whole counter flow, from idle till to done.
    - records the sale (`#123`), the lines (name and price snapshotted), and the
      cash payment, in one transaction;
    - subtracts tracked stock for the items sold;
-   - clears the cart and puts the cursor back in **Scan or search** for the next
-     customer. There is no confirmation panel to dismiss: the change you read in
+   - clears the cart and puts the cursor back in the search field at the top for
+     the next customer. There is no confirmation panel to dismiss: the change you read in
      step 7 is what you hand over, and the receipt is kept on the sale.
-9. Open `F2` **Sales** → the sale whenever you need the slip again — lines,
+9. Open **Today** (`F2`) → the sale whenever you need the slip again — lines,
    amount paid, method, change. **Copy receipt** puts it on the clipboard as
    text.
 10. Questions mid-sale? The cart stays put — even if the till auto-locks after
@@ -239,8 +242,8 @@ always match the drawer, not the price list — see §7.3.
 
 **Morning**
 
-1. Sign in, check F4 **Dashboard** with range **Today** for yesterday's context,
-   confirm stock warnings under F3 **Inventory** (the **Low** and **Out**
+1. Sign in, check **Trends** (`F2`) with range **Today** for yesterday's context,
+   confirm stock warnings under **Stock** (`F3`) (the **Low** and **Out**
    filters), and make sure the backup ran (Settings → Terminal → the backup
    folder holds the last 10).
 2. Unlock and open. The status bar shows "local only" — expected.
@@ -250,9 +253,9 @@ one-minute approval rather than handing over PINs.
 
 **Close of day (manager or owner)**
 
-1. F4 **Dashboard**, range **Last 7 days** if you want the week in view.
+1. **Trends** (`F2`), range **Last 7 days** if you want the week in view.
 2. Read the KPI cards and the **By person** table (who took what).
-3. F2 **Sales** → **Export CSV** to a folder you keep (see §8.10).
+3. **Today** (`F2`) → **Export** to a folder you keep (see §8.10).
 4. Settings → Terminal → **Back up now**.
 5. `Ctrl+L` to lock.
 
@@ -272,11 +275,11 @@ one-minute approval rather than handing over PINs.
 
 The shop does not wait for a supplier to deliver. The owner goes to town with a
 list, buys what is available, and counts it in when they get back. **Restock**
-(F7) records both halves of that trip, on one page.
+(`F3`) records both halves of that trip, on one page.
 
 **Before leaving**
 
-1. Press F7 **Restock** → **New list**.
+1. Press `F3` → **Restock** → **New list**.
 2. Name the supplier if there is one; it is optional. Add a note such as
    "Saturday market".
 3. Press **Add low stock** to fill the list with everything at or under its
@@ -295,7 +298,7 @@ zero when you receive.
 
 **When the goods come back**
 
-1. F7 **Restock** → open the planned list.
+1. **Restock** (`F3`) → open the planned list.
 2. Each row starts at the planned quantity. Change it to what actually arrived.
    A line you did not find is set to **0**: it stays on the record as not bought.
    Enter the unit cost if you know it — this becomes the product's last known
@@ -312,16 +315,16 @@ The shortfall is not turned into a new list for you: plan the next trip from
 **Add low stock**. A planned list can still be edited or deleted; a received one
 opens read-only, because a stock movement points at its lines.
 
-**If a product is not tracked yet:** track it first (F3 **Inventory** → **Track
+**If a product is not tracked yet:** track it first (**Stock** (`F3`) → **Track
 stock**), because a purchase line needs a shelf count to move. Counting it at the
 same time as the trip is fine — enter what is on the shelf now, then receive the
 new goods.
 
 ### 5.5 Money doesn't add up at close, end to end
 
-1. F4 **Dashboard** (shop view) → **Payments taken** card lists takings by method.
+1. **Trends** (`F2`) (shop view) → **Payments taken** card lists takings by method.
 2. Compare with the physical cash in the drawer.
-3. F2 **Sales** → range **Today** → compare line count and per-sale totals.
+3. **Today** (`F2`) → range **Today** → compare line count and per-sale totals.
    Click any row to open the receipt and see exactly what the customer paid and
    received as change.
 4. If a cashier's numbers are consistently off, the **By person** table shows
@@ -331,7 +334,7 @@ new goods.
    was given; it does not count the drawer.
 6. Unusual patterns (many small sales, one big one) are visible in **Top items**
    and **Busiest hour**.
-7. Export the day's sales (F2 → **Export CSV**) and keep the file with the
+7. Export the day's sales (**Today** (`F2`) → **Export**) and keep the file with the
    paper records.
 
 ---
@@ -340,7 +343,7 @@ new goods.
 
 ### 6.1 "No product matches …" when scanning
 
-- The barcode may not be in the catalogue. F5 **Products** → search the code. If
+- The barcode may not be in the catalogue. **Shop** (`F3`) → **Catalog** → search the code. If
   absent, **New product** with the scanner focused in the **Barcode** field — or
   scan from the phone with the **Add** action, which pre-fills the barcode (needs
   a manager or the owner for permission).
@@ -402,7 +405,7 @@ this — it is how the drawer physically balances.
 
 ### 6.9 Adding or editing a product
 
-- F5 **Products** → **New product**. Name required; price required; category
+- **Catalog** (`F3`) → **New product**. Name required; price required; category
   defaults to **General** if blank; barcode optional.
 - **Pick…** beside Category lists known categories plus the starter tree.
 - Edit via the pencil icon on the row; delete via the trash icon — deletion is
@@ -413,13 +416,15 @@ this — it is how the drawer physically balances.
 
 ### 6.10 Importing a product list
 
-1. F5 **Products** → **More** → **Save a template** → pick a folder. The file
-   `products-template.csv` is written with two example rows.
+1. **Catalog** (`F3`) → **Import / Export ▾** → **Import from CSV…**, then
+   **Save a template** → pick a folder. The file `products-template.csv` is
+   written with two example rows.
 2. Fill the template in your spreadsheet (name, category, price, barcode
    optional; headings honoured case-insensitively). Prices are read in this
    till's currency.
-3. F5 → **More** → **Import CSV** → pick the file. Rows that cannot be read
-   are skipped and counted, never half-imported. Duplicate barcodes are skipped.
+3. **Import / Export ▾** → **Import from CSV…** → pick the file. Rows that
+   cannot be read are skipped and counted, never half-imported. Duplicate
+   barcodes are skipped.
 4. "Imported N product(s), skipped M." appears as a notice. The first skipped
    row's reason is shown.
 5. Excel tip: a barcode starting with 0 loses its leading zero unless the column
@@ -429,9 +434,9 @@ this — it is how the drawer physically balances.
 
 ### 6.11 Exporting sales or products
 
-- F5 **Products** → **More** → **Export CSV** (visible rows only) or **Export
-  all** (whole catalogue).
-- F2 **Sales** → **Export CSV** (same range and same scope as the screen — a
+- **Catalog** (`F3`) → **Import / Export ▾** → **Export this view** (the rows on
+  screen) or **Export all products** (the whole catalogue).
+- **Today** (`F2`) → **Export** (same range and same scope as the screen — a
   cashier exports only their own takings).
 - Files are named `products-…-YYYYMMDD-HHMMSS.csv` / `sales-…-YYYYMMDD-HHMMSS.csv`
   and land in the folder you pick. Location buttons: Home, Documents, Downloads,
@@ -499,8 +504,8 @@ this — it is how the drawer physically balances.
 
 ### 6.16 Manager approving something on the spot
 
-- Cashier does the action (e.g. opens F2 for the shop view, presses something
-  gated). Till shows **"A manager is needed"** (or "The owner is needed" for
+- Cashier does the action (scans, presses **Track stock**, something gated).
+  Till shows **"A manager is needed"** (or "The owner is needed" for
   staff/currency).
 - Manager or owner picks their name, types PIN/password, presses **Approve**.
 - The action is allowed for **one minute**, and the cashier's name stays on the
@@ -580,9 +585,9 @@ This chapter is the answer to "how do I know how the shop is doing?".
 
 ### 8.1 The two screens that report
 
-- **F4 Dashboard** — the picture: KPIs, the payments and profit cards, the chart,
-  the tables.
-- **F2 Sales** — the evidence: the transaction list behind the picture, CSV
+- **Trends** (`F2`) — the picture: KPIs, the payments and profit cards, the
+  chart, the tables.
+- **Today** (`F2`) — the evidence: the transaction list behind the picture, CSV
   export, and a tappable receipt behind every row.
 
 Both share the same sidebar range selector and the same scope rule: **managers
@@ -673,8 +678,8 @@ and your "why is this always out of stock" list.
 The five most recent sales in the range, tappable. The detail is the receipt:
 shop name, sale number, time, cashier, lines with qty × unit, rounding lines if
 any, total, amount paid, method, and change. **Copy receipt** puts it on the
-clipboard as text — useful for WhatsApp confirmations or dispute handling. F2
-lists the same rows for the whole range (max 100).
+clipboard as text — useful for WhatsApp confirmations or dispute handling.
+**Today** (`F2`) lists the same rows for the whole range (max 100).
 
 ### 8.10 Sales export for spreadsheets
 
@@ -695,11 +700,11 @@ a cashier exports only their own sales.
 
 ### 8.12 A weekly rhythm for the owner
 
-1. Monday: F4, **Last 7 days**, shop view. Note Revenue trend, Sales trend.
+1. Monday: **Trends** (`F2`), **Last 7 days**, shop view. Note Revenue trend, Sales trend.
 2. Check **Busiest hour** — is someone rostered?
-3. Check **Top items** vs F3 **Inventory** low-stock list — reorder what sells.
+3. Check **Top items** vs **Stock** (`F3`) low-stock list — reorder what sells.
 4. Check **By person** — who needs coaching, who ran out of change.
-5. F2 → **Export CSV**, file it with the week's paper.
+5. **Today** (`F2`) → **Export**, file it with the week's paper.
 6. Settings → Terminal → **Back up now** if the till has not backed up today.
 7. Saturday: same, plus a physical drawer count against **Payments taken**.
 
@@ -757,7 +762,7 @@ internet, ever — do not port-forward it.
 |---|---|---|
 | "No products yet" on the grid | empty catalogue | Products → New product, or import CSV |
 | Scan does nothing | scanner (phone) off, locked till, or dialog open | Settings → Scanner → Turn on; close dialogs; unlock |
-| "A product already uses that barcode" | duplicate barcode | F5 → search that barcode → edit the right product |
+| "A product already uses that barcode" | duplicate barcode | `F3` → **Catalog** → search that barcode → edit the right product |
 | "A manager is needed" (or owner) | cashier action too high | Ask for the one-minute approval |
 | Sign-in rejects correct PIN | lockout active | wait for countdown; owner can reset PIN |
 | Recovery code not accepted | mistyped or already used | codes are single-use; a used one is replaced — use the latest |

@@ -491,8 +491,8 @@ impl PosShell {
 
         regions::workspace(ui, |ui| {
             // A view with more than one page shows its tabs where a page title
-            // would go. Sell has one page, so it gets no strip at all: the
-            // counter is the counter.
+            // would go. Sell has one page, so it gets no tab strip: the counter
+            // is the counter, and its page bar carries the scan field alone.
             let tabs = modules::tabs(modules::view_of(state.module), role);
             if tabs.len() > 1
                 && let Some(index) = tab_strip(ui, tabs, state.module)

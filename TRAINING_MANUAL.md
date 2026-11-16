@@ -36,20 +36,23 @@ It does five jobs, and this manual teaches them in the order goods move through 
 
 That order is intentional. You cannot sell what is not in Products. You cannot receive goods without a product to receive them into. You cannot trust a stock count you never started. Suppliers sit beside that chain: the delivery note needs a name. Learn the order once; after that, nearly all your time is in Lesson 4.
 
-### 0.2 The eight screens
+### 0.2 The four sections
 
-| Key | Screen | What it is for |
+| Key | Section | The pages inside it |
 |---|---|---|
 | `F1` | **Sell** | The counter: search, scan, cart, payment |
-| `F2` | **Sales** | Every completed sale, newest first |
-| `F3` | **Inventory** | What the stock record says is on the shelf |
-| `F4` | **Dashboard** | Takings, number of sales, best sellers, busiest hour |
-| `F5` | **Products** | The catalogue: add, edit, import, export |
-| `F6` | **Suppliers** | Who the shop buys from |
-| `F7` | **Restock** | Plan a restocking trip, then receive what arrived |
-| `F8` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
+| `F2` | **Day** | **Today** — every completed sale, newest first; **Trends** — takings, best sellers, busiest hour |
+| `F3` | **Shop** | **Catalog** — the products; **Stock** — what is on the shelf; **Restock** — plan a trip, receive what came back; **Suppliers** — who the shop buys from |
+| `F4` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
 
-F7 is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
+The pages are tabs above the page, not another key: `F2` lands on **Today**,
+`F3` on **Catalog**. A cashier has `F1` and `F2` only.
+
+The tabs are named after the job, not the table: **Catalog** is where products
+live, **Stock** is the inventory count, **Restock** is a purchase order,
+**Trends** is the dashboard.
+
+**Restock** is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
 
 ### 0.3 Signing in and locking
 
@@ -83,11 +86,12 @@ Two things can never be approved for a cashier: **managing staff** and **changin
 
 | Key | Does |
 |---|---|
-| `F1`–`F8` | Jump to a screen |
+| `F1`–`F3` | Jump to a screen |
 | `Ctrl+Enter` or `F12` | Take payment |
 | `Ctrl+L` | Lock the till |
 | `Ctrl+P` | Command palette — type "dash", "sales", "lock" |
 | `Ctrl+B` | Show or hide the sidebar |
+| `Ctrl+F` | Jump to the page's search field |
 | `Ctrl+T` | Light or dark |
 
 In forms and dialogs: `Enter` saves, `Escape` cancels. In the payment dialog: `Enter` completes the sale, `Escape` goes back to the cart.
@@ -142,7 +146,7 @@ Prices in the table are written with thousands separators so they are easy to re
 
 ### 1.1 Add one product
 
-1. Press `F5` to open **Products**.
+1. Press `F3` and open the **Catalog** tab.
 2. Press **New product**.
 3. Type the **Name** — for example, `Africa Tea Leaves 100 g`.
 4. Type the **Price**. Type only the number: `3000`, not `UGX 3,000`.
@@ -164,11 +168,11 @@ Two facts to remember:
 
 ### 1.3 Load many products from a spreadsheet
 
-1. `F5` → **More** → **Import CSV**. A file chooser opens.
+1. **Import / Export ▾** → **Import from CSV…**. A dialog opens.
 2. In the chooser, press **Save a template**, then choose a folder. The till writes `products-template.csv`.
 3. Open that file in a spreadsheet. Fill one product per row: `name,category,price,barcode`.
 4. Save it as CSV.
-5. `F5` → **More** → **Import CSV** again, and pick your filled file.
+5. **Import / Export ▾** → **Import from CSV…** again, and pick your filled file.
 6. Read the notice: **"Imported N products, skipped M."** If nothing at all could be imported, the same box shows the first reason. If only some rows were skipped, the notice gives the counts — open the file and check the rows yourself.
 
 Bad rows are skipped, never half-imported. Duplicate barcodes are skipped as well.
@@ -177,8 +181,8 @@ Bad rows are skipped, never half-imported. Duplicate barcodes are skipped as wel
 
 ### 1.4 Export products
 
-- **More → Export CSV** exports the rows you can see.
-- **More → Export all** exports the whole catalogue.
+- **Import / Export ▾ → Export this view** exports the rows you can see.
+- **Import / Export ▾ → Export all products** exports the whole catalogue.
 
 Both produce `products-…-YYYYMMDD-HHMMSS.csv`. Amounts are plain numbers with no currency symbol, so a spreadsheet reads them cleanly.
 
@@ -210,7 +214,7 @@ Both produce `products-…-YYYYMMDD-HHMMSS.csv`. Amounts are plain numbers with 
 
 ### 2.1 Add a supplier
 
-1. Press `F6` to open **Suppliers**.
+1. Press `F3` and open the **Suppliers** tab.
 2. Press **New supplier**.
 3. Type the **Name** — this is the only required field.
 4. Fill in what you know: **Contact**, **Phone**, **Email**, **Address**, **Notes** (delivery days, terms, the rep's name).
@@ -261,7 +265,7 @@ Because stock is a ledger, you can always answer "why is the count what it is?" 
 
 ### 3.2 Start tracking a product
 
-1. Press `F3` to open **Inventory**.
+1. Press `F3` and open the **Stock** tab.
 2. Press **Track stock**.
 3. Choose the product.
 4. Enter **what is on the shelf right now** — the opening count.
@@ -322,7 +326,7 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 
 ### 3A.1 Plan before you leave
 
-1. Press `F7` to open **Restock**.
+1. Press `F3` and open the **Restock** tab.
 2. Press **New list**.
 3. Type the supplier's name if there is one. It is optional — a market trip often has no supplier or delivery note.
 4. Press **Add low stock**. Every tracked product at or under its warning line appears with a suggested quantity.
@@ -334,7 +338,7 @@ The list now reads **Planned**. Nothing has moved in stock — a plan is intent,
 
 ### 3A.2 Receive what came back
 
-1. `F7` → open the list → the page opens ready to count in.
+1. **Restock** → open the list → the page opens ready to count in.
 2. Each row starts at the planned quantity. Type what actually arrived.
 3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
 4. Set a line you did not find to **0**. It stays on the record as not bought.
@@ -361,7 +365,7 @@ There is no **Part received** state. Receiving is one act, so the same goods can
 ### 3A.5 Practice
 
 1. Make tea low: sell enough, or adjust it down to 2.
-2. `F7` → **New list** → **Add low stock**. Check tea appears with a sensible quantity.
+2. **Restock** → **New list** → **Add low stock**. Check tea appears with a sensible quantity.
 3. Add soap manually even though it is not low.
 4. Save. Confirm the list is **Planned** and tea's on-hand count did not change.
 5. Open it, receive 10 tea at cost `800`. Set soap to **0**.
@@ -378,12 +382,14 @@ There is no **Part received** state. Receiving is one act, so the same goods can
 ### 4.1 A sale in seven steps
 
 1. Press `F1` to open **Sell**.
-2. Add items: scan a barcode, type in **Scan or search**, or tap a tile.
+2. Add items: scan a barcode, type in the search field at the top of the
+   screen, or tap a tile.
 3. Check the cart on the right. The total is at the bottom.
 4. Press **Pay** (or `Ctrl+Enter` / `F12`).
 5. Type the cash received, or tap a quick-tender chip.
 6. Press **Complete sale** (or `Enter`).
-7. Hand over the change. The cart is empty and the cursor is back in **Scan or search** — scan the next customer's first item.
+7. Hand over the change. The cart is empty and the cursor is back in the
+   search field — scan the next customer's first item.
 
 ### 4.2 Putting items in the cart
 
@@ -424,10 +430,10 @@ The sale still records the exact price-list total and stores the rounding differ
 
 ### 4.5 After the sale
 
-Pressing **Complete sale** writes the sale, takes the stock out, empties the cart, and puts the cursor back in **Scan or search**. There is no confirmation panel and nothing to dismiss — the next customer's first item can be scanned immediately.
+Pressing **Complete sale** writes the sale, takes the stock out, empties the cart, and puts the cursor back in the search field at the top of the screen. There is no confirmation panel and nothing to dismiss — the next customer's first item can be scanned immediately.
 
 - The **Change** you read before completing is what you hand over.
-- The slip is kept on the sale: `F2` **Sales** → open the sale, which shows lines, amount paid, method and change. **Copy receipt** puts it on the clipboard as text, for a WhatsApp confirmation or a dispute.
+- The slip is kept on the sale: `F2` **Today** → open the sale, which shows lines, amount paid, method and change. **Copy receipt** puts it on the clipboard as text, for a WhatsApp confirmation or a dispute.
 - Receipts cannot be printed in this build. Say so plainly and offer the copied text.
 
 **If the queue is long:** the cart is already empty after a sale, so `Enter` on the scanner's next barcode starts the next sale. No keypress is needed to "start a new sale".
@@ -537,7 +543,7 @@ Omo Washing Powder 500 g,Household,6200,6001234500080
 Bad Row,Groceries,abc,6001234500097
 ```
 
-*Do:* `F5` → **More** → **Import CSV**.
+*Do:* **Import / Export ▾** → **Import from CSV…**.
 
 *Check:* The notice says **"Imported 2 products, skipped 1."** The good rows are complete. The notice does not name the bad row, so check the file if the number surprises you.
 
@@ -631,7 +637,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The scanner beeps, but the till says "No product matches".
 
-*Do:* Type part of the name in **Scan or search**. If the item truly is not in the catalogue, ask a manager to add it with the barcode.
+*Do:* Type part of the name in the search field at the top of the screen. If the item truly is not in the catalogue, ask a manager to add it with the barcode.
 
 *Check:* You can sell it by search, and the catalogue now holds the barcode.
 
@@ -665,7 +671,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The shop is closing.
 
-*Do:* `F4` → **Today** → read Revenue and the **Payments taken** card. `F2` → **Export CSV**. Settings → Terminal → **Back up now**. `Ctrl+L`.
+*Do:* `F2` → **Today** → read Revenue and the **Payments taken** card. `F2` → **Export**. Settings → Terminal → **Back up now**. `Ctrl+L`.
 
 *Check:* The cash in the drawer matches the Payments card. The export file exists. The backup is in the folder.
 
@@ -790,8 +796,9 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 ```
 SIGN IN      pick your name → 6-digit PIN → Sign in
 LOCK         Ctrl+L          (cart survives)
-SCREENS      F1 Sell  F2 Sales  F3 Inventory  F4 Dashboard
-             F5 Products  F6 Suppliers  F7 Restock  F8 Settings
+SCREENS      F1 Sell  F2 Day (Today · Trends)
+             F3 Shop (Catalog · Stock · Restock · Suppliers)
+             F4 Settings
 
 ONE SALE     F1 → scan / search / tap → Pay (Ctrl+Enter)
              → cash received or Exact chip → Complete sale
@@ -809,16 +816,16 @@ STOCK        Track stock → count → warn level → keep-in-stock level
              Adjustment = type what you COUNTED, not the difference
              Sale subtracts by itself. Negative is allowed.
 
-PURCHASES    F7 → New list → Add low stock → Save (Planned)
+PURCHASES    F3 → Restock → New list → Add low stock → Save (Planned)
              open it → type what arrived → cost if known → Received
              0 = not bought; an extra buy is added from the search
              Only receiving moves stock. Received trips are locked.
 
-SUPPLIERS    F6 → New supplier (name only is enough)
+SUPPLIERS    F3 → Suppliers → New supplier (name only is enough)
              Archive to retire; restore to bring back
 
-END OF DAY   F4 Today → compare Payments with the drawer
-             F2 Export CSV → Settings → Back up now → Ctrl+L
+END OF DAY   F2 Today → compare Payments with the drawer
+             Export → Settings → Back up now → Ctrl+L
 
 IF STUCK     Read the caption under the button.
              "A manager is needed" → ask for one-minute approval.
@@ -831,7 +838,7 @@ IF STUCK     Read the caption under the button.
 
 | What you see | Likely cause | What to do |
 |---|---|---|
-| "No products yet" on Sell | Empty catalogue | `F5` → **New product**, or import a CSV |
+| "No products yet" on Sell | Empty catalogue | `F3` → **Catalog** → **New product**, or import a CSV |
 | Scan does nothing | Phone scanner off, till locked, or a dialog open | Settings → Scanner → **Turn on**; close dialogs; unlock |
 | "No product matches" | Barcode not in the catalogue | Search by name; add the product with the barcode |
 | "Another product already uses that barcode" | Duplicate barcode | Search the barcode and edit the existing product |

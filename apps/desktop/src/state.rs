@@ -565,7 +565,14 @@ pub struct State {
 
     // Per-module view state. Kept here rather than in the module structs for the
     // reason in the module doc: switching away and back should not reset them.
-    pub search: String,
+    /// The till's scan or search field.
+    ///
+    /// Separate from [`Self::catalog_search`] on purpose: they filter two
+    /// different lists, and a cashier typing into the till must not silently
+    /// filter the Products list — or the export built from it.
+    pub sell_search: String,
+    /// The Products list's query.
+    pub catalog_search: String,
     /// Set when the selling screen opens, so the next frame can put the cursor in
     /// the scan field. A scanner types into whatever has focus; a till that needs
     /// one click before the first barcode is a till that "doesn't scan".
@@ -838,7 +845,8 @@ impl State {
             sidebar_open,
             sell_view: SellView::default(),
             prefs_dirty: false,
-            search: String::new(),
+            sell_search: String::new(),
+            catalog_search: String::new(),
             scan_focus: true,
             scan_submit: false,
             scanner_status: ScanStatus::Off,
@@ -1923,10 +1931,10 @@ impl State {
         match event.action {
             ScanAction::Sell => {
                 self.select(crate::modules::SELL);
-                self.search = event.barcode;
+                self.sell_search = event.barcode;
                 self.scan_focus = true;
-                // The grid consumes this the next time it draws, exactly as if
-                // the scanner had pressed Enter.
+                // The page bar consumes this the next time it draws, exactly as
+                // if the scanner had pressed Enter.
                 self.scan_submit = true;
                 self.notice = None;
             }
@@ -3890,7 +3898,7 @@ mod tests {
         });
 
         assert_eq!(state.module, crate::modules::SELL);
-        assert_eq!(state.search, "4006381333931");
+        assert_eq!(state.sell_search, "4006381333931");
         assert!(state.scan_focus);
         assert!(state.scan_submit);
 

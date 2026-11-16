@@ -123,9 +123,19 @@ const TILE_MIN: f32 = 140.0;
 const ROW_HEIGHT: f32 = 40.0;
 /// Height of a module's pinned action strip.
 ///
-/// It matches the main button height, so a compact action does not look like a
-/// different class of control just because it left the page body.
-const TOOLBAR_HEIGHT: f32 = 44.0;
+/// Taller than the 44 px actions inside it: the strip also holds the page's
+/// search field, and a bar the same height as its tallest control leaves the
+/// field touching the hairline above and below. One height on every page is
+/// what makes the bar a place rather than a coincidence.
+const TOOLBAR_HEIGHT: f32 = 52.0;
+/// Height of a search field inside the bar. The same 44 px as a full-width
+/// field, so scanning does not depend on which page the cashier is on.
+const SEARCH_HEIGHT: f32 = 44.0;
+/// A page's search field is a share of the bar, with a floor and a ceiling: a
+/// fixed width is too wide on an 880 px till and too narrow on a 4K one.
+const SEARCH_MIN: f32 = 200.0;
+const SEARCH_MAX: f32 = 320.0;
+const SEARCH_SHARE: f32 = 0.36;
 /// Height of the daily-revenue chart, axis labels and date strip included.
 const CHART_HEIGHT: f32 = 232.0;
 /// Steps in the chart's value axis.
@@ -166,19 +176,45 @@ pub trait Module {
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State);
 }
 
-/// Lay out one module's pinned action strip.
+/// What a page bar puts in its left cell.
 ///
-/// The strip is named by its tab, so `title` is `None` whenever the heading
-/// would only repeat the tab the user just clicked. Pass `Some` when the page
-/// is a sub-view with a name of its own — a purchase in progress, a settings
-/// section. A page with neither a title nor an action skips the strip entirely
-/// rather than reserving an empty row.
+/// A page shows one or the other, never both. The search is the page's question
+/// and the title is the page's name; a row carrying both makes the reader work
+/// out which one the actions belong to. The title is `None` on a page named by
+/// its tab, and a sub-view — a purchase in progress, a settings section — is
+/// the only place a title earns its space.
+enum PageLeft<'a> {
+    Title(&'a str),
+    Search {
+        text: &'a mut String,
+        hint: &'a str,
+        /// A count of the rows on screen, e.g. `"12 of 48"`. Only a page whose
+        /// filter can leave rows out has one worth reading, and only while the
+        /// filter is on: `"48 of 48"` is a number the reader already knows.
+        count: Option<String>,
+    },
+}
+
+/// Lay out one module's pinned bar: the page's left cell, then its actions.
 ///
-/// When a title is drawn it is the left cell, so the page keeps the same
-/// heading position whether or not it has pinned actions. The actions run right
-/// to left, like a dialog footer: the first action added is the rightmost one.
-/// The strip draws its own hairline and the gap before the page.
-fn action_bar(ui: &mut egui::Ui, title: Option<&str>, add: impl FnOnce(&mut egui::Ui)) {
+/// Every list page draws the same bar, in the same place, at the same height, so
+/// the search field is where the eye already is and the primary action is always
+/// the rightmost thing on the row. It is drawn before the scroll area: a long
+/// list must not take "New product" past the fold.
+///
+/// The actions run right to left, like a dialog footer, so the first action
+/// added is the rightmost one. The bar draws its own hairline and the gap before
+/// the page. A page with nothing to say — no title, no search, no action — does
+/// not call this at all: an empty strip is a row of dead pixels.
+///
+/// Returns the search field's response, because Sell needs it: the scan field is
+/// where a barcode scanner's Enter arrives, and a page that forgets to ask is a
+/// till that does not scan.
+fn action_bar(
+    ui: &mut egui::Ui,
+    left: PageLeft<'_>,
+    add: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::Response> {
     let palette = theme::current(ui.ctx());
     let full = ui.available_rect_before_wrap();
     let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_HEIGHT));
@@ -189,14 +225,44 @@ fn action_bar(ui: &mut egui::Ui, title: Option<&str>, add: impl FnOnce(&mut egui
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = SPACING.sm;
-    if let Some(title) = title {
-        bar.label(
-            egui::RichText::new(title)
-                .family(theme::semibold())
-                .size(TYPE.heading)
-                .color(egui::Color32::from(palette.text)),
-        );
+
+    let mut search = None;
+    match left {
+        PageLeft::Title(title) => {
+            bar.label(
+                egui::RichText::new(title)
+                    .family(theme::semibold())
+                    .size(TYPE.heading)
+                    .color(egui::Color32::from(palette.text)),
+            );
+        }
+        PageLeft::Search { text, hint, count } => {
+            let width = (full.width() * SEARCH_SHARE).clamp(SEARCH_MIN, SEARCH_MAX);
+            let response =
+                components::search_field_sized(&mut bar, text, hint, width, SEARCH_HEIGHT);
+            // `Ctrl+F` is the page's search key everywhere. It is handled here,
+            // once, so a new page cannot ship with a field no key reaches.
+            if bar.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F)) {
+                response.request_focus();
+            }
+            // `Escape` clears the field and keeps it. The text edit surrenders
+            // focus on Escape before this runs, so `lost_focus` is what proves
+            // the key was aimed at this field — checking the key alone would
+            // also clear the query when a dialog above the page is dismissed.
+            if response.lost_focus()
+                && bar.input(|input| input.key_pressed(egui::Key::Escape))
+                && !text.is_empty()
+            {
+                text.clear();
+                response.request_focus();
+            }
+            if let Some(count) = count {
+                components::caption(&mut bar, &count);
+            }
+            search = Some(response);
+        }
     }
+
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = SPACING.sm;
         add(ui);
@@ -209,6 +275,7 @@ fn action_bar(ui: &mut egui::Ui, title: Option<&str>, add: impl FnOnce(&mut egui
         egui::Stroke::new(1.0_f32, palette.border),
     );
     ui.add_space(SPACING.sm);
+    search
 }
 
 /// Every module, in stable index order. Must stay in sync with the index
@@ -354,6 +421,97 @@ impl Module for Sell {
         categories_sidebar(ui, state);
     }
 
+    /// The scan field lives on the page bar, like every other list's search.
+    ///
+    /// It also owns the scanner's Enter: the field that a barcode types into is
+    /// the field that has to submit it, and the grid below draws after this bar,
+    /// so it sees the cart and the cleared query in the same frame.
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The bar is part of the till's map, not of the payment: while the
+        // tender owns the keyboard it dims with the grid, so a scan cannot land
+        // in a basket that is already being paid for.
+        ui.scope(|ui| {
+            if state.is_tendering() {
+                ui.set_opacity(0.35);
+                ui.disable();
+            }
+            let response = action_bar(
+                ui,
+                PageLeft::Search {
+                    text: &mut state.sell_search,
+                    hint: "Name or barcode",
+                    count: None,
+                },
+                |ui| sell_view_toggle(ui, &mut state.sell_view),
+            )
+            .expect("Sell's bar has a search field");
+
+            // The cursor belongs here whenever the selling screen opens: nothing
+            // else on Sell takes text, and a scanner types into whatever has
+            // focus.
+            if std::mem::take(&mut state.scan_focus) {
+                response.request_focus();
+            }
+
+            // A barcode scanner is a keyboard that types and then presses Enter.
+            // The field already filtered the products, but a cashier with a
+            // scanner in their hand expects the item in the cart — asking them
+            // to click a tile they just scanned is the whole bug. `lost_focus`
+            // alone would also fire on a click elsewhere, so the Enter press is
+            // what confirms the scan. A phone scan has no keyboard to press
+            // Enter, so it sets `scan_submit`; that flag comes through here, on
+            // the same path.
+            //
+            // A scan that arrives mid-payment is consumed and dropped: the
+            // basket is frozen until the sale is written. Leaving the flag set
+            // would fire it at the next customer, which is a different bug.
+            let submitted = (response.lost_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                || std::mem::take(&mut state.scan_submit);
+            if !submitted || state.is_tendering() {
+                return;
+            }
+
+            let scanned = state.sell_search.trim().to_owned();
+            // Enter on an empty field is the till's fourth keystroke: scan,
+            // scan, Enter, cash. There is no barcode to look up, so it means
+            // "that is the basket" and the cart's footer becomes the tender.
+            if scanned.is_empty() {
+                if !state.cart.is_empty() {
+                    state.start_payment();
+                }
+                response.request_focus();
+                return;
+            }
+
+            let needle = scanned.to_lowercase();
+            let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+            match scan_target(&state.products, &scanned, &visible) {
+                Scan::One(index) => {
+                    // Cloned because the lookup holds `state.products` borrowed
+                    // and `add_to_cart` needs the whole state.
+                    let product = state.products[index].clone();
+                    state.add_to_cart(&product);
+                    // Clear the field so the next scan starts clean, and keep the
+                    // focus so it lands here without a mouse.
+                    state.sell_search.clear();
+                    response.request_focus();
+                }
+                // Say what happened in words the cashier can act on.
+                // `add_to_cart` clears `notice`, so these are set after it,
+                // never before.
+                Scan::Ambiguous(count) => {
+                    state.notice = Some(format!(
+                        "{count} products match {scanned} — scan a barcode or type more."
+                    ));
+                }
+                Scan::None => {
+                    state.notice = Some(format!("No product matches {scanned}."));
+                }
+            }
+        });
+    }
+
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         // Two columns, placed by rectangle rather than by accumulating widths.
         // The cart's right edge *is* the panel's right edge, so it cannot end up
@@ -406,41 +564,6 @@ impl Module for Sell {
 
 impl Sell {
     fn products(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::field_label(ui, "Scan or search");
-        ui.add_space(SPACING.xs);
-        // The view switch shares the search row: the cashier's eye is already
-        // here, and a full-width field above a lone pair of buttons would push
-        // the first product down for a control that is only a preference.
-        let response = ui
-            .horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    sell_view_toggle(ui, &mut state.sell_view);
-                    ui.add_space(SPACING.sm);
-                    components::search_field(ui, &mut state.search, "Name or barcode")
-                })
-                .inner
-            })
-            .inner;
-        // The cursor belongs here whenever the selling screen opens: nothing else
-        // on Sell takes text, and a scanner types into whatever has focus.
-        if std::mem::take(&mut state.scan_focus) {
-            response.request_focus();
-        }
-        // A barcode scanner is a keyboard that types and then presses Enter. The
-        // field already filtered the products, but a cashier with a scanner in
-        // their hand expects the item in the cart — asking them to click a tile
-        // they just scanned is the whole bug. `lost_focus` alone would also fire
-        // on a click elsewhere, so the Enter press is what confirms the scan. A
-        // phone scan has no keyboard to press Enter, so it sets `scan_submit`
-        // and the product panel consumes it here, through the same path.
-        // A scan that arrives mid-payment is consumed and dropped: the basket is
-        // frozen until the sale is written. Leaving the flag set would fire it
-        // at the next customer, which is a different bug.
-        let submitted = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-            || std::mem::take(&mut state.scan_submit);
-        let submitted = submitted && !state.is_tendering();
-        ui.add_space(SPACING.md);
-
         // A till with an empty catalog is not a bug in the product panel: it is a
         // shop that has not entered its products yet. Point at the screen that
         // fixes it instead of showing an empty view with no explanation.
@@ -463,48 +586,8 @@ impl Sell {
             return;
         }
 
-        let needle = state.search.trim().to_lowercase();
-        let mut visible = visible_products(&state.products, state.category.as_deref(), &needle);
-
-        if submitted {
-            let scanned = state.search.trim().to_owned();
-            // Enter on an empty field is the till's fourth keystroke: scan,
-            // scan, Enter, cash. There is no barcode to look up, so it means
-            // "that is the basket" and the cart's footer becomes the tender.
-            if scanned.is_empty() {
-                if !state.cart.is_empty() {
-                    state.start_payment();
-                }
-                response.request_focus();
-            } else {
-                match scan_target(&state.products, &scanned, &visible) {
-                    Scan::One(index) => {
-                        // Cloned because the product panel holds `state.products`
-                        // borrowed and `add_to_cart` needs the whole state.
-                        let product = state.products[index].clone();
-                        state.add_to_cart(&product);
-                        // Clear the field so the next scan starts clean, and keep the
-                        // focus so it lands here without a mouse.
-                        state.search.clear();
-                        response.request_focus();
-                        // The panel is drawn this frame from `visible`: recompute it,
-                        // otherwise a successful scan leaves the panel showing only
-                        // the product it just moved to the cart until the next repaint.
-                        visible = visible_products(&state.products, state.category.as_deref(), "");
-                    }
-                    // Say what happened in words the cashier can act on. `add_to_cart`
-                    // clears `notice`, so these are set after it, never before.
-                    Scan::Ambiguous(count) => {
-                        state.notice = Some(format!(
-                            "{count} products match {scanned} — scan a barcode or type more."
-                        ));
-                    }
-                    Scan::None => {
-                        state.notice = Some(format!("No product matches {scanned}."));
-                    }
-                }
-            }
-        }
+        let needle = state.sell_search.trim().to_lowercase();
+        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
         if visible.is_empty() {
             components::empty_state_card(
@@ -1925,15 +2008,12 @@ fn weekday_sentence(weekday: u8) -> &'static str {
     NAMES[(weekday as usize).min(NAMES.len() - 1)]
 }
 
-/// The import glyph, resolved by name because the shared vocabulary does not
-/// carry a file-transfer icon yet. The fallback costs a different picture, never
-/// a missing action.
-fn import_icon() -> Icon {
-    Icon::named("upload").unwrap_or(Icon::DOCUMENT)
-}
-
-fn export_icon() -> Icon {
-    Icon::named("download").unwrap_or(Icon::DOCUMENT)
+/// The glyph for the catalog's transfer menu: in and out are the same file
+/// moving, so one picture covers both. Resolved by name because the shared
+/// vocabulary does not carry a file-transfer icon yet; the fallback costs a
+/// different picture, never a missing action.
+fn transfer_icon() -> Icon {
+    Icon::named("arrow-up-down").unwrap_or(Icon::DOCUMENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,59 +2024,82 @@ struct Products;
 
 impl Module for Products {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // Categories are facets: they narrow the list without being the list's
+        // question. The question — "which product?" — is the bar's search field,
+        // in the same place as on every other list.
         categories_sidebar(ui, state);
-
-        ui.add_space(SPACING.lg);
-        components::field_label(ui, "Search");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.search, "Name or barcode");
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        let can_manage = state.permits(crate::auth::Permission::ChangePrice);
+        // A locked page has no bar: a search field over a card that says "ask a
+        // manager" is a control that cannot do anything.
+        if !state.permits(crate::auth::Permission::ChangePrice) {
+            return;
+        }
+
+        // The count only appears while a filter is on. With no filter every row
+        // is on screen, so "48 of 48" would be a number the reader already knows.
+        let filtered = !state.catalog_search.trim().is_empty() || state.category.is_some();
+        let count = filtered.then(|| {
+            let needle = state.catalog_search.trim().to_lowercase();
+            let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+            format!("{} of {}", visible.len(), state.products.len())
+        });
+
         let mut new = false;
         let mut import = false;
         let mut export_visible = false;
         let mut export_all = false;
-        action_bar(ui, None, |ui| {
-            if !can_manage {
-                return;
-            }
-            if actions::primary_compact(ui, "New product").clicked() {
-                new = true;
-            }
-            // Import and both exports are setup actions, not everyday ones.
-            // The flyout keeps them one click away without letting them compete
-            // with the catalog's primary action for the strip's width.
-            actions::toolbar_menu(ui, export_icon(), "Export", |ui| {
-                ui.set_min_width(190.0);
-                if ui
-                    .button("This view")
-                    .on_hover_text("Save the products on screen with the columns the import reads")
-                    .clicked()
-                {
-                    export_visible = true;
-                    ui.close();
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.catalog_search,
+                hint: "Name or barcode",
+                count,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New product").clicked() {
+                    new = true;
                 }
-                if ui
-                    .button("All products")
-                    .on_hover_text("Save every product with the columns the import reads")
-                    .clicked()
-                {
-                    export_all = true;
-                    ui.close();
-                }
-            });
-            if components::icon_button(ui, import_icon(), 32.0)
-                .on_hover_text(
-                    "Import CSV — read name, category, price and barcode. A barcode \
-                     that starts with 0 may need a text column in Excel.",
-                )
-                .clicked()
-            {
-                import = true;
-            }
-        });
+                // Import and both exports are setup actions, not everyday ones.
+                // One menu keeps them a click away without letting four
+                // file-shaped icons compete with the catalog's primary action
+                // for the bar's width.
+                actions::toolbar_menu(ui, transfer_icon(), "Import / Export", |ui| {
+                    ui.set_min_width(210.0);
+                    if ui
+                        .button("Import from CSV…")
+                        .on_hover_text(
+                            "Read name, category, price and barcode. A barcode that \
+                             starts with 0 may need a text column in Excel.",
+                        )
+                        .clicked()
+                    {
+                        import = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Export this view")
+                        .on_hover_text(
+                            "Save the products on screen with the columns the import reads",
+                        )
+                        .clicked()
+                    {
+                        export_visible = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button("Export all products")
+                        .on_hover_text("Save every product with the columns the import reads")
+                        .clicked()
+                    {
+                        export_all = true;
+                        ui.close();
+                    }
+                });
+            },
+        );
 
         if new {
             state.start_product();
@@ -2017,7 +2120,7 @@ impl Module for Products {
             return locked_card(ui, crate::auth::Permission::ChangePrice);
         }
 
-        let needle = state.search.trim().to_lowercase();
+        let needle = state.catalog_search.trim().to_lowercase();
         let visible = visible_products(&state.products, state.category.as_deref(), &needle);
 
         file_feedback(ui, state);
@@ -2107,7 +2210,7 @@ pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
     // got.
     match kind {
         ExportKind::Products => {
-            let needle = state.search.trim().to_lowercase();
+            let needle = state.catalog_search.trim().to_lowercase();
             let visible = visible_products(&state.products, state.category.as_deref(), &needle);
             let rows: Vec<Product> = visible
                 .iter()
@@ -3016,11 +3119,6 @@ struct Purchases;
 impl Module for Purchases {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Buying");
-        components::field_label(ui, "Search");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.purchase_search, "Supplier or note");
-
-        ui.add_space(SPACING.md);
         components::field_label(ui, "Show");
         ui.add_space(SPACING.xs);
         for (index, label) in ["All", "To buy", "Received"].into_iter().enumerate() {
@@ -3048,7 +3146,7 @@ impl Module for Purchases {
             let mut back = false;
             let mut save = false;
             let mut receive = false;
-            action_bar(ui, Some(&title), |ui| {
+            action_bar(ui, PageLeft::Title(&title), |ui| {
                 if editing && can_manage {
                     if actions::primary_compact(ui, "Received").clicked() {
                         receive = true;
@@ -3074,20 +3172,29 @@ impl Module for Purchases {
             return;
         }
 
+        if !can_manage {
+            return;
+        }
+
         let mut new = false;
         let mut low = false;
         let any_low = state.stock.iter().any(|item| item.needs_restock());
-        action_bar(ui, None, |ui| {
-            if !can_manage {
-                return;
-            }
-            if actions::primary_compact(ui, "New list").clicked() {
-                new = true;
-            }
-            if any_low && actions::secondary_compact(ui, "Add low stock").clicked() {
-                low = true;
-            }
-        });
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.purchase_search,
+                hint: "Supplier or note",
+                count: None,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New list").clicked() {
+                    new = true;
+                }
+                if any_low && actions::secondary_compact(ui, "Add low stock").clicked() {
+                    low = true;
+                }
+            },
+        );
         if new {
             state.start_purchase();
         }
@@ -3670,11 +3777,6 @@ struct Suppliers;
 impl Module for Suppliers {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Directory");
-        components::field_label(ui, "Search");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.supplier_search, "Name, contact or phone");
-
-        ui.add_space(SPACING.md);
         ui.checkbox(&mut state.show_archived_suppliers, "Show archived");
         components::caption(
             ui,
@@ -3683,16 +3785,25 @@ impl Module for Suppliers {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        let can_manage = state.permits(crate::auth::Permission::ManageSuppliers);
+        // The workspace is a locked card without the permission, so the page has
+        // no bar at all rather than a search field over a card that cannot use it.
+        if !state.permits(crate::auth::Permission::ManageSuppliers) {
+            return;
+        }
         let mut new = false;
-        action_bar(ui, None, |ui| {
-            if !can_manage {
-                return;
-            }
-            if actions::primary_compact(ui, "New supplier").clicked() {
-                new = true;
-            }
-        });
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.supplier_search,
+                hint: "Name, contact or phone",
+                count: None,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New supplier").clicked() {
+                    new = true;
+                }
+            },
+        );
         if new {
             state.start_supplier();
         }
@@ -3924,11 +4035,6 @@ struct Inventory;
 impl Module for Inventory {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Stock");
-        components::field_label(ui, "Search");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut state.stock_search, "Name or category");
-
-        ui.add_space(SPACING.md);
         components::field_label(ui, "Show");
         ui.add_space(SPACING.xs);
         for (index, label) in ["All", "Low", "Out"].into_iter().enumerate() {
@@ -3945,16 +4051,23 @@ impl Module for Inventory {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The bar is drawn for everyone: seeing stock is part of selling, so a
+        // cashier gets the search field. Only the action is gated.
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
         let mut track = false;
-        action_bar(ui, None, |ui| {
-            if !can_manage {
-                return;
-            }
-            if actions::primary_compact(ui, "Track stock").clicked() {
-                track = true;
-            }
-        });
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.stock_search,
+                hint: "Name or category",
+                count: None,
+            },
+            |ui| {
+                if can_manage && actions::primary_compact(ui, "Track stock").clicked() {
+                    track = true;
+                }
+            },
+        );
         if track {
             state.start_tracking();
         }
@@ -4720,8 +4833,10 @@ impl Module for Sales {
             "Your transactions"
         };
         let mut export = false;
-        action_bar(ui, Some(title), |ui| {
-            if components::icon_button(ui, export_icon(), 32.0)
+        action_bar(ui, PageLeft::Title(title), |ui| {
+            // Text, not an icon: "Export" is a page action, and a page action
+            // says what it does. The columns it writes belong in the tooltip.
+            if actions::secondary_compact(ui, "Export")
                 .on_hover_text(
                     "Export sales as sale_id, receipt, when, cashier, total, rounding, paid, method",
                 )
@@ -4817,7 +4932,7 @@ impl Module for Settings {
             .get(state.settings_section)
             .copied()
             .unwrap_or("Terminal");
-        action_bar(ui, Some(section), |_ui| {});
+        action_bar(ui, PageLeft::Title(section), |_ui| {});
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -6522,5 +6637,95 @@ mod tests {
             "the phone number is searchable"
         );
         assert!(visible_suppliers(&suppliers, "nothing", false).is_empty());
+    }
+
+    /// One window width is a layout, two are a contract. The bar shares one row
+    /// between the page's search field and its actions, so the two ways it can
+    /// break are a field that eats the buttons at the minimum window and a
+    /// cluster that runs under the field on a wide one. Both are cheap to catch
+    /// here and awkward to notice on a screen with the right number of products.
+    #[test]
+    fn the_page_bar_fits_its_search_and_its_actions_on_one_row() {
+        // 880×560 is the smallest window the app allows: the contents minus the
+        // 280 px sidebar and the 24 px workspace margins each side.
+        for (window, expected_field) in [(552.0_f32, SEARCH_MIN), (1112.0, SEARCH_MAX)] {
+            let ctx = egui::Context::default();
+            // The bar draws semibold text, and semibold is a font family the
+            // app installs at startup; a bare context would panic on the first
+            // word of a button.
+            let (palette, dark) = crate::theme::palette_for(ui_kit::theme::Theme::Light);
+            ui_kit::theme::install(&ctx, palette, dark);
+
+            let mut query = String::from("milk");
+            let mut field = egui::Rect::NOTHING;
+            let mut actions = egui::Rect::NOTHING;
+            let mut consumed = 0.0;
+
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(window, 560.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let before = ui.cursor().top();
+                    let response = action_bar(
+                        ui,
+                        PageLeft::Search {
+                            text: &mut query,
+                            hint: "Name or barcode",
+                            count: Some("3 of 12".to_owned()),
+                        },
+                        |ui| {
+                            let _ = actions::primary_compact(ui, "New product");
+                            actions::toolbar_menu(ui, transfer_icon(), "Import / Export", |_| {});
+                            actions = ui.min_rect();
+                        },
+                    );
+                    field = response.expect("the bar has a search field").rect;
+                    consumed = ui.cursor().top() - before;
+                },
+            );
+            output.drop_without_applying_deltas();
+
+            assert!(
+                (field.width() - expected_field).abs() < 0.5,
+                "a {window} px bar gave the search {:.1} px, not {expected_field}",
+                field.width()
+            );
+            assert!(
+                actions.left() >= field.right(),
+                "the actions start at {:.1} but the field ends at {:.1} in a {window} px bar",
+                actions.left(),
+                field.right()
+            );
+            assert!(
+                actions.right() <= window + 0.5,
+                "the actions run past the bar's right edge in a {window} px bar"
+            );
+            // The field sits on the bar's centre line, not on its top edge: a
+            // 52 px row with a 34 px control left-aligned looks like a mistake
+            // in both themes.
+            assert!(
+                (field.center().y - TOOLBAR_HEIGHT / 2.0).abs() < 1.0,
+                "the search sits at {:.1} px in a {TOOLBAR_HEIGHT} px bar",
+                field.center().y
+            );
+            assert!(
+                (field.height() - SEARCH_HEIGHT).abs() < 0.5,
+                "the search is {:.1} px tall, not {SEARCH_HEIGHT}",
+                field.height()
+            );
+            // The bar plus the gap before the page, and nothing beyond that: a
+            // bar that claims more pushes the first row of the table down. The
+            // gap is the bar's own 8 px on top of the row spacing every panel
+            // pays between two widgets.
+            assert!(
+                (TOOLBAR_HEIGHT..=TOOLBAR_HEIGHT + SPACING.sm + 8.0).contains(&consumed),
+                "the bar consumed {consumed} px of a 560 px window"
+            );
+        }
     }
 }
