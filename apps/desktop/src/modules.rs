@@ -168,11 +168,17 @@ pub trait Module {
 
 /// Lay out one module's pinned action strip.
 ///
-/// The title is the left cell, so the page keeps the same heading position
-/// whether or not it has pinned actions. The actions run right to left, like a
-/// dialog footer: the first action added is the rightmost one. The strip draws
-/// its own hairline and the gap before the page.
-fn action_bar(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+/// The strip is named by its tab, so `title` is `None` whenever the heading
+/// would only repeat the tab the user just clicked. Pass `Some` when the page
+/// is a sub-view with a name of its own — a purchase in progress, a settings
+/// section. A page with neither a title nor an action skips the strip entirely
+/// rather than reserving an empty row.
+///
+/// When a title is drawn it is the left cell, so the page keeps the same
+/// heading position whether or not it has pinned actions. The actions run right
+/// to left, like a dialog footer: the first action added is the rightmost one.
+/// The strip draws its own hairline and the gap before the page.
+fn action_bar(ui: &mut egui::Ui, title: Option<&str>, add: impl FnOnce(&mut egui::Ui)) {
     let palette = theme::current(ui.ctx());
     let full = ui.available_rect_before_wrap();
     let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_HEIGHT));
@@ -183,12 +189,14 @@ fn action_bar(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = SPACING.sm;
-    bar.label(
-        egui::RichText::new(title)
-            .family(theme::semibold())
-            .size(TYPE.heading)
-            .color(egui::Color32::from(palette.text)),
-    );
+    if let Some(title) = title {
+        bar.label(
+            egui::RichText::new(title)
+                .family(theme::semibold())
+                .size(TYPE.heading)
+                .color(egui::Color32::from(palette.text)),
+        );
+    }
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = SPACING.sm;
         add(ui);
@@ -1006,13 +1014,6 @@ impl Module for Dashboard {
                 state.trend_range = index;
             }
         }
-    }
-
-    fn toolbar(&mut self, ui: &mut egui::Ui, _state: &mut State) {
-        // No actions: every figure on the page is already in the range the
-        // sidebar chose, and a trends page has nothing to add or export. The bar
-        // stays because the page title has to sit where every other page's does.
-        action_bar(ui, "Trends", |_ui| {});
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -1957,7 +1958,7 @@ impl Module for Products {
         let mut import = false;
         let mut export_visible = false;
         let mut export_all = false;
-        action_bar(ui, "Catalog", |ui| {
+        action_bar(ui, None, |ui| {
             if !can_manage {
                 return;
             }
@@ -2310,12 +2311,12 @@ fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
 
 /// The edit glyph for a catalogue row.
 ///
-/// A pencil is the edit affordance the rest of the desktop uses. It is in the
-/// Lucide set but not yet in `ui-kit`'s vocabulary, so it is resolved by name —
-/// the same lookup a settings file uses. The fallback means a renamed glyph
-/// costs a different icon, never a missing button.
+/// `settings-2` is the edit affordance the desktop uses. It is in the Lucide
+/// set but not yet in `ui-kit`'s vocabulary, so it is resolved by name — the
+/// same lookup a settings file uses. The fallback means a renamed glyph costs a
+/// different icon, never a missing button.
 fn edit_icon() -> Icon {
-    Icon::named("pencil").unwrap_or(Icon::SETTINGS)
+    Icon::named("settings-2").unwrap_or(Icon::SETTINGS)
 }
 
 enum ProductAction {
@@ -3047,7 +3048,7 @@ impl Module for Purchases {
             let mut back = false;
             let mut save = false;
             let mut receive = false;
-            action_bar(ui, &title, |ui| {
+            action_bar(ui, Some(&title), |ui| {
                 if editing && can_manage {
                     if actions::primary_compact(ui, "Received").clicked() {
                         receive = true;
@@ -3076,7 +3077,7 @@ impl Module for Purchases {
         let mut new = false;
         let mut low = false;
         let any_low = state.stock.iter().any(|item| item.needs_restock());
-        action_bar(ui, "Restock", |ui| {
+        action_bar(ui, None, |ui| {
             if !can_manage {
                 return;
             }
@@ -3684,7 +3685,7 @@ impl Module for Suppliers {
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let can_manage = state.permits(crate::auth::Permission::ManageSuppliers);
         let mut new = false;
-        action_bar(ui, "Suppliers", |ui| {
+        action_bar(ui, None, |ui| {
             if !can_manage {
                 return;
             }
@@ -3946,7 +3947,7 @@ impl Module for Inventory {
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         let can_manage = state.permits(crate::auth::Permission::ManageInventory);
         let mut track = false;
-        action_bar(ui, "Stock", |ui| {
+        action_bar(ui, None, |ui| {
             if !can_manage {
                 return;
             }
@@ -4108,13 +4109,10 @@ fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Opti
         (palette.success, "In stock")
     };
 
-    // Pin the scope to one control row: a badge frame in a right-to-left
-    // layout otherwise inherits the row's full height.
+    // The badge pins its own height, so the scope here only exists to give the
+    // pill a response to hang the tooltip on.
     let badge = ui
-        .scope(|ui| {
-            ui.set_height(ui.spacing().interact_size.y);
-            components::badge(ui, &item.on_hand.to_string(), color)
-        })
+        .scope(|ui| components::badge(ui, &item.on_hand.to_string(), color))
         .response;
     badge.on_hover_text(hint);
     if can_manage
@@ -4722,7 +4720,7 @@ impl Module for Sales {
             "Your transactions"
         };
         let mut export = false;
-        action_bar(ui, title, |ui| {
+        action_bar(ui, Some(title), |ui| {
             if components::icon_button(ui, export_icon(), 32.0)
                 .on_hover_text(
                     "Export sales as sale_id, receipt, when, cashier, total, rounding, paid, method",
@@ -4819,7 +4817,7 @@ impl Module for Settings {
             .get(state.settings_section)
             .copied()
             .unwrap_or("Terminal");
-        action_bar(ui, section, |_ui| {});
+        action_bar(ui, Some(section), |_ui| {});
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {

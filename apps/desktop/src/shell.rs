@@ -744,6 +744,10 @@ pub fn underline_tabs(
     const TAB_PADDING_X: f32 = 16.0;
     const ICON_SIZE: f32 = 16.0;
     const ICON_GAP: f32 = 6.0;
+    // A step up from `TYPE.body` (15.0): tabs are navigation, not body copy,
+    // and the extra point keeps them from reading as just another line of text
+    // now that the page no longer repeats them as a heading.
+    const TAB_FONT: f32 = 16.0;
 
     let palette = ui_kit::theme::current(ui.ctx());
     let full = ui.available_rect_before_wrap();
@@ -773,9 +777,9 @@ pub fn underline_tabs(
         let icon = modules::tab_icon(index);
 
         let font_id = if is_selected {
-            egui::FontId::new(TYPE.body, ui_kit::theme::semibold())
+            egui::FontId::new(TAB_FONT, ui_kit::theme::semibold())
         } else {
-            egui::FontId::proportional(TYPE.body)
+            egui::FontId::proportional(TAB_FONT)
         };
 
         // Measure galley to determine exact content width + icon + generous padding
