@@ -822,7 +822,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Quick-remove item button (trash)
                             let (trash_rect, trash_resp) = ui
-                                .allocate_exact_size(egui::vec2(28.0, 30.0), egui::Sense::click());
+                                .allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
                             let trash_resp = trash_resp
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Remove item");
@@ -841,7 +841,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                                     egui::Color32::from(palette.text_muted)
                                 };
                                 Icon::TRASH
-                                    .image(15.0, trash_color)
+                                    .image(12.0, trash_color)
                                     .paint_at(ui, trash_rect);
                             }
                             if trash_resp.clicked() {
