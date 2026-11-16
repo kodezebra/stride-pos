@@ -724,16 +724,17 @@ fn currency_group(
 /// The tabs of the current view, as one flat row.
 ///
 /// A tab is a page of the same job, so it sits where a page title would: a
-/// single row of words, the active one underlined. Nothing is hidden behind a
-/// tab and nothing behind it hides another one — that is the whole point of
-/// collapsing eight rail rows into three views.
+/// single row of words, the active one tinted and underlined. Nothing is hidden
+/// behind a tab and nothing behind it hides another one — that is the whole
+/// point of collapsing eight rail rows into three views.
 ///
 /// Returns the tab that was clicked, if any. The caller opens it before drawing
 /// the page, so the switch lands in the same frame: the only thing left over
 /// from the old page is the sidebar, which the next repaint corrects.
-/// Renders a modern, clean underline tab bar across the full width of the pane.
 ///
-/// Returns the tab index that was clicked, if any.
+/// The selected cell is `accent_soft`: the same "selected" idiom the rail and
+/// the sidebars use. The page no longer repeats the tab name as a heading, so
+/// the active tab has to carry that identity on its own.
 pub fn underline_tabs(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -752,6 +753,15 @@ pub fn underline_tabs(
     let palette = ui_kit::theme::current(ui.ctx());
     let full = ui.available_rect_before_wrap();
     let bar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), HEIGHT));
+
+    // Top corners only: a square bottom edge is what makes the cell read as a
+    // tab sitting on the rule rather than a chip floating above it.
+    let cell_radius = egui::CornerRadius {
+        nw: RADII.sm as u8,
+        ne: RADII.sm as u8,
+        sw: 0,
+        se: 0,
+    };
 
     // Full-width baseline divider along the bottom edge of the tab bar.
     let baseline_y = bar_rect.bottom();
@@ -808,15 +818,17 @@ pub fn underline_tabs(
         if row_ui.is_rect_visible(tab_rect) {
             let painter = row_ui.painter();
 
-            // Hover state: subtle rounded background highlight & stronger text contrast
+            // Hover is the neutral surface, not the accent wash: the theme uses
+            // `accent_soft` for both hover and selection, so an accent hover
+            // would be indistinguishable from the selected tab.
             let (bg_fill, draw_color) = if is_selected {
                 (
-                    egui::Color32::TRANSPARENT,
+                    egui::Color32::from(palette.accent_soft),
                     egui::Color32::from(palette.accent_ink()),
                 )
             } else if response.hovered() {
                 (
-                    row_ui.visuals().widgets.hovered.weak_bg_fill,
+                    row_ui.visuals().widgets.hovered.bg_fill,
                     egui::Color32::from(palette.text),
                 )
             } else {
@@ -826,15 +838,27 @@ pub fn underline_tabs(
                 )
             };
 
+            // Stop one pixel short of the baseline so the rule still runs under
+            // the cell; the accent indicator covers that gap when selected.
+            let cell = egui::Rect::from_min_max(
+                tab_rect.min,
+                egui::pos2(tab_rect.right(), baseline_y - 1.0),
+            );
+
             if bg_fill != egui::Color32::TRANSPARENT {
-                let hover_rect = egui::Rect::from_min_max(
-                    egui::pos2(tab_rect.left(), tab_rect.top() + 4.0),
-                    egui::pos2(tab_rect.right(), tab_rect.bottom() - 4.0),
-                );
-                painter.rect_filled(
-                    hover_rect,
-                    egui::CornerRadius::same(RADII.sm as u8),
-                    bg_fill,
+                painter.rect_filled(cell, cell_radius, bg_fill);
+            }
+
+            // The tab has no frame, so this ring is the only thing that shows
+            // focus: without it the Tab key would move through the strip
+            // invisibly. Accent ink clears 4.5:1 on both the canvas and the
+            // selected cell's wash, which is well past the 3:1 floor.
+            if response.has_focus() {
+                painter.rect_stroke(
+                    cell,
+                    cell_radius,
+                    egui::Stroke::new(2.0, egui::Color32::from(palette.accent_ink())),
+                    egui::StrokeKind::Inside,
                 );
             }
 
