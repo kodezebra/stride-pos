@@ -731,63 +731,126 @@ fn currency_group(
 /// Returns the tab that was clicked, if any. The caller opens it before drawing
 /// the page, so the switch lands in the same frame: the only thing left over
 /// from the old page is the sidebar, which the next repaint corrects.
-fn tab_strip(ui: &mut egui::Ui, tabs: &[usize], active: usize) -> Option<usize> {
-    const HEIGHT: f32 = 36.0;
+/// Renders a modern, clean underline tab bar across the full width of the pane.
+///
+/// Returns the tab index that was clicked, if any.
+pub fn underline_tabs(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    tabs: &[usize],
+    selected: usize,
+) -> Option<usize> {
+    const HEIGHT: f32 = 40.0;
+    const TAB_PADDING_X: f32 = 16.0;
+    const ICON_SIZE: f32 = 16.0;
+    const ICON_GAP: f32 = 6.0;
 
     let palette = ui_kit::theme::current(ui.ctx());
     let full = ui.available_rect_before_wrap();
-    let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), HEIGHT));
+    let bar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), HEIGHT));
 
-    let mut row = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    // Full-width baseline divider along the bottom edge of the tab bar.
+    let baseline_y = bar_rect.bottom();
+    ui.painter().hline(
+        bar_rect.x_range(),
+        baseline_y,
+        egui::Stroke::new(1.0, palette.border),
     );
-    row.spacing_mut().item_spacing.x = SPACING.xs;
 
     let mut clicked = None;
+    let mut selected_rect = None;
+
+    let mut row_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(bar_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row_ui.spacing_mut().item_spacing.x = SPACING.xs;
+
     for &index in tabs {
-        let selected = index == active;
-        let ink = if selected {
+        let is_selected = index == selected;
+        let label = modules::tab_label(index);
+        let icon = modules::tab_icon(index);
+
+        let font_id = if is_selected {
+            egui::FontId::new(TYPE.body, ui_kit::theme::semibold())
+        } else {
+            egui::FontId::proportional(TYPE.body)
+        };
+
+        // Measure galley to determine exact content width + icon + generous padding
+        let text_color = if is_selected {
             egui::Color32::from(palette.accent_ink())
         } else {
             egui::Color32::from(palette.text_muted)
         };
 
-        let mut text = egui::RichText::new(modules::tab_label(index))
-            .size(TYPE.body)
-            .color(ink);
-        if selected {
-            text = text.family(ui_kit::theme::semibold());
+        let temp_galley =
+            row_ui
+                .painter()
+                .layout_no_wrap(label.to_owned(), font_id.clone(), text_color);
+
+        let content_width = ICON_SIZE + ICON_GAP + temp_galley.size().x;
+        let tab_width = content_width + TAB_PADDING_X * 2.0;
+        let (tab_rect, response) =
+            row_ui.allocate_exact_size(egui::vec2(tab_width, HEIGHT), egui::Sense::click());
+
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        if is_selected {
+            selected_rect = Some(tab_rect);
         }
 
-        let response = row
-            .add(
-                egui::Button::new(text)
-                    .frame(false)
-                    .min_size(egui::vec2(0.0, HEIGHT)),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if row_ui.is_rect_visible(tab_rect) {
+            let painter = row_ui.painter();
 
-        if response.hovered() && !selected {
-            row.painter().rect_filled(
-                response.rect.shrink2(egui::vec2(0.0, 4.0)),
-                egui::CornerRadius::same(RADII.sm as u8),
-                ui.visuals().widgets.hovered.bg_fill,
-            );
-        }
+            // Hover state: subtle rounded background highlight & stronger text contrast
+            let (bg_fill, draw_color) = if is_selected {
+                (
+                    egui::Color32::TRANSPARENT,
+                    egui::Color32::from(palette.accent_ink()),
+                )
+            } else if response.hovered() {
+                (
+                    row_ui.visuals().widgets.hovered.weak_bg_fill,
+                    egui::Color32::from(palette.text),
+                )
+            } else {
+                (
+                    egui::Color32::TRANSPARENT,
+                    egui::Color32::from(palette.text_muted),
+                )
+            };
 
-        if selected {
-            // Flush indicator along the bottom of the tab strip.
-            let underline = egui::Rect::from_min_size(
-                egui::pos2(response.rect.left() + 2.0, response.rect.bottom() - 2.0),
-                egui::vec2((response.rect.width() - 4.0).max(0.0), 2.0),
+            if bg_fill != egui::Color32::TRANSPARENT {
+                let hover_rect = egui::Rect::from_min_max(
+                    egui::pos2(tab_rect.left(), tab_rect.top() + 4.0),
+                    egui::pos2(tab_rect.right(), tab_rect.bottom() - 4.0),
+                );
+                painter.rect_filled(
+                    hover_rect,
+                    egui::CornerRadius::same(RADII.sm as u8),
+                    bg_fill,
+                );
+            }
+
+            let galley = painter.layout_no_wrap(label.to_owned(), font_id, draw_color);
+            let start_x = tab_rect.center().x - content_width * 0.5;
+
+            // Draw icon
+            let icon_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x, tab_rect.center().y - ICON_SIZE * 0.5),
+                egui::vec2(ICON_SIZE, ICON_SIZE),
             );
-            row.painter().rect_filled(
-                underline,
-                egui::CornerRadius::same(1),
-                egui::Color32::from(palette.accent_ink()),
+            icon.image(ICON_SIZE, draw_color)
+                .paint_at(&row_ui, icon_rect);
+
+            // Draw label
+            let text_pos = egui::pos2(
+                start_x + ICON_SIZE + ICON_GAP,
+                tab_rect.center().y - galley.size().y * 0.5,
             );
+            painter.galley(text_pos, galley, draw_color);
         }
 
         if response.clicked() {
@@ -795,6 +858,33 @@ fn tab_strip(ui: &mut egui::Ui, tabs: &[usize], active: usize) -> Option<usize> 
         }
     }
 
-    ui.advance_cursor_after_rect(rect);
+    // Active indicator bar: 2.5px solid accent bar drawn flush over baseline
+    if let Some(target) = selected_rect {
+        let anim_min_x =
+            ui.ctx()
+                .animate_value_with_time(id.with("tab_min_x"), target.left(), 0.12);
+        let anim_max_x =
+            ui.ctx()
+                .animate_value_with_time(id.with("tab_max_x"), target.right(), 0.12);
+
+        let indicator = egui::Rect::from_min_max(
+            egui::pos2(anim_min_x, baseline_y - 2.0),
+            egui::pos2(anim_max_x, baseline_y + 0.5),
+        );
+        ui.painter().rect_filled(
+            indicator,
+            egui::CornerRadius::same(1),
+            egui::Color32::from(palette.accent_ink()),
+        );
+    }
+
+    ui.advance_cursor_after_rect(bar_rect);
     clicked
+}
+
+/// The tabs of the current view, as one flat row.
+///
+/// Returns the tab that was clicked, if any.
+fn tab_strip(ui: &mut egui::Ui, tabs: &[usize], active: usize) -> Option<usize> {
+    underline_tabs(ui, egui::Id::new("view_tabs"), tabs, active)
 }

@@ -101,11 +101,11 @@ mod tests {
         );
 
         let manager = all(Role::Manager);
-        let setup = manager
+        let settings = manager
             .iter()
-            .find(|command| command.label == "Go to Setup")
-            .expect("a manager can open Setup");
-        assert_eq!(setup.hint, "", "Setup is a tab, not a key");
+            .find(|command| command.label == "Go to Settings")
+            .expect("a manager can open Settings");
+        assert_eq!(settings.hint, "F4", "F4 opens Settings");
         let catalog = manager
             .iter()
             .find(|command| command.label == "Go to Catalog")
