@@ -694,6 +694,15 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     ui.horizontal(|ui| {
         ui.label(components::semibold("Cart").size(TYPE.heading));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !state.cart.is_empty() && state.payment.is_none() {
+                if actions::quiet_compact(ui, "Clear")
+                    .on_hover_text("Clear entire cart")
+                    .clicked()
+                {
+                    state.clear_cart();
+                }
+                ui.add_space(SPACING.xs);
+            }
             components::caption(ui, &format!("{} item(s)", state.cart_count()));
         });
     });
@@ -802,11 +811,45 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                     // tapping `+` ten times.
                     ui.horizontal(|ui| {
                         ui.label(
-                            components::numeric(format!("× {}", state.money(line.unit_minor)))
-                                .size(TYPE.small)
-                                .color(palette.text_muted),
+                            components::numeric(format!(
+                                "{} × {}",
+                                line.qty,
+                                state.money(line.unit_minor)
+                            ))
+                            .size(TYPE.small)
+                            .color(palette.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Quick-remove item button (trash)
+                            let (trash_rect, trash_resp) = ui
+                                .allocate_exact_size(egui::vec2(28.0, 30.0), egui::Sense::click());
+                            let trash_resp = trash_resp
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("Remove item");
+                            if ui.is_rect_visible(trash_rect) {
+                                let hovered = trash_resp.hovered();
+                                if hovered {
+                                    ui.painter().rect_filled(
+                                        trash_rect,
+                                        egui::CornerRadius::same(RADII.sm as u8),
+                                        ui.visuals().widgets.hovered.weak_bg_fill,
+                                    );
+                                }
+                                let trash_color = if hovered {
+                                    egui::Color32::from(palette.danger)
+                                } else {
+                                    egui::Color32::from(palette.text_muted)
+                                };
+                                Icon::TRASH
+                                    .image(15.0, trash_color)
+                                    .paint_at(ui, trash_rect);
+                            }
+                            if trash_resp.clicked() {
+                                remove = Some(index);
+                            }
+
+                            ui.add_space(SPACING.xs);
+
                             // The stepper is minus, count, plus everywhere else it
                             // appears. `horizontal` inherits the parent's
                             // direction, so inside this right-to-left row it
