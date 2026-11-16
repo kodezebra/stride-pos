@@ -61,6 +61,7 @@ pub enum View {
     Sell,
     Day,
     Shop,
+    Settings,
 }
 
 impl View {
@@ -69,6 +70,7 @@ impl View {
             Self::Sell => "Sell",
             Self::Day => "Day",
             Self::Shop => "Shop",
+            Self::Settings => "Settings",
         }
     }
 
@@ -77,16 +79,18 @@ impl View {
             Self::Sell => Icon::CART,
             Self::Day => Icon::DASHBOARD,
             Self::Shop => Icon::BOXES,
+            Self::Settings => Icon::SETTINGS,
         }
     }
 
-    /// The key that jumps here. Three keys, no modifiers: the whole rail fits
+    /// The key that jumps here. Four keys, no modifiers: the whole rail fits
     /// under the left hand.
     pub fn hotkey(self) -> egui::Key {
         match self {
             Self::Sell => egui::Key::F1,
             Self::Day => egui::Key::F2,
             Self::Shop => egui::Key::F3,
+            Self::Settings => egui::Key::F4,
         }
     }
 }
@@ -95,8 +99,8 @@ impl View {
 const DAY_TABS: [usize; 2] = [SALES, DASHBOARD];
 
 /// Shop's tabs: what is for sale, what is on the shelf, what is coming in, who
-/// brings it, and how the till itself is set up.
-const SHOP_TABS: [usize; 5] = [PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS, SETTINGS];
+/// brings it.
+const SHOP_TABS: [usize; 4] = [PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS];
 
 /// Width of the cart column inside the Sell workspace.
 ///
@@ -230,7 +234,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
 /// cashier to stop using the bar.
 pub fn views(role: crate::auth::Role) -> &'static [View] {
     const CASHIER: [View; 2] = [View::Sell, View::Day];
-    const MANAGER: [View; 3] = [View::Sell, View::Day, View::Shop];
+    const MANAGER: [View; 4] = [View::Sell, View::Day, View::Shop, View::Settings];
 
     if role >= crate::auth::Role::Manager {
         &MANAGER
@@ -247,7 +251,7 @@ pub fn tabs(view: View, role: crate::auth::Role) -> &'static [usize] {
     const CASHIER_DAY: [usize; 1] = [SALES];
 
     match view {
-        View::Sell => &[],
+        View::Sell | View::Settings => &[],
         View::Day if role >= crate::auth::Role::Manager => &DAY_TABS,
         View::Day => &CASHIER_DAY,
         View::Shop if role >= crate::auth::Role::Manager => &SHOP_TABS,
@@ -262,6 +266,7 @@ pub fn landing(view: View) -> usize {
         View::Sell => SELL,
         View::Day => SALES,
         View::Shop => PRODUCTS,
+        View::Settings => SETTINGS,
     }
 }
 
@@ -270,6 +275,7 @@ pub fn view_of(module: usize) -> View {
     match module {
         SELL => View::Sell,
         SALES | DASHBOARD => View::Day,
+        SETTINGS => View::Settings,
         _ => View::Shop,
     }
 }
@@ -299,6 +305,20 @@ pub fn tab_label(module: usize) -> &'static str {
         PURCHASES => "Restock",
         SUPPLIERS => "Suppliers",
         _ => "Setup",
+    }
+}
+
+/// What icon a tab uses on the strip.
+pub fn tab_icon(module: usize) -> Icon {
+    match module {
+        SELL => Icon::CART,
+        SALES => Icon::RECEIPT,
+        DASHBOARD => Icon::DASHBOARD,
+        PRODUCTS => Icon::PACKAGE,
+        INVENTORY => Icon::BOXES,
+        PURCHASES => Icon::TRUCK,
+        SUPPLIERS => Icon::USER,
+        _ => Icon::SETTINGS,
     }
 }
 
@@ -6135,11 +6155,14 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_is_three_views_with_the_keys_in_order() {
+    fn the_rail_is_four_views_with_the_keys_in_order() {
         let manager = views(crate::auth::Role::Manager);
-        assert_eq!(manager, &[View::Sell, View::Day, View::Shop][..]);
+        assert_eq!(
+            manager,
+            &[View::Sell, View::Day, View::Shop, View::Settings][..]
+        );
 
-        // Three keys, in rail order, with no gaps: F1, F2, F3.
+        // Four keys, in rail order, with no gaps: F1, F2, F3, F4.
         for (offset, view) in manager.iter().enumerate() {
             assert_eq!(
                 view.hotkey() as u8,
@@ -6153,7 +6176,7 @@ mod tests {
         let cashier = views(crate::auth::Role::Cashier);
         assert_eq!(cashier, &[View::Sell, View::Day][..]);
         assert!(
-            !cashier.contains(&View::Shop),
+            !cashier.contains(&View::Shop) && !cashier.contains(&View::Settings),
             "a cashier rail must not offer the back office"
         );
     }
@@ -6202,7 +6225,7 @@ mod tests {
         );
         assert_eq!(
             tabs(View::Shop, crate::auth::Role::Manager),
-            &[PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS, SETTINGS][..]
+            &[PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS][..]
         );
 
         // A cashier reads the day's own sales; the trends that read the shop's
