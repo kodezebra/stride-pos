@@ -92,8 +92,9 @@ try up to fifteen minutes. The till locks itself after five idle minutes
 
 | Key | Does |
 |---|---|
-| `F1` … `F8` | switch between the eight sections |
+| `F1` … `F4` | switch between the four sections |
 | `Ctrl+Enter` | take payment for the cart |
+| `Ctrl+F` | focus the page's search field |
 | `Ctrl+L` | lock the till |
 | `Ctrl+P` | command palette — jump anywhere by name |
 | `Ctrl+B` | show or hide the sidebar |

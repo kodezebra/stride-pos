@@ -47,6 +47,43 @@ crates/         reserved for product-internal crates
 ML Kit for on-device barcode decoding. It has its own Gradle build and no Rust
 dependency.
 
+## The page bar
+
+Every page that has something to say draws the same bar above its content: 52 px
+tall, a hairline under it, and a short gap before the page. `action_bar` in
+`modules.rs` is the only way to draw one; a page with no title, no search and no
+action draws nothing at all rather than reserving an empty row.
+
+The left cell holds **either** the page's search field **or** a title, never
+both. The search is the page's question ("which product?"); the title only earns
+the space on a sub-view — a purchase in progress, a settings section — where it
+names something the tab strip cannot. Actions sit right to left, so the primary
+is always the rightmost control on the row.
+
+Search is content, so it lives on the bar, never in the sidebar; the sidebar is
+navigation and facets (categories, ranges, Show: All/Low/Out). Every list has
+one query, and every list clears it the same way:
+
+- `Ctrl+F` focuses the field.
+- `Esc` empties it and keeps focus; the `×` inside the field does the same with
+  the mouse.
+- Filtering is live — there is no Search button — and the state's `*_search`
+  fields are per page, so the till's query never silently filters the catalog.
+- The `"12 of 48"` count appears beside the field only while a filter is on.
+
+Words are the label. A button's picture says what kind of action it is, never
+which particular one:
+
+| Presentation | Use for |
+|---|---|
+| Text | Page actions: `Export`, `New product`, `Save`, `New supplier` |
+| Icon + text | Menus and verbs with more than one meaning: `Import / Export ▾` |
+| Icon only | Repeated row actions, composites, and the `×` in a field |
+
+One primary per view, rightmost. Everything else is secondary or quiet. A glyph
+alone is a riddle until it is hovered, so an icon button must carry a tooltip
+that names the action.
+
 ## Data
 
 | Path | Contents |
