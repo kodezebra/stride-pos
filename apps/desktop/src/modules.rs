@@ -10,9 +10,9 @@
 //! to. Everything else — rail entry, tab strip, palette entry, persistence index
 //! — follows from those edits.
 //!
-//! There are three keys, not eight: F1, F2 and F3 open the three views, and the
-//! tabs inside a view are clicked. A key per page does not survive contact with
-//! a fourth page, and a till has no room for a function-key crib sheet.
+//! There are four keys, not seven: F1–F4 open the four views, and the tabs
+//! inside a view are clicked. A key per page does not survive contact with a
+//! fifth page, and a till has no room for a function-key crib sheet.
 
 use std::path::Path;
 
@@ -39,23 +39,22 @@ pub const PRODUCTS: usize = 2;
 pub const SALES: usize = 3;
 pub const SETTINGS: usize = 4;
 pub const SUPPLIERS: usize = 5;
-pub const INVENTORY: usize = 6;
-pub const PURCHASES: usize = 7;
+pub const PURCHASES: usize = 6;
 
 /// Number of modules. Used to clamp a persisted index from an older or newer
 /// build before it is used as an array index.
-pub const COUNT: usize = 8;
+pub const COUNT: usize = 7;
 
 // ---------------------------------------------------------------------------
 // Views and tabs
 // ---------------------------------------------------------------------------
 
-/// The three places a till has.
+/// The four places a till has.
 ///
 /// A view is a whole way of working, not a page: Sell is the counter, Day is
-/// what the shop did, Shop is what the shop is. A tab is one page of that job,
-/// so it is flat — nothing hides behind a tab, and nothing behind a tab hides
-/// behind another one.
+/// what the shop did, Shop is what the shop is, and Settings is how the till
+/// behaves. A tab is one page of that job, so it is flat — nothing hides behind
+/// a tab, and nothing behind a tab hides behind another one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Sell,
@@ -98,9 +97,9 @@ impl View {
 /// Day's tabs: the sales that happened, and what they add up to.
 const DAY_TABS: [usize; 2] = [SALES, DASHBOARD];
 
-/// Shop's tabs: what is for sale, what is on the shelf, what is coming in, who
-/// brings it.
-const SHOP_TABS: [usize; 4] = [PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS];
+/// Shop's tabs: what is for sale, what is coming in, who brings it. Stock is
+/// not a page of its own: it is a column and a filter on the catalog.
+const SHOP_TABS: [usize; 3] = [PRODUCTS, PURCHASES, SUPPLIERS];
 
 /// Width of the cart column inside the Sell workspace.
 ///
@@ -291,7 +290,6 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(Sales),
         Box::new(Settings),
         Box::new(Suppliers),
-        Box::new(Inventory),
         Box::new(Purchases),
     ]
 }
@@ -376,7 +374,6 @@ pub fn tab_label(module: usize) -> &'static str {
         SALES => "Today",
         DASHBOARD => "Trends",
         PRODUCTS => "Catalog",
-        INVENTORY => "Stock",
         PURCHASES => "Restock",
         SUPPLIERS => "Suppliers",
         _ => "Setup",
@@ -390,7 +387,6 @@ pub fn tab_icon(module: usize) -> Icon {
         SALES => Icon::RECEIPT,
         DASHBOARD => Icon::DASHBOARD,
         PRODUCTS => Icon::PACKAGE,
-        INVENTORY => Icon::BOXES,
         PURCHASES => Icon::TRUCK,
         SUPPLIERS => Icon::USER,
         _ => Icon::SETTINGS,
@@ -2134,6 +2130,21 @@ impl Module for Products {
         // question. The question — "which product?" — is the bar's search field,
         // in the same place as on every other list.
         categories_sidebar(ui, state);
+
+        // Stock is a second facet, not a second screen. The old Stock tab asked
+        // the same question over the same rows; folding it here means one list,
+        // one search and one place to answer "what is low?".
+        ui.add_space(SPACING.md);
+        components::section_title(ui, "Stock");
+        components::field_label(ui, "Show");
+        ui.add_space(SPACING.xs);
+        for (index, label) in ["All", "Low", "Out"].into_iter().enumerate() {
+            if regions::nav_item(ui, state.stock_filter == index, label).clicked() {
+                state.stock_filter = index;
+            }
+        }
+        ui.add_space(SPACING.sm);
+        components::caption(ui, "Low and out count tracked products only.");
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -2145,14 +2156,32 @@ impl Module for Products {
 
         // The count only appears while a filter is on. With no filter every row
         // is on screen, so "48 of 48" would be a number the reader already knows.
-        let filtered = !state.catalog_search.trim().is_empty() || state.category.is_some();
+        let filtered = !state.catalog_search.trim().is_empty()
+            || state.category.is_some()
+            || state.stock_filter != 0;
         let count = filtered.then(|| {
             let needle = state.catalog_search.trim().to_lowercase();
-            let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+            let visible = visible_catalog(
+                &state.products,
+                &state.stock,
+                state.category.as_deref(),
+                &needle,
+                state.stock_filter,
+            );
             format!("{} of {}", visible.len(), state.products.len())
         });
 
+        // Offer the way in only while there is something left to count. A button
+        // that opens "every product is tracked" is a dead end.
+        let untracked = state
+            .products
+            .iter()
+            .filter(|product| stock_item(&state.stock, product.id).is_none())
+            .count();
+        let can_track = state.permits(crate::auth::Permission::ManageInventory) && untracked > 0;
+
         let mut new = false;
+        let mut track = false;
         let mut import = false;
         let mut template = false;
         let mut export_visible = false;
@@ -2167,6 +2196,9 @@ impl Module for Products {
             |ui| {
                 if actions::primary_compact(ui, "New product").clicked() {
                     new = true;
+                }
+                if can_track && actions::secondary_compact(ui, "Track stock").clicked() {
+                    track = true;
                 }
                 // Import and both exports are setup actions, not everyday ones.
                 // One menu keeps them a click away without letting four
@@ -2223,6 +2255,9 @@ impl Module for Products {
         if new {
             state.start_product();
         }
+        if track {
+            state.start_tracking();
+        }
         if import {
             state.start_import_picker();
         }
@@ -2242,10 +2277,24 @@ impl Module for Products {
             return locked_card(ui, crate::auth::Permission::ChangePrice);
         }
 
+        // Seeing stock is part of the catalog; changing it is a separate gate.
+        // The page gate already keeps cashiers out, but the row still asks, so
+        // a future role that may read prices cannot silently move stock.
+        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+
         let needle = state.catalog_search.trim().to_lowercase();
-        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+        let visible = visible_catalog(
+            &state.products,
+            &state.stock,
+            state.category.as_deref(),
+            &needle,
+            state.stock_filter,
+        );
 
         file_feedback(ui, state);
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
 
         if state.products.is_empty() {
             components::empty_state_card(
@@ -2257,13 +2306,53 @@ impl Module for Products {
             return;
         }
 
-        if visible.is_empty() {
-            components::empty_state_card(
+        if state.stock.is_empty() {
+            components::caption(
                 ui,
-                "Nothing matches",
-                "Clear the search or pick another category.",
-                160.0,
+                "Stock is not tracked yet. Track a product to subtract sales from a count.",
             );
+        } else {
+            let tracked = state.stock.len();
+            let low = state.stock.iter().filter(|item| item.is_low()).count();
+            let out = state.stock.iter().filter(|item| item.is_out()).count();
+            components::caption(
+                ui,
+                &format!("{tracked} tracked · {low} low · {out} out of stock"),
+            );
+        }
+
+        if visible.is_empty() {
+            let narrowed = !needle.is_empty() || state.category.is_some();
+            let (title, body) = if narrowed {
+                (
+                    "Nothing matches",
+                    "Clear the search or pick another category.",
+                )
+            } else {
+                match state.stock_filter {
+                    1 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    1 => (
+                        "Nothing is low",
+                        "Every tracked product is above its warning line.",
+                    ),
+                    2 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    2 => (
+                        "Nothing is out",
+                        "Every tracked product has stock on the shelf.",
+                    ),
+                    _ => (
+                        "Nothing matches",
+                        "Clear the search or pick another category.",
+                    ),
+                }
+            };
+            components::empty_state_card(ui, title, body, 160.0);
             return;
         }
 
@@ -2275,8 +2364,11 @@ impl Module for Products {
             product_header(ui);
             for &product_index in &visible {
                 let product = &state.products[product_index];
+                let stock = stock_item(&state.stock, product.id);
                 let deleting = state.product_delete == Some(product.id);
-                if let Some(row_action) = product_row(ui, product, state, deleting) {
+                if let Some(row_action) =
+                    product_row(ui, product, stock, state, deleting, can_manage)
+                {
                     action = Some(row_action);
                 }
             }
@@ -2292,6 +2384,12 @@ impl Module for Products {
             Some(ProductAction::AskDelete(id)) => state.product_delete = Some(id),
             Some(ProductAction::Delete(id)) => state.delete_product(id),
             Some(ProductAction::CancelDelete) => state.product_delete = None,
+            Some(ProductAction::MoveStock { id, name, on_hand }) => {
+                state.start_stock_move(id, &name, on_hand, StockKind::Receive);
+            }
+            Some(ProductAction::StockHistory { id, name }) => {
+                state.open_stock_history(id, &name);
+            }
             None => {}
         }
     }
@@ -2333,7 +2431,13 @@ pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
     match kind {
         ExportKind::Products => {
             let needle = state.catalog_search.trim().to_lowercase();
-            let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+            let visible = visible_catalog(
+                &state.products,
+                &state.stock,
+                state.category.as_deref(),
+                &needle,
+                state.stock_filter,
+            );
             let rows: Vec<Product> = visible
                 .iter()
                 .map(|&index| state.products[index].clone())
@@ -2481,6 +2585,43 @@ fn visible_products(products: &[Product], category: Option<&str>, needle: &str) 
         .collect()
 }
 
+/// The ledger row for a product, if the shop counts it.
+///
+/// `db::stock` only returns tracked products, so a missing row means "not
+/// tracked", not "zero". The catalog draws a muted dash for that case rather
+/// than a badge that would read as a count.
+fn stock_item(stock: &[StockItem], product_id: i64) -> Option<&StockItem> {
+    stock.iter().find(|item| item.product_id == product_id)
+}
+
+/// Indices of the products the catalog shows: the category and search filters,
+/// then the stock facet.
+///
+/// Its own function because the toolbar's count and the rows must agree; a
+/// filter that counted one set and drew another is the kind of bug a reader
+/// blames on the till.
+fn visible_catalog(
+    products: &[Product],
+    stock: &[StockItem],
+    category: Option<&str>,
+    needle: &str,
+    filter: usize,
+) -> Vec<usize> {
+    products
+        .iter()
+        .enumerate()
+        .filter(|(_, product)| {
+            matches(product, category, needle)
+                && match filter {
+                    1 => stock_item(stock, product.id).is_some_and(StockItem::is_low),
+                    2 => stock_item(stock, product.id).is_some_and(StockItem::is_out),
+                    _ => true,
+                }
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// What a scanned code or a typed name resolved to.
 #[derive(Debug, PartialEq, Eq)]
 enum Scan {
@@ -2549,9 +2690,15 @@ enum ProductAction {
     AskDelete(i64),
     Delete(i64),
     CancelDelete,
+    MoveStock { id: i64, name: String, on_hand: i64 },
+    StockHistory { id: i64, name: String },
 }
 
 fn product_header(ui: &mut egui::Ui) {
+    // "On hand" has no column header on purpose: the pill rides beside the name,
+    // attached to the product it counts. A right-aligned header would drift with
+    // the number of row actions, and a column of numbers would still need a
+    // tooltip to say whether it meant stock or sold.
     ui.horizontal(|ui| {
         components::table_header(ui, "Product");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2561,38 +2708,33 @@ fn product_header(ui: &mut egui::Ui) {
     components::divider(ui);
 }
 
-/// One product: name and category on the left, price and actions on the right.
+/// One product: name, stock and category on the left, price and actions on the
+/// right.
 ///
 /// The row returns what was clicked instead of mutating the state, because the
 /// caller is iterating `state.products` and cannot borrow it mutably yet.
 fn product_row(
     ui: &mut egui::Ui,
     product: &Product,
+    stock: Option<&StockItem>,
     state: &State,
     deleting: bool,
+    can_manage: bool,
 ) -> Option<ProductAction> {
     let mut action = None;
 
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
 
-        // Keep the name clear of the price and row actions. A fixed reserve is
-        // enough for the money column and two icon buttons, and it lets a long
-        // name wrap instead of running underneath them.
-        const ACTIONS_WIDTH: f32 = 190.0;
+        // Keep the name clear of the price and row actions. Four icon buttons
+        // are the widest case (a tracked product), and the reserve is fixed so
+        // the price column does not move when a row gains stock.
+        const ACTIONS_WIDTH: f32 = 300.0;
         let text_width = (ui.available_width() - ACTIONS_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
             egui::vec2(text_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.label(components::semibold(&product.name).size(TYPE.body));
-                let mut detail = product.category.clone();
-                if let Some(barcode) = &product.barcode {
-                    detail.push_str(" · ");
-                    detail.push_str(barcode);
-                }
-                components::caption(ui, &detail);
-            },
+            |ui| product_identity(ui, product, stock),
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2627,12 +2769,112 @@ fn product_row(
                 {
                     action = Some(ProductAction::Edit(product.id));
                 }
+                // Stock actions belong to products the shop actually counts. An
+                // untracked product has no ledger to move or read; the toolbar's
+                // "Track stock" is the way in.
+                if let Some(item) = stock {
+                    if components::icon_button(ui, history_icon(), 32.0)
+                        .on_hover_text("Stock history")
+                        .clicked()
+                    {
+                        action = Some(ProductAction::StockHistory {
+                            id: product.id,
+                            name: product.name.clone(),
+                        });
+                    }
+                    if can_manage
+                        && components::icon_button(ui, move_icon(), 32.0)
+                            .on_hover_text("Move stock: receive, return, waste or adjust")
+                            .clicked()
+                    {
+                        action = Some(ProductAction::MoveStock {
+                            id: product.id,
+                            name: product.name.clone(),
+                            on_hand: item.on_hand,
+                        });
+                    }
+                }
             }
         });
     });
     components::divider(ui);
 
     action
+}
+
+/// The product's identity: name and stock pill, then category and barcode.
+fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockItem>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(components::semibold(&product.name).size(TYPE.body));
+        let (text, color, hint) = match stock {
+            Some(item) => {
+                let (color, hint) = stock_badge(ui, item);
+                (item.on_hand.to_string(), color, hint)
+            }
+            // A dash, not a zero: the product has no ledger, and a count of
+            // zero would be a statement the shop never made.
+            None => (
+                "—".to_owned(),
+                theme::current(ui.ctx()).text_muted,
+                "Stock is not tracked for this product.".to_owned(),
+            ),
+        };
+        // Give the pill a slot exactly as wide as its text plus the frame's
+        // padding. Without it, `horizontal_wrapped` hands the pill whatever few
+        // pixels are left at the end of the row, and the label wraps "64" onto
+        // two lines. With it, the whole pill moves to the next line when the
+        // name has used the row.
+        let text_width = ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    text.clone(),
+                    egui::FontId::new(TYPE.small, egui::FontFamily::Proportional),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+        });
+        let badge = ui
+            .allocate_ui_with_layout(
+                egui::vec2(text_width + 13.0, 0.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| components::badge(ui, &text, color),
+            )
+            .response;
+        badge.on_hover_text(hint);
+    });
+
+    let mut detail = if product.category.is_empty() {
+        "Uncategorised".to_owned()
+    } else {
+        product.category.clone()
+    };
+    if let Some(barcode) = &product.barcode {
+        detail.push_str(" · ");
+        detail.push_str(barcode);
+    }
+    components::caption(ui, &detail);
+}
+
+/// The stock pill's colour and the sentence behind it.
+fn stock_badge(ui: &egui::Ui, item: &StockItem) -> (Rgb, String) {
+    let palette = theme::current(ui.ctx());
+    if item.is_out() {
+        (
+            palette.danger,
+            format!("Out of stock · warns at {}", item.low_stock),
+        )
+    } else if item.is_low() {
+        (
+            palette.danger,
+            format!("Low stock · warns at {}", item.low_stock),
+        )
+    } else {
+        (
+            palette.success,
+            format!("{} on hand · warns at {}", item.on_hand, item.low_stock),
+        )
+    }
 }
 
 /// A dialog frame, with the same breathing room everywhere.
@@ -3879,12 +4121,11 @@ pub fn permission(index: usize) -> crate::auth::Permission {
         // `ViewReports` is the scope, not the door: without it the screen still
         // opens, showing only the cashier's own sales.
         SELL | DASHBOARD | SALES => Permission::Sell,
+        // The catalog now carries stock too. Changing prices is the page gate;
+        // recording a movement is gated inside the workspace on
+        // `ManageInventory`, so a reader without it still sees the counts.
         PRODUCTS => Permission::ChangePrice,
         SUPPLIERS => Permission::ManageSuppliers,
-        // Seeing stock is part of selling: a cashier answering "do you have
-        // any?" must not need a manager. Changing it is gated inside the
-        // workspace on `ManageInventory`.
-        INVENTORY => Permission::Sell,
         // Planning and receiving a trip changes stock and cost, so it is the
         // same gate as recording a movement. A cashier never sees the screen.
         PURCHASES => Permission::ManageInventory,
@@ -4149,239 +4390,6 @@ fn restore_icon() -> Icon {
     Icon::named("archive-restore").unwrap_or(Icon::REFUND)
 }
 
-// ---------------------------------------------------------------------------
-// Inventory
-// ---------------------------------------------------------------------------
-
-/// The stock ledger: what is tracked, what is low, and the movements behind it.
-///
-/// This is not a product list. The catalog answers "what does the shop sell";
-/// this screen answers "how many are on the shelf", which is a different
-/// question with a different truth. Products become visible here only when
-/// somebody counts them, because an imported catalog has no stock and a screen
-/// full of guessed zeros would teach the shop to distrust it.
-struct Inventory;
-
-impl Module for Inventory {
-    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        components::section_title(ui, "Stock");
-        components::field_label(ui, "Show");
-        ui.add_space(SPACING.xs);
-        for (index, label) in ["All", "Low", "Out"].into_iter().enumerate() {
-            if regions::nav_item(ui, state.stock_filter == index, label).clicked() {
-                state.stock_filter = index;
-            }
-        }
-
-        ui.add_space(SPACING.md);
-        components::caption(
-            ui,
-            "Stock is the sum of every movement. A sale subtracts what it sold.",
-        );
-    }
-
-    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        // The bar is drawn for everyone: seeing stock is part of selling, so a
-        // cashier gets the search field. Only the action is gated.
-        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
-        let mut track = false;
-        action_bar(
-            ui,
-            PageLeft::Search {
-                text: &mut state.stock_search,
-                hint: "Name or category",
-                count: None,
-            },
-            |ui| {
-                if can_manage && actions::primary_compact(ui, "Track stock").clicked() {
-                    track = true;
-                }
-            },
-        );
-        if track {
-            state.start_tracking();
-        }
-    }
-
-    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        // Seeing stock is part of selling; changing it is not. A cashier who is
-        // asked "do you have any?" must be able to answer, and the screen says
-        // who can record a movement instead of hiding the list outright.
-        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
-
-        components::caption(
-            ui,
-            "What the ledger says is on the shelf. Tracked products subtract sales \
-             automatically; receiving, returns, waste and adjustments are recorded here.",
-        );
-        if !can_manage {
-            components::caption(
-                ui,
-                "You can see stock. A manager or the owner records movements.",
-            );
-        }
-        if let Some(notice) = state.notice.as_deref() {
-            components::caption(ui, notice);
-        }
-
-        if state.stock.is_empty() {
-            components::empty_state_card(
-                ui,
-                "No stock tracked yet",
-                "Track a product and count what is on the shelf. Sales of tracked \
-                 products will subtract automatically.",
-                180.0,
-            );
-            return;
-        }
-
-        let tracked = state.stock.len();
-        let low = state.stock.iter().filter(|item| item.is_low()).count();
-        let out = state.stock.iter().filter(|item| item.is_out()).count();
-        ui.add_space(SPACING.xs);
-        components::caption(
-            ui,
-            &format!("{tracked} tracked · {low} low · {out} out of stock"),
-        );
-
-        let needle = state.stock_search.trim().to_lowercase();
-        let visible = visible_stock(&state.stock, &needle, state.stock_filter);
-        if visible.is_empty() {
-            components::empty_state_card(
-                ui,
-                "Nothing matches",
-                "Clear the search or choose another filter.",
-                160.0,
-            );
-            return;
-        }
-
-        let mut action = None;
-        // The page scrolls (the shell owns it), so the ledger is laid out whole:
-        // a list inside a list would fight the page for the wheel.
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            stock_header(ui);
-            for &index in &visible {
-                let item = &state.stock[index];
-                if let Some(row_action) = stock_row(ui, item, can_manage) {
-                    action = Some(row_action);
-                }
-            }
-        });
-
-        match action {
-            Some(StockAction::History { id, name }) => state.open_stock_history(id, &name),
-            Some(StockAction::Move { id, name, on_hand }) => {
-                state.start_stock_move(id, &name, on_hand, StockKind::Receive)
-            }
-            None => {}
-        }
-    }
-}
-
-enum StockAction {
-    Move { id: i64, name: String, on_hand: i64 },
-    History { id: i64, name: String },
-}
-
-fn stock_header(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        components::table_header(ui, "Product");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            components::table_header(ui, "On hand");
-        });
-    });
-    components::divider(ui);
-}
-
-/// One tracked product: name and category on the left, count and actions right.
-///
-/// The name wraps rather than truncates, and the stock count stays on the
-/// right so the column lines up down the list.
-///
-/// The row returns what was clicked instead of mutating the state, because the
-/// caller is iterating `state.stock` and cannot borrow it mutably yet.
-fn stock_row(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
-    let (_, action) = egui::containers::Sides::new()
-        .height(52.0)
-        .shrink_left()
-        .wrap()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| stock_identity(ui, item));
-            },
-            |ui| stock_controls(ui, item, can_manage),
-        );
-    components::divider(ui);
-
-    action
-}
-
-/// The product's identity: name over category, with the low-stock threshold.
-fn stock_identity(ui: &mut egui::Ui, item: &StockItem) {
-    ui.label(components::semibold(&item.name).size(TYPE.body));
-    let mut detail = if item.category.is_empty() {
-        "Uncategorised".to_owned()
-    } else {
-        item.category.clone()
-    };
-    detail.push_str(&format!(" · warns at {}", item.low_stock));
-    components::caption(ui, &detail);
-}
-
-/// The row's right-hand cluster, added right-to-left: the count first, then the
-/// button, then the history. The button therefore sits immediately before the
-/// count, and the name keeps the rest of the line.
-///
-/// The count is a badge, green while the shelf is healthy and red once it is
-/// low or empty, so the exception reads from the colour before the number.
-///
-/// Every part is a direct child. A nested vertical inside this right-to-left
-/// layout claims the whole row and leaves the name no width.
-fn stock_controls(ui: &mut egui::Ui, item: &StockItem, can_manage: bool) -> Option<StockAction> {
-    let palette = theme::current(ui.ctx());
-    let mut action = None;
-
-    let (color, hint) = if item.is_out() {
-        (palette.danger, "Out of stock")
-    } else if item.is_low() {
-        (palette.danger, "Low stock")
-    } else {
-        (palette.success, "In stock")
-    };
-
-    // The badge pins its own height, so the scope here only exists to give the
-    // pill a response to hang the tooltip on.
-    let badge = ui
-        .scope(|ui| components::badge(ui, &item.on_hand.to_string(), color))
-        .response;
-    badge.on_hover_text(hint);
-    if can_manage
-        && components::icon_button(ui, move_icon(), 32.0)
-            .on_hover_text("Move stock: receive, return, waste or adjust")
-            .clicked()
-    {
-        action = Some(StockAction::Move {
-            id: item.product_id,
-            name: item.name.clone(),
-            on_hand: item.on_hand,
-        });
-    }
-    if components::icon_button(ui, history_icon(), 32.0)
-        .on_hover_text("History")
-        .clicked()
-    {
-        action = Some(StockAction::History {
-            id: item.product_id,
-            name: item.name.clone(),
-        });
-    }
-
-    action
-}
-
 /// The movement glyph. Two arrows say "in or out"; the tooltip names the four
 /// reasons a movement can have.
 fn move_icon() -> Icon {
@@ -4392,30 +4400,6 @@ fn move_icon() -> Icon {
 /// vocabulary can move without taking a button with it.
 fn history_icon() -> Icon {
     Icon::named("history").unwrap_or(Icon::RECEIPT)
-}
-
-/// Whether a tracked product passes the search box.
-fn stock_matches(item: &StockItem, needle: &str) -> bool {
-    needle.is_empty()
-        || item.name.to_lowercase().contains(needle)
-        || item.category.to_lowercase().contains(needle)
-}
-
-/// Indices of the products the ledger shows, in catalog name order.
-fn visible_stock(stock: &[StockItem], needle: &str, filter: usize) -> Vec<usize> {
-    stock
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            let passes = match filter {
-                1 => item.is_low(),
-                2 => item.is_out(),
-                _ => true,
-            };
-            passes && stock_matches(item, needle)
-        })
-        .map(|(index, _)| index)
-        .collect()
 }
 
 /// Start tracking a product: pick one, count the shelf, choose a warning line.
@@ -6535,7 +6519,7 @@ mod tests {
         );
         assert_eq!(
             tabs(View::Shop, crate::auth::Role::Manager),
-            &[PRODUCTS, INVENTORY, PURCHASES, SUPPLIERS][..]
+            &[PRODUCTS, PURCHASES, SUPPLIERS][..]
         );
 
         // A cashier reads the day's own sales; the trends that read the shop's

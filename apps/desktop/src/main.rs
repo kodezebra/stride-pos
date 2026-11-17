@@ -70,7 +70,11 @@ fn main() -> ExitCode {
         let theme = settings.theme();
 
         let prefs_path = ctx.config_path("prefs.json");
-        let prefs: prefs::Prefs = config::load_or_default(&prefs_path)?;
+        let mut prefs: prefs::Prefs = config::load_or_default(&prefs_path)?;
+        // Move a file written before a module moved onto the current list. The
+        // saved screen is a habit, so an old index must open the nearest page
+        // rather than whichever module inherited its number.
+        prefs.normalize();
 
         // A prefs file from a build with more modules must not index past the
         // end of the list. Clamp rather than crash: the user's habit is worth
