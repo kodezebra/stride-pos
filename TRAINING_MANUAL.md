@@ -168,8 +168,8 @@ Two facts to remember:
 
 ### 1.3 Load many products from a spreadsheet
 
-1. **Import / Export ▾** → **Import from CSV…**. A dialog opens.
-2. In the chooser, press **Save a template**, then choose a folder. The till writes `products-template.csv`.
+1. **Import / Export ▾** → **Save a template…**. The system's folder chooser opens.
+2. Choose a folder; the till writes `products-template.csv` there.
 3. Open that file in a spreadsheet. Fill one product per row: `name,category,price,barcode`.
 4. Save it as CSV.
 5. **Import / Export ▾** → **Import from CSV…** again, and pick your filled file.

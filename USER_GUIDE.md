@@ -175,8 +175,8 @@ Do this once, in order. Budget about twenty minutes.
    For each person added, the till generates a six-digit PIN and shows it once —
    write it down before navigating away.
 7. **Add products.** Either one at a time (**Catalog** → **New product**), or
-   import the shop's spreadsheet: **Import / Export ▾ → Import from CSV…** →
-   **Save a template**, fill in the template, then import it. See §6.10.
+   import the shop's spreadsheet: **Import / Export ▾ → Save a template…**,
+   fill in the template, then **Import from CSV…**. See §6.10.
 8. **Check the receipt layout** (Settings → Receipt): the preview shows your shop
    name and sample lines. Any change to the shop name appears here immediately.
 9. **Back up.** Settings → Terminal → **Back up now**. The copy lands in
@@ -416,13 +416,14 @@ this — it is how the drawer physically balances.
 
 ### 6.10 Importing a product list
 
-1. **Catalog** (`F3`) → **Import / Export ▾** → **Import from CSV…**, then
-   **Save a template** → pick a folder. The file `products-template.csv` is
-   written with two example rows.
+1. **Catalog** (`F3`) → **Import / Export ▾** → **Save a template…** → a folder
+   chooser opens; `products-template.csv` is written there with two example
+   rows.
 2. Fill the template in your spreadsheet (name, category, price, barcode
    optional; headings honoured case-insensitively). Prices are read in this
    till's currency.
-3. **Import / Export ▾** → **Import from CSV…** → pick the file. Rows that
+3. **Import / Export ▾** → **Import from CSV…** → the system's file chooser
+   opens on the folder the last import came from; pick the file. Rows that
    cannot be read are skipped and counted, never half-imported. Duplicate
    barcodes are skipped.
 4. "Imported N product(s), skipped M." appears as a notice. The first skipped
@@ -439,8 +440,8 @@ this — it is how the drawer physically balances.
 - **Today** (`F2`) → **Export** (same range and same scope as the screen — a
   cashier exports only their own takings).
 - Files are named `products-…-YYYYMMDD-HHMMSS.csv` / `sales-…-YYYYMMDD-HHMMSS.csv`
-  and land in the folder you pick. Location buttons: Home, Documents, Downloads,
-  Desktop, Till exports (next to the database).
+  and land in the folder you pick in the system's folder chooser. It opens on
+  the folder the last export of that kind went to, or on Documents.
 - Amounts are plain decimals in the till's currency — `1200` UGX, `12.50` KES —
   with no symbol or thousand separators, so spreadsheets read them cleanly.
 - Sales export columns: `sale_id, when, cashier, total, rounding, paid, method`.
@@ -733,7 +734,7 @@ theme · Take payment · Clear cart · Lock till.
 | `~/.local/share/pos/logs/pos.log` | log, mirrored to stderr |
 | `~/.config/pos/settings.json` | theme, receipt, scanner state, shop name |
 | `~/.config/pos/prefs.json` | last module, sidebar |
-| `~/.local/share/pos/exports/` | default target for "Till exports" |
+| `~/.local/share/pos/exports/` | the till's own export folder, offered by the in-app chooser |
 
 ### 9.4 CSV formats
 

@@ -2048,6 +2048,7 @@ impl Module for Products {
 
         let mut new = false;
         let mut import = false;
+        let mut template = false;
         let mut export_visible = false;
         let mut export_all = false;
         action_bar(
@@ -2076,6 +2077,18 @@ impl Module for Products {
                         .clicked()
                     {
                         import = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Save a template…")
+                        .on_hover_text(
+                            "A blank CSV with the columns the import reads and two \
+                             example rows",
+                        )
+                        .clicked()
+                    {
+                        template = true;
                         ui.close();
                     }
                     ui.separator();
@@ -2112,6 +2125,9 @@ impl Module for Products {
         }
         if export_all {
             state.start_export(ExportKind::AllProducts);
+        }
+        if template {
+            state.start_export(ExportKind::Template);
         }
     }
 

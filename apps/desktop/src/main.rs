@@ -7,10 +7,11 @@
 //! |---------------|---------------------------------------------------|
 //! | `actions.rs`  | the one action hierarchy: primary, secondary, quiet |
 //! | `db.rs`       | schema and the few reads the shell needs           |
+//! | `dialog.rs`   | the computer's own file chooser, on a thread       |
 //! | `export.rs`   | the books, written out as CSV                      |
 //! | `state.rs`    | everything the UI can change, in one struct        |
 //! | `modules.rs`  | the modules and their sidebar/workspace             |
-//! | `picker.rs`   | choosing a file to import, or a folder to export into |
+//! | `picker.rs`   | the fallback chooser, inside the app               |
 //! | `auth.rs`     | staff, PINs, the lock screen, approvals            |
 //! | `checkout.rs` | the payment modal: cash in, change out             |
 //! | `commands.rs` | the command palette's contents                     |
@@ -27,6 +28,7 @@ mod checkout;
 mod commands;
 mod currencies;
 mod db;
+mod dialog;
 mod export;
 mod firewall;
 mod import;
