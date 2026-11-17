@@ -1213,6 +1213,30 @@ impl Module for Dashboard {
             }
         });
 
+        // Who took it, and how much of it was cash. The shop view is the only
+        // one that can see other people's takings; a cashier's own numbers are
+        // already the whole page.
+        if shop {
+            ui.add_space(SPACING.lg);
+            components::section_title(ui, "By person");
+            let people = crate::db::by_person(&state.store, range, user);
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                person_row(ui, "Person", "Sales", "Cash", "Takings", true, false);
+                for (index, person) in people.iter().enumerate() {
+                    person_row(
+                        ui,
+                        &person.name,
+                        &person.sales.to_string(),
+                        &state.money(person.cash_minor),
+                        &state.money(person.takings_minor),
+                        false,
+                        index % 2 == 1,
+                    );
+                }
+            });
+        }
+
         // One chart, because a shopkeeper reads a shape, not a spreadsheet. All
         // time has no calendar to draw, so its chart is capped and says so.
         ui.add_space(SPACING.lg);
@@ -1616,6 +1640,88 @@ fn tally_row(ui: &mut egui::Ui, name: &str, count: &str, amount: &str, header: b
     );
 
     let right = painter.layout_no_wrap(amount.to_owned(), egui::FontId::new(size, mono), color);
+    painter.galley(
+        egui::pos2(rect.right() - right.size().x, y - right.size().y * 0.5),
+        right,
+        color,
+    );
+
+    if header {
+        painter.hline(
+            rect.x_range(),
+            rect.max.y,
+            egui::Stroke::new(1.0_f32, palette.border),
+        );
+    }
+}
+
+/// One row of the By person table: a name, sales, cash, and takings.
+///
+/// Four columns, so it cannot reuse [`tally_row`]'s three: cash and takings are
+/// both money and must line up as columns, or the eye has to compare two
+/// figures that wander with the name beside them.
+fn person_row(
+    ui: &mut egui::Ui,
+    person: &str,
+    sales: &str,
+    cash: &str,
+    takings: &str,
+    header: bool,
+    stripe: bool,
+) {
+    let palette = theme::current(ui.ctx());
+    let width = ui.available_width();
+    let height = if header { 30.0 } else { ROW_HEIGHT };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+    let painter = ui.painter();
+    if stripe {
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from(palette.surface_alt),
+        );
+    }
+
+    let color = if header {
+        egui::Color32::from(palette.text_muted)
+    } else {
+        egui::Color32::from(palette.text)
+    };
+    let size = if header { TYPE.small } else { TYPE.body };
+    let proportional = if header {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let mono = theme::numeric();
+    let y = rect.center().y;
+
+    let name = painter.layout_no_wrap(
+        person.to_owned(),
+        egui::FontId::new(size, proportional),
+        color,
+    );
+    painter.galley(
+        egui::pos2(rect.left(), y - name.size().y * 0.5),
+        name,
+        color,
+    );
+
+    for (fraction, text) in [(0.42, sales), (0.66, cash)] {
+        let cell = painter.layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::new(size, mono.clone()),
+            color,
+        );
+        painter.galley(
+            egui::pos2(rect.left() + width * fraction, y - cell.size().y * 0.5),
+            cell,
+            color,
+        );
+    }
+
+    let right = painter.layout_no_wrap(takings.to_owned(), egui::FontId::new(size, mono), color);
     painter.galley(
         egui::pos2(rect.right() - right.size().x, y - right.size().y * 0.5),
         right,
@@ -4758,6 +4864,30 @@ fn drawer_card(ui: &mut egui::Ui, state: &mut State) {
                 drawer_figure(ui, "Difference", &text, Some(egui::Color32::from(color)));
             }
         });
+
+        // Who handled this drawer's cash. The shop view is the only one that
+        // may see other people's takings, and one cashier's figure is already
+        // the total above: show the split only when there is more than one name
+        // to compare, which is exactly when a short count needs explaining.
+        if state.report_scope().is_shop() {
+            let people = crate::db::drawer_by_person(&state.store, &drawer.shift.uid);
+            if people.len() > 1 {
+                ui.add_space(SPACING.md);
+                components::caption(ui, "Cash by person in this drawer");
+                ui.add_space(SPACING.xs);
+                tally_row(ui, "Person", "Sales", "Cash", true, false);
+                for (index, person) in people.iter().enumerate() {
+                    tally_row(
+                        ui,
+                        &person.name,
+                        &person.sales.to_string(),
+                        &state.money(person.cash_minor),
+                        false,
+                        index % 2 == 1,
+                    );
+                }
+            }
+        }
 
         if !drawer.shift.is_open() {
             return;

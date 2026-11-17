@@ -4107,6 +4107,91 @@ pub fn by_method(store: &storage::Store, range: usize, user: Option<&str>) -> Ve
 }
 
 // ---------------------------------------------------------------------------
+// By person
+// ---------------------------------------------------------------------------
+
+/// What one cashier rang up, over a range or over one drawer.
+pub struct PersonTotal {
+    /// The account's name, or `No cashier` for a sale written before anyone was
+    /// signed in. Never empty: a blank cell in a money table reads as a bug.
+    pub name: String,
+    pub sales: i64,
+    /// Cash that went into the drawer, rounding included.
+    pub cash_minor: i64,
+    /// Everything the person took, however it was paid.
+    pub takings_minor: i64,
+}
+
+/// Sales and money per cashier, ranked by takings.
+///
+/// Takings come from the sale (`total + rounding`), the same figure the KPI
+/// above it adds up, so the rows reconcile with the card even on a till whose
+/// oldest sales have no payment row. Cash comes from the payments, because only
+/// a payment knows how a split sale was settled.
+///
+/// `user` narrows to one person, like every other report: a cashier who somehow
+/// reached this query still cannot read the shop's other names.
+pub fn by_person(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<PersonTotal> {
+    person_totals(store, &window_clause(range, "s.created_at"), [user])
+}
+
+/// The same table narrowed to one drawer, for the card that asks who handled
+/// the cash that is being counted tonight.
+///
+/// A sale whose drawer could not be opened has no `shift_uid`; it is missing
+/// here for the same reason it is missing from [`drawer_totals`] — there is no
+/// shift to attribute it to.
+pub fn drawer_by_person(store: &storage::Store, shift_uid: &str) -> Vec<PersonTotal> {
+    person_totals(store, "s.shift_uid = ?1", [shift_uid])
+}
+
+fn person_totals<P: rusqlite::Params>(
+    store: &storage::Store,
+    clause: &str,
+    params: P,
+) -> Vec<PersonTotal> {
+    // Cash is a correlated subquery rather than a join: a split sale would
+    // otherwise count its whole total once per payment row.
+    let sql = format!(
+        "SELECT COALESCE(u.name, 'No cashier'),
+                COUNT(*),
+                COALESCE(SUM(s.total_minor + s.rounding_minor), 0),
+                COALESCE(SUM((SELECT COALESCE(SUM(p.amount_minor), 0)
+                              FROM payments p
+                              WHERE p.sale_id = s.id AND p.method = 'cash')), 0)
+         FROM sales s LEFT JOIN users u ON u.id = s.user_id
+         WHERE {clause}
+         GROUP BY s.user_id
+         ORDER BY 3 DESC, 1 COLLATE NOCASE"
+    );
+
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "by-person prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map(params, |row| {
+        Ok(PersonTotal {
+            name: row.get(0)?,
+            sales: row.get(1)?,
+            takings_minor: row.get(2)?,
+            cash_minor: row.get(3)?,
+        })
+    });
+
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "by-person query failed");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------------
 
@@ -4490,6 +4575,144 @@ mod tests {
 
         let rows = export_sales(&store, 3, Some(&alice.id)).expect("export");
         assert_eq!(rows.len(), 2, "an export cannot outrun the scope");
+
+        // The person table is scoped like the rest: Alice's two sales, cash and
+        // all; the whole shop sees both names.
+        let people = by_person(&store, 3, None);
+        assert_eq!(people.len(), 2);
+        let alice_row = people
+            .iter()
+            .find(|person| person.name == "Alice")
+            .expect("Alice rang two sales");
+        assert_eq!(alice_row.sales, 2);
+        assert_eq!(alice_row.takings_minor, 500);
+        assert_eq!(alice_row.cash_minor, 200, "only the paid sale had cash");
+        let mine = by_person(&store, 3, Some(&alice.id));
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].name, "Alice");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn by_person_separates_cash_from_takings_and_names_the_unattributed() {
+        let (store, path) = store("by-person");
+        let alice = insert_user(
+            &store,
+            "Alice",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert alice");
+        let bob = insert_user(
+            &store,
+            "Bob",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert bob");
+
+        let alice_cash = insert_sale_for(&store, "-0 days", &alice.id, &[("Tea", 2, 100)]);
+        let alice_mobile = insert_sale_for(&store, "-0 days", &alice.id, &[("Rice", 1, 500)]);
+        let bob_cash = insert_sale_for(&store, "-0 days", &bob.id, &[("Sugar", 1, 1_000)]);
+        let unattributed = insert_sale(&store, "-0 days", &[("Salt", 1, 50)]);
+
+        for (sale, method, amount) in [
+            (alice_cash, "cash", 200),
+            (alice_mobile, "mobile", 500),
+            (bob_cash, "cash", 1_000),
+            (unattributed, "cash", 50),
+        ] {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO payments (sale_id, method, amount_minor, tendered_minor, change_minor)
+                     VALUES (?1, ?2, ?3, ?3, 0)",
+                    (sale, method, amount),
+                )
+                .expect("insert payment");
+        }
+
+        let people = by_person(&store, 3, None);
+        assert_eq!(people.len(), 3, "two cashiers and one sale without one");
+        assert_eq!(people[0].name, "Bob", "ranked by takings, not by name");
+        assert_eq!(people[0].sales, 1);
+        assert_eq!(people[0].cash_minor, 1_000);
+        assert_eq!(people[0].takings_minor, 1_000);
+
+        assert_eq!(people[1].name, "Alice");
+        assert_eq!(people[1].sales, 2);
+        assert_eq!(
+            people[1].cash_minor, 200,
+            "the mobile sale is not drawer cash"
+        );
+        assert_eq!(people[1].takings_minor, 700, "but it is still her taking");
+
+        assert_eq!(people[2].name, "No cashier");
+        assert_eq!(people[2].takings_minor, 50);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_drawer_split_covers_one_shift_and_leaves_the_others_alone() {
+        let (store, path) = store("drawer-by-person");
+        let alice = insert_user(
+            &store,
+            "Alice",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert alice");
+        let bob = insert_user(
+            &store,
+            "Bob",
+            Role::Cashier,
+            CredentialKind::Pin,
+            "$argon2id$placeholder",
+        )
+        .expect("insert bob");
+
+        let sale = |name: &str, unit_minor: i64| SaleLine {
+            product_id: None,
+            name: name.to_owned(),
+            qty: 1,
+            unit_minor,
+        };
+        let ring = |user: &str, shift: &str, name: &str, amount: i64| {
+            record_sale(
+                &store,
+                &[sale(name, amount)],
+                0,
+                0,
+                amount,
+                Some(user),
+                Some(shift),
+            )
+            .expect("sale");
+        };
+
+        ring(&alice.id, "drawer-a", "Tea", 200);
+        ring(&bob.id, "drawer-a", "Rice", 500);
+        ring(&alice.id, "drawer-b", "Sugar", 900);
+
+        let people = drawer_by_person(&store, "drawer-a");
+        assert_eq!(people.len(), 2);
+        assert_eq!(
+            people.iter().map(|person| person.cash_minor).sum::<i64>(),
+            700,
+            "only the drawer being counted"
+        );
+
+        let tomorrow = drawer_by_person(&store, "drawer-b");
+        assert_eq!(tomorrow.len(), 1);
+        assert_eq!(tomorrow[0].name, "Alice");
+        assert_eq!(tomorrow[0].cash_minor, 900);
+
+        assert!(drawer_by_person(&store, "nobody").is_empty());
 
         let _ = std::fs::remove_file(path);
     }
