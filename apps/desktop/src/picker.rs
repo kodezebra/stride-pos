@@ -1,10 +1,10 @@
-//! Choosing a file to read, or a folder to write into.
+//! Choosing a file to read, or a folder to write into, inside the till.
 //!
-//! The till reads a catalog CSV and writes the books out. Asking for a path
-//! assumes the operator knows what a path is. This picker walks one folder at a
-//! time instead, and deliberately lives inside the app: a native dialog would
-//! be a dependency the offline build does not carry, and it would look nothing
-//! like the rest of the till.
+//! Import and export ask the computer for a path — see `dialog.rs`. This is
+//! what a machine with no chooser of its own gets instead: one folder at a
+//! time, with the till's own shortcuts, and a door to the typed path for a
+//! location that came in an email. Every part of it is drawn by the app, so it
+//! is always there; nothing here assumes the operator knows what a path is.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use ui_shell::egui;
 use ui_shell::regions;
 
 use crate::actions;
-use crate::state::{ImportDraft, State};
+use crate::state::State;
 
 /// What the chosen path is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub enum ExportKind {
 }
 
 impl ExportKind {
-    fn heading(self) -> &'static str {
+    pub(crate) fn heading(self) -> &'static str {
         match self {
             Self::Products => "Save the products on screen",
             Self::AllProducts => "Save the whole catalog",
@@ -241,30 +241,21 @@ fn is_csv(path: &Path) -> bool {
 ///
 /// Called after the modal has been taken down: importing and exporting both
 /// read the whole state, and doing that while the picker still borrows it is
-/// the kind of split borrow the compiler is right to refuse.
+/// the kind of split borrow the compiler is right to refuse. What a chosen path
+/// means is the same whether it came from here or from the system dialog, so
+/// both go through [`State::finish_ask`].
 pub(crate) fn confirm(state: &mut State) {
     let Some(picker) = state.picker.take() else {
         return;
     };
 
-    match picker.purpose {
-        Purpose::Import => {
-            let Some(file) = picker.selected else {
-                state.picker = Some(picker);
-                return;
-            };
-            state.import_dir = file.parent().map(Path::to_path_buf);
-            state.import = Some(ImportDraft {
-                path: file.display().to_string(),
-                error: None,
-            });
-            state.import_products();
-        }
-        Purpose::Export(kind) => {
-            state.export_dir = Some(picker.dir.clone());
-            crate::modules::run_export(state, kind, &picker.dir);
-        }
-    }
+    // An export always points at a folder; an import with nothing selected is
+    // not an answer yet, so the picker stays up.
+    let Some(chosen) = picker.choice().map(Path::to_path_buf) else {
+        state.picker = Some(picker);
+        return;
+    };
+    state.finish_ask(picker.purpose, chosen);
 }
 
 /// The chooser, drawn with the other foreground layers in `shell.rs`.

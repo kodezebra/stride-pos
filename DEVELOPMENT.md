@@ -96,6 +96,37 @@ that names the action.
 Delete `pos.db` to start from an empty till; migrations re-run on next launch.
 `RUST_LOG=debug` for verbose logging.
 
+## File dialogs
+
+Import and export ask the operator for a path. They ask the computer for it, in
+the window every other program on the machine opens (`dialog.rs`): the
+operator's own folders, their own shortcuts, their own places. That window is
+not the till's to draw, style or block on.
+
+| Platform | Window | What it needs |
+|---|---|---|
+| Windows | the common file dialog | nothing |
+| Linux | the desktop portal, `zenity` as fallback | a session bus and a portal backend; or `zenity` on `PATH` |
+
+Nothing is linked against. On Linux the portal is reached through a `libdbus`
+loaded at run time, so a bare image still starts — the release artifacts'
+`libc6` dependency is unchanged. When neither a portal nor `zenity` answers,
+`picker.rs` opens instead: the till's own chooser, drawn by the app, always
+available, one folder at a time.
+
+Which one to use is decided per click, in `dialog::available()`. A dialog cannot
+be told "I never opened" from "the operator cancelled" — both return no path —
+so a reply faster than `dialog::INSTANT` (200 ms) counts as a failure and the
+picker opens in its place. Both routes end in `State::finish_ask`: an import
+reads the file it was given, an export writes into the folder it was given.
+
+The dialog blocks the thread that opened it, so it runs on a worker thread and
+reports through a channel, the same shape as the firewall probe. `shell.rs` polls
+it once a frame and asks for a repaint every 120 ms while a question is open, so
+the answer always lands promptly and never on a frame triggered by the operator.
+The dialog is never parented: the till's raw window handle is not reachable from
+`ui_shell::Shell::ui`, so it is a top-level window of its own.
+
 ## Shared code
 
 The shared crates come from `stride-libs` at a pinned `rev` in

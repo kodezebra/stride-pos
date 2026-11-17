@@ -630,7 +630,11 @@ pub struct State {
     pub import: Option<ImportDraft>,
     /// The file chooser, when an import or an export is choosing a location.
     /// Only one picker exists: closing it returns to whichever screen asked.
+    /// The system's chooser runs outside the app (`dialog.rs`) and only lands
+    /// here when the computer has none to show.
     pub picker: Option<crate::picker::Picker>,
+    /// The computer's own file chooser, while one is open.
+    pub dialog: crate::dialog::Chooser,
     /// The folder the last import came from, so the next one starts there for
     /// the rest of this session.
     pub import_dir: Option<PathBuf>,
@@ -870,6 +874,7 @@ impl State {
             product_editor: None,
             import: None,
             picker: None,
+            dialog: crate::dialog::Chooser::new(),
             import_dir: None,
             export_dir: None,
             product_delete: None,
@@ -2894,27 +2899,101 @@ impl State {
         });
     }
 
-    /// Open the file chooser on the last folder an import came from.
+    /// Ask for the CSV to import, in the computer's own file chooser.
     pub fn start_import_picker(&mut self) {
-        let start = crate::picker::start_dir(self.import_dir.as_deref(), &self.paths.data);
+        self.ask_for_path(crate::picker::Purpose::Import);
+    }
+
+    /// Ask where one of the exports goes, in the computer's own file chooser.
+    ///
+    /// Nothing is written until the operator chooses, so a mis-click on
+    /// "Export CSV" cannot leave a file somewhere unexpected.
+    pub fn start_export(&mut self, kind: crate::picker::ExportKind) {
+        self.ask_for_path(crate::picker::Purpose::Export(kind));
+    }
+
+    /// Ask the computer for a path, and fall back to the till's own chooser
+    /// when it has none to show.
+    fn ask_for_path(&mut self, purpose: crate::picker::Purpose) {
+        // One question at a time: a second dialog would open behind the first.
+        if self.dialog.busy() {
+            return;
+        }
+        let start = self.start_dir_for(purpose);
+        if crate::dialog::available() && self.dialog.ask(purpose, start.clone()) {
+            return;
+        }
+        self.open_picker(purpose, start);
+    }
+
+    /// The till's own chooser, which needs nothing from the desktop.
+    fn open_picker(&mut self, purpose: crate::picker::Purpose, start: PathBuf) {
         self.picker = Some(crate::picker::Picker::open(
-            crate::picker::Purpose::Import,
+            purpose,
             start,
             &self.paths.data,
         ));
     }
 
-    /// Open the folder chooser for one of the exports.
+    /// The folder a question starts in: the last one of its kind, then the
+    /// operator's documents, then the till's own data folder.
+    fn start_dir_for(&self, purpose: crate::picker::Purpose) -> PathBuf {
+        let last = match purpose {
+            crate::picker::Purpose::Import => self.import_dir.as_deref(),
+            crate::picker::Purpose::Export(_) => self.export_dir.as_deref(),
+        };
+        crate::picker::start_dir(last, &self.paths.data)
+    }
+
+    /// Whether a file question is waiting for the operator.
+    pub fn dialog_busy(&self) -> bool {
+        self.dialog.busy()
+    }
+
+    /// Take the answer to a file question, once the operator has given one.
     ///
-    /// Nothing is written until the operator confirms a folder, so a mis-click
-    /// on "Export CSV" can no longer leave a file somewhere unexpected.
-    pub fn start_export(&mut self, kind: crate::picker::ExportKind) {
-        let start = crate::picker::start_dir(self.export_dir.as_deref(), &self.paths.data);
-        self.picker = Some(crate::picker::Picker::open(
-            crate::picker::Purpose::Export(kind),
-            start,
-            &self.paths.data,
-        ));
+    /// Called once a frame: the dialog is the system's window and reports back
+    /// on its own thread.
+    pub fn poll_dialog(&mut self) {
+        let Some(answer) = self.dialog.poll() else {
+            return;
+        };
+        if let Some(path) = answer.path {
+            self.finish_ask(answer.purpose, path);
+            return;
+        }
+        // Cancelled, or never opened at all. Nothing can tell those apart from
+        // the result, but the clock can: see `dialog::INSTANT`.
+        if answer.open_for >= crate::dialog::INSTANT {
+            return;
+        }
+        tracing::warn!(
+            purpose = ?answer.purpose,
+            "the system file chooser did not open; using the till's own"
+        );
+        let start = self.start_dir_for(answer.purpose);
+        self.open_picker(answer.purpose, start);
+    }
+
+    /// Apply a chosen path, from the system dialog or from the till's picker.
+    ///
+    /// One place, because both routes ask the same question: an import reads
+    /// the file it was given, an export writes into the folder it was given.
+    pub(crate) fn finish_ask(&mut self, purpose: crate::picker::Purpose, path: PathBuf) {
+        match purpose {
+            crate::picker::Purpose::Import => {
+                self.import_dir = path.parent().map(PathBuf::from);
+                self.import = Some(ImportDraft {
+                    path: path.display().to_string(),
+                    error: None,
+                });
+                self.import_products();
+            }
+            crate::picker::Purpose::Export(kind) => {
+                self.export_dir = Some(path.clone());
+                crate::modules::run_export(self, kind, &path);
+            }
+        }
     }
 
     /// Read one sale's full record for the detail modal.
@@ -3779,6 +3858,48 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(csv);
+    }
+
+    #[test]
+    fn a_chosen_path_means_the_same_from_either_chooser() {
+        let (mut state, path) = state("finish-ask", Currency::UGX);
+
+        // An import: the file is read and its folder remembered, exactly as it
+        // was when the in-app picker answered the same question.
+        let folder = std::env::temp_dir().join(format!("pos-finish-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        let csv = folder.join("catalog.csv");
+        std::fs::write(
+            &csv,
+            "name,category,price,barcode\nSoap 250g,Household,1200,111\n",
+        )
+        .expect("write csv");
+
+        state.finish_ask(crate::picker::Purpose::Import, csv);
+
+        assert!(
+            state.import.is_none(),
+            "the import ran and its modal closed"
+        );
+        assert_eq!(state.import_dir.as_deref(), Some(folder.as_path()));
+        assert_eq!(state.products.len(), 2, "one seeded, one imported");
+
+        // An export: the folder is remembered and the file lands in it.
+        state.finish_ask(
+            crate::picker::Purpose::Export(crate::picker::ExportKind::AllProducts),
+            folder.clone(),
+        );
+
+        assert_eq!(state.export_dir.as_deref(), Some(folder.as_path()));
+        let written = std::fs::read_dir(&folder)
+            .expect("folder")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "csv"))
+            .count();
+        assert_eq!(written, 2, "the imported catalog and the export beside it");
+
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

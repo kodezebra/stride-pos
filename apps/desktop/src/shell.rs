@@ -200,6 +200,16 @@ impl PosShell {
         self.state.firewall_busy = firewall.busy;
         self.state.firewall_error = firewall.error;
 
+        // A file question is answered in the system's window, on its own
+        // thread. Look for the answer every frame, and keep frames coming while
+        // the question is open: nothing else would wake the till, and the file
+        // would sit unread until the operator touched the window again.
+        self.state.poll_dialog();
+        if self.state.dialog_busy() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
+        }
+
         // Locked is a whole screen, not a modal over the workspace: the takings
         // behind it are the reason for the lock, and a modal leaves them legible
         // around its edges.

@@ -72,6 +72,12 @@ egui = "0.36.2"
 # SVG rendering for icon sets; `egui-lucide` bakes icon paths as SVG.
 egui_extras = { version = "0.36.2", features = ["svg"] }
 egui-lucide = "0.1.0"
+# The computer's own file chooser, for import and export. Nothing is linked
+# against: on Linux it is the desktop portal, reached through a `libdbus` that
+# is loaded at run time (`zenity` when there is none), and on Windows it is the
+# Win32 common dialog. `wayland` is off on purpose — the till never parents the
+# dialog, and that feature would drag wayland crates into the offline build.
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
