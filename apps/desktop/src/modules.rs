@@ -3171,7 +3171,7 @@ impl Module for Purchases {
                         save = true;
                     }
                 }
-                if actions::quiet_compact(ui, "← Restock").clicked() {
+                if actions::quiet_compact(ui, "Back").clicked() {
                     back = true;
                 }
             });
@@ -3457,13 +3457,6 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
         .id_salt("pos_purchase_page")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            components::caption(
-                ui,
-                "A list, not a stock change. Change a quantity to what you \
-                 actually bought, then mark the trip received.",
-            );
-
-            ui.add_space(SPACING.md);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACING.md;
                 ui.vertical(|ui| {
@@ -3518,25 +3511,34 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
             } else {
                 components::divider(ui);
                 for line in &mut draft.lines {
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(44.0);
-                        let name_width = (ui.available_width() - 240.0).max(120.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(name_width, 44.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
+                    // The numbers are a quantity and a unit cost, so the row
+                    // says so with the one symbol that reads as arithmetic:
+                    // 12 x 2,000. The name keeps whatever is left.
+                    let (_, removed) = egui::containers::Sides::new()
+                        .height(44.0)
+                        .shrink_left()
+                        .show(
+                            ui,
                             |ui| {
                                 ui.label(components::semibold(&line.name).size(TYPE.body));
                             },
+                            |ui| {
+                                let mut removed = false;
+                                if components::icon_button(ui, Icon::TRASH, 32.0)
+                                    .on_hover_text("Remove")
+                                    .clicked()
+                                {
+                                    removed = true;
+                                }
+                                text_field(ui, &mut line.cost, "Cost", 110.0);
+                                components::caption(ui, "×");
+                                text_field(ui, &mut line.qty, "Qty", 70.0);
+                                removed
+                            },
                         );
-                        text_field(ui, &mut line.qty, "Qty", 70.0);
-                        text_field(ui, &mut line.cost, "Cost", 110.0);
-                        if components::icon_button(ui, Icon::TRASH, 32.0)
-                            .on_hover_text("Remove")
-                            .clicked()
-                        {
-                            remove_line = Some(line.product_id);
-                        }
-                    });
+                    if removed {
+                        remove_line = Some(line.product_id);
+                    }
                     components::divider(ui);
                 }
             }
@@ -3560,6 +3562,18 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                 );
             } else {
                 components::caption(ui, "Add a quantity and cost to see the trip total.");
+            }
+
+            if draft.id.is_some() {
+                ui.add_space(SPACING.sm);
+                let label = if draft.confirm_delete {
+                    "Tap again to delete this list"
+                } else {
+                    "Delete this list"
+                };
+                if actions::quiet(ui, label).clicked() {
+                    delete = true;
+                }
             }
 
             ui.add_space(SPACING.lg);
@@ -3586,12 +3600,15 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                     ui,
                     "No tracked products yet. Track stock first, then plan a purchase.",
                 );
+            } else if needle.is_empty() {
+                // The catalog is long and the page is short. A list that only
+                // appears once there is something to match keeps the whole
+                // list — and the delete route — on one screen.
+                components::caption(ui, "Type a name or category to add it.");
             } else if matches.is_empty() {
                 components::caption(ui, "No other tracked product matches.");
             } else {
-                // Eight is enough to pick from without scrolling the page; a
-                // longer catalog is reached by typing, which is faster anyway.
-                for (id, name, category) in matches.iter().take(8) {
+                for (id, name, category) in matches.iter().take(6) {
                     let label = if category.is_empty() {
                         name.clone()
                     } else {
@@ -3601,10 +3618,10 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         add_product = Some(*id);
                     }
                 }
-                if matches.len() > 8 {
+                if matches.len() > 6 {
                     components::caption(
                         ui,
-                        &format!("{} more — keep typing to narrow it.", matches.len() - 8),
+                        &format!("{} more — keep typing to narrow it.", matches.len() - 6),
                     );
                 }
             }
@@ -3616,20 +3633,6 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         .size(TYPE.small)
                         .color(ui.visuals().error_fg_color),
                 );
-            }
-
-            if draft.id.is_some() {
-                ui.add_space(SPACING.lg);
-                components::divider(ui);
-                ui.add_space(SPACING.sm);
-                let label = if draft.confirm_delete {
-                    "Tap again to delete this list"
-                } else {
-                    "Delete this list"
-                };
-                if actions::quiet(ui, label).clicked() {
-                    delete = true;
-                }
             }
         });
 
@@ -3700,21 +3703,26 @@ fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
             } else {
                 components::divider(ui);
                 for line in &detail.lines {
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(44.0);
-                        ui.vertical(|ui| {
-                            ui.label(components::semibold(&line.name).size(TYPE.body));
-                            components::caption(ui, &bought_label(line));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(cost) = line.unit_cost_minor {
-                                components::caption(
-                                    ui,
-                                    &format!("{} each", Money::new(cost, currency).format()),
-                                );
-                            }
-                        });
-                    });
+                    egui::containers::Sides::new()
+                        .height(44.0)
+                        .shrink_left()
+                        .show(
+                            ui,
+                            |ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(components::semibold(&line.name).size(TYPE.body));
+                                    components::caption(ui, &bought_label(line));
+                                });
+                            },
+                            |ui| {
+                                if let Some(cost) = line.unit_cost_minor {
+                                    components::caption(
+                                        ui,
+                                        &format!("{} each", Money::new(cost, currency).format()),
+                                    );
+                                }
+                            },
+                        );
                     components::divider(ui);
                 }
             }
