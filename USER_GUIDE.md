@@ -663,9 +663,18 @@ entry error.
 
 ### 8.7 "By person" (shop view only)
 
-Sales count and takings per cashier, revenue descending. This is the fairness and
-coaching table — a second till without this report is a worse till. Cashiers
-never see it (the section is simply absent).
+Sales, cash and takings per cashier, takings descending. **Cash** is what that
+person put in the drawer (rounding included); **Takings** is everything they
+took, however it was paid, so the rows reconcile with the Takings card above. A
+sale from before anyone signed in shows as "No cashier".
+
+This is the fairness and coaching table — a second till without this report is a
+worse till. Cashiers never see it (the section is simply absent).
+
+The same split appears on **Today** (`F2`) inside the **Cash drawer** card,
+scoped to the open drawer rather than the range, and only when more than one
+person has rung a sale. Read it before counting: it names who handled the cash,
+not who is short.
 
 ### 8.8 "Top items"
 
