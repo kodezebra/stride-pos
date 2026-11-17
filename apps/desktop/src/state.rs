@@ -661,8 +661,6 @@ pub struct State {
     /// sale and every movement: a cached count would be the thing that
     /// disagrees with the ledger.
     pub stock: Vec<StockItem>,
-    /// Search across name and category.
-    pub stock_search: String,
     /// `0` all, `1` low, `2` out. The filter a shopkeeper uses standing in
     /// front of the shelf, not a report.
     pub stock_filter: usize,
@@ -884,7 +882,6 @@ impl State {
             supplier_editor: None,
             supplier_archive: None,
             stock,
-            stock_search: String::new(),
             stock_filter: 0,
             stock_editor: None,
             stock_move: None,

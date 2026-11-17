@@ -33,8 +33,8 @@ one file on that machine.
 - Keeps a supplier directory (add, edit, archive)
 - Plans a restocking trip, receives what actually arrived, and records the unit
   cost of each line
-- Shows a dashboard: takings, sales count, busiest hour, top items, per-person
-  share, and profit where costs are known
+- Shows the day's numbers: takings, sales count, average basket, margin, top
+  items, and per-person share
 - Exports products and sales to CSV; imports products from CSV
 - Pairs an Android phone on the same Wi-Fi as a barcode scanner
 - Backs up the database to a folder of the 10 newest copies
@@ -44,7 +44,7 @@ one file on that machine.
 - Payments are **cash only** — no mobile money, no cards
 - Receipts can be previewed and copied as text, but not printed
 - Void, refund and discount have roles defined but **no screens**
-- Inventory counts stock, not cost — there is no full stock valuation yet
+- Stock counting tracks units, not cost — there is no full stock valuation yet
 - Profit appears only for sale lines that had a known cost; it is not a complete
   set of accounts
 - Purchases are local to this till and do not sync between terminals
@@ -70,12 +70,12 @@ one file on that machine.
 |---|---|---|
 | F1 | Sell | the till screen: search/scan, cart, payment |
 | F2 | Day | today's takings and every sale, then the trends |
-| F3 | Shop | the catalogue, stock, restocking and suppliers |
+| F3 | Shop | the catalogue and its stock, restocking, suppliers |
 | F4 | Settings | appearance, receipt preview, scanner, staff, backup |
 
 The second level is a tab above the page, not another key: `F2` lands on
-**Today** (with **Trends** beside it), `F3` on **Catalog** (with **Stock**,
-**Restock** and **Suppliers**). **Settings** puts its sections in the sidebar.
+**Today** (with **Trends** beside it), `F3` on **Catalog** (with **Restock**
+and **Suppliers**). **Settings** puts its sections in the sidebar.
 A cashier sees `F1` and `F2`; the shop and its setup are the manager's.
 
 **The status bar (bottom)** shows: "local only", shortcut hints, the app version,
@@ -83,7 +83,7 @@ your name and role (or "no cashier" if nobody is signed in), and the current car
 ("3 item(s) - 12,000"). There is also a sun/moon button for light/dark.
 
 **Sidebar shortcut** — `Ctrl+B` shows or hides the sidebar. `Ctrl+P` opens the
-command palette (type a few letters of any destination: "dash", "sales", "lock"…).
+command palette (type a few letters of any destination: "today", "catalog", "lock"…).
 
 ### Keyboard shortcuts
 
@@ -97,9 +97,9 @@ command palette (type a few letters of any destination: "dash", "sales", "lock"�
 | `Ctrl+F` | focus the page's search field |
 | `Ctrl+T` | light / dark |
 
-Inside forms and modals, `Enter` saves and `Escape` cancels. In the payment
-modal, `Enter` completes the sale and `Escape` returns to the cart. After a sale,
-`Enter` or `Space` starts the next sale. In a page's search field, `Escape`
+Inside forms, `Enter` saves and `Escape` cancels. While tendering, `Enter`
+completes the sale and `Escape` returns to the cart. After a sale, `Enter` or
+`Space` starts the next sale. In a page's search field, `Escape`
 empties it and keeps the cursor there, ready for the next scan.
 
 ---
@@ -112,9 +112,9 @@ Three roles. The till asks for the person, not a username.
 |---|:---:|:---:|:---:|
 | Sell and take payment | ✓ | ✓ | ✓ |
 | Lock the till | ✓ | ✓ | ✓ |
-| See stock levels | ✓ | ✓ | ✓ |
-| See **own** sales and dashboard | ✓ | ✓ | ✓ |
-| See the **whole shop** sales and dashboard | — | ✓ | ✓ |
+| See stock levels | — | ✓ | ✓ |
+| See **own** sales and trends | ✓ | ✓ | ✓ |
+| See the **whole shop** sales and trends | — | ✓ | ✓ |
 | Void, refund, discount, change a price | — | ✓* | ✓* |
 | Open the drawer without a sale | — | ✓* | ✓* |
 | Edit settings, manage suppliers, adjust stock, plan and receive purchases | — | ✓ | ✓ |
@@ -206,9 +206,9 @@ This is the whole counter flow, from idle till to done.
    stepper on a line to change quantity; going below 1 removes the line.
 5. The right-hand pane shows **Subtotal**, **Tax** (literal "not configured"),
    and **Total**. If rounding will apply, it says "Rounds to *N* in cash".
-6. Press **Pay** (or `Ctrl+Enter` / `F12`). The payment modal opens with the
-   amounts: subtotal, the rounding line only if it moved the figure, and the
-   **To pay** amount in big type.
+6. Press **Pay** (or `Ctrl+Enter` / `F12`). The cart rail turns into the tender:
+   the amounts (subtotal, the rounding line only if it moved the figure, and the
+   **To pay** amount in big type) appear in place, and the grid dims behind it.
 7. Enter the cash received (empty means exact), or tap a quick-tender chip — the
    first chip is always **Exact**; the others round the bill up to the biggest
    circulating notes. The screen shows **Short by …** in red or **Change …** in
@@ -218,8 +218,9 @@ This is the whole counter flow, from idle till to done.
      cash payment, in one transaction;
    - subtracts tracked stock for the items sold;
    - clears the cart and puts the cursor back in the search field at the top for
-     the next customer. There is no confirmation panel to dismiss: the change you read in
-     step 7 is what you hand over, and the receipt is kept on the sale.
+     the next customer. The change you read in step 7 lingers in the rail, with
+     **Copy receipt**, until the next scan or `Escape` — no confirmation panel
+     to dismiss, and the receipt is kept on the sale.
 9. Open **Today** (`F2`) → the sale whenever you need the slip again — lines,
    amount paid, method, change. **Copy receipt** puts it on the clipboard as
    text.
@@ -243,7 +244,7 @@ always match the drawer, not the price list — see §7.3.
 **Morning**
 
 1. Sign in, check **Trends** (`F2`) with range **Today** for yesterday's context,
-   confirm stock warnings under **Stock** (`F3`) (the **Low** and **Out**
+   confirm stock warnings under **Catalog** (`F3`) (the **Low** and **Out**
    filters), and make sure the backup ran (Settings → Terminal → the backup
    folder holds the last 10).
 2. Unlock and open. The status bar shows "local only" — expected.
@@ -315,7 +316,7 @@ The shortfall is not turned into a new list for you: plan the next trip from
 **Add low stock**. A planned list can still be edited or deleted; a received one
 opens read-only, because a stock movement points at its lines.
 
-**If a product is not tracked yet:** track it first (**Stock** (`F3`) → **Track
+**If a product is not tracked yet:** track it first (**Catalog** (`F3`) → **Track
 stock**), because a purchase line needs a shelf count to move. Counting it at the
 same time as the trip is fine — enter what is on the shelf now, then receive the
 new goods.
@@ -348,7 +349,7 @@ new goods.
   scan from the phone with the **Add** action, which pre-fills the barcode (needs
   a manager or the owner for permission).
 - Partial scan? Increase the search text or clear it and rescan.
-- Duplicate barcode on save → another product already uses it; fix in Products.
+- Duplicate barcode on save → another product already uses it; fix in Catalog.
 
 ### 6.2 The cart is wrong
 
@@ -356,7 +357,7 @@ new goods.
   count.
 - Use **− / +** to adjust. Below 1 removes the line. There is no undo: re-add
   the right product.
-- Closing the payment modal (Escape) does not lose the cart.
+- Closing the tender (`Escape`) does not lose the cart.
 - Locking the till (Ctrl+L) does not lose the cart either.
 - `Ctrl+P` → **Clear cart** empties the cart from anywhere.
 
@@ -457,6 +458,12 @@ this — it is how the drawer physically balances.
 
 ### 6.13 Stock tracking, adjustments and history
 
+Stock lives on the catalogue, not on a screen of its own: a tracked product's
+count sits beside its name, and **All / Low / Out** under **Stock** in the
+sidebar narrows the list. The summary above it reads how many products are
+tracked and how many need attention. **Move stock** and **History** sit on each
+tracked row.
+
 - Stock is the **sum of movements** — it is not edited directly.
 - A sale subtracts its quantities automatically.
 - Receiving adds; customer returns add; waste removes.
@@ -505,8 +512,8 @@ this — it is how the drawer physically balances.
 
 ### 6.16 Manager approving something on the spot
 
-- Cashier does the action (scans, presses **Track stock**, something gated).
-  Till shows **"A manager is needed"** (or "The owner is needed" for
+- Cashier does the action (tries to give a discount, change a price, something
+  gated). Till shows **"A manager is needed"** (or "The owner is needed" for
   staff/currency).
 - Manager or owner picks their name, types PIN/password, presses **Approve**.
 - The action is allowed for **one minute**, and the cashier's name stays on the
@@ -538,7 +545,7 @@ Argon2id hashes. Five wrong tries → doubling lockout, capped at 15 minutes.
 
 ### 7.2 Roles and permissions in one line each
 
-- **Cashier** — sells, takes cash, locks, sees own numbers and stock.
+- **Cashier** — sells, takes cash, locks, sees own numbers.
 - **Manager** — everything a cashier does, plus settings, suppliers, stock
   movements, catalogue changes, CSV, backups, and the whole shop's numbers.
 - **Owner** — the back office: staff and currency on top of the manager's set.
@@ -547,7 +554,7 @@ Every nav path (rail, palette, Ctrl+P) goes through the same permission gate, so
 "can't" really means can't — a hidden screen cannot be reached by a shortcut
 either.
 
-### 7.3 How a sale is recorded — and why revenue ≠ the price list
+### 7.3 How a sale is recorded — and why takings ≠ the price list
 
 Each completed sale writes three tables in one transaction:
 
@@ -557,9 +564,9 @@ Each completed sale writes three tables in one transaction:
   goes NULL if the product is deleted.
 - `payments` — one row per tender (always `cash` today).
 
-Revenue everywhere in the app means **paid = total + rounding** — the money that
+Takings everywhere in the app mean **paid = total + rounding** — the money that
 actually entered the drawer — not the sum of price-list amounts. That is why
-today's Dashboard can differ from "what the shelf should have earned".
+today's figures can differ from "what the shelf should have earned".
 
 ### 7.4 Stock is a ledger
 
@@ -580,74 +587,78 @@ Nothing is sent anywhere. There is no account, no telemetry, no cloud.
 
 ---
 
-## 8. Analytics: reading the Dashboard and Sales
+## 8. Analytics: reading the Day
 
 This chapter is the answer to "how do I know how the shop is doing?".
 
-### 8.1 The two screens that report
+### 8.1 The two tabs that report
 
-- **Trends** (`F2`) — the picture: KPIs, the payments and profit cards, the
-  chart, the tables.
-- **Today** (`F2`) — the evidence: the transaction list behind the picture, CSV
-  export, and a tappable receipt behind every row.
+- **Trends** (`F2`) — the picture: three or four KPIs, how it was paid, who took
+  it, the chart, and the best sellers.
+- **Today** (`F2`) — the evidence: the cash drawer, and every sale in the range,
+  with a tappable receipt behind each row.
 
-Both share the same sidebar range selector and the same scope rule: **managers
-and the owner see the whole shop; a cashier sees only their own sales** — unless
-a manager approved the shop view for one minute.
+The scope rule is the same on both: **managers and the owner see the whole shop;
+a cashier sees only their own sales** — unless a manager approved the shop view
+for one minute.
 
 ### 8.2 The range selector
 
+Today offers **Today / 7 days / 30 days / All time**; Trends offers the last
+three — a chart of a single day is a number with a border. Each tab remembers
+its own range while the till is open.
+
+On Trends, each range is compared with the window before it:
+
 | Range | Compared against |
 |---|---|
-| Today | yesterday |
 | Last 7 days | the previous 7 days |
 | Last 30 days | the previous 30 days |
-| All time | nothing — caption "All recorded sales" |
-
-The selection is shared between Dashboard and Sales; switching modules keeps it.
+| All time | nothing — the caption says "everything the shop has sold" |
 
 ### 8.3 The KPI cards, one by one
 
-**Revenue** — sum of `total + rounding` over the range. Shows a trend vs the
+**Takings** — sum of `total + rounding` over the range. Shows a trend vs the
 comparison window: `+12%`-style. `new` if the previous window was zero; `—` if
 both windows were empty or the range is All time. 0% shows as `—`.
 
 **Sales** — count of sales. Same trend format, in units.
 
-**Items sold** — sum of line quantities. Same trend format, in units.
+**Average basket** — takings divided by the number of sales. No trend: a bigger
+basket is not automatically better.
 
-**Busiest hour** — the hour with the most sales (`HH:00`), tie-broken by revenue.
-Sub-line: "N sale(s)". `—` / "no sales" when the range is empty.
+**Gross margin** — only when the shop records costs. The percentage kept on the
+sale lines that had a cost, with the money kept underneath. The fine print is in
+§8.5.
 
-Use Revenue vs Sales together: if revenue rises but sales don't, tickets are
-bigger (upsells or price change). If sales rise but revenue falls, the basket
+Use Takings vs Sales together: if takings rise but sales don't, tickets are
+bigger (upsells or price change). If sales rise but takings fall, the basket
 shrank (discounting, wrong items, freebies).
 
-### 8.4 The Payments card
+### 8.4 "How it was paid"
 
-Lists takings by method — today always **Cash · N sale(s)** — with a **Total**
-row. Amounts are after rounding (what landed in the drawer), never the tendered
-note value or the price list. There is no float/drawer cash-up figure; that is a
-physical count of the drawer, not a database number. Empty state: "No money taken
-yet in this range."
+A table: method, amount taken, and its share of takings. Today it is always
+**Cash**; the table is shaped for the day another method appears. Amounts are
+after rounding (what landed in the drawer), never the tendered note value or the
+price list.
 
-### 8.5 The Profit card
+### 8.5 The margin's fine print
 
-Below Payments. It counts only the sale lines whose product had a cost at the
-time of the sale — a cost comes from receiving a purchase with a unit price.
-Revenue with a known cost, the cost of those items, and the profit between them
-are shown, plus the margin as a percentage.
+The margin counts only the sale lines whose product had a cost at the time of
+the sale — a cost comes from receiving a purchase with a unit price. When every
+line in the range had a cost, nothing more is said. Otherwise a caption says how
+many lines it covers: "Margin covers 12 of 40 sale lines; the rest were sold
+before their cost was known."
 
-The caption says how much of the range it speaks for: "Every sale line in this
-range had a cost" or "12 of 40 sale lines had a cost; the rest are not counted."
 A sale made before the product ever had a cost is left out of both sides rather
-than counted as pure profit. Empty state: "No costs recorded yet."
+than counted as pure profit. If no costs exist at all, the margin card is simply
+absent.
 
-### 8.6 The "Sales by day" chart
+### 8.6 The "By day" chart
 
 - Bars for each day, oldest on the left, violet bars (deliberately not the accent
   blue so money reads differently from everything else).
-- Today/7-day/30-day ranges are **calendar-filled** — days with no sales still
+- The 7-day and 30-day ranges are **calendar-filled** — days with no sales still
   show as zero bars, so a quiet Sunday looks empty, not missing.
 - **All time** shows only selling days — the caption reads "The latest 30 selling
   days".
@@ -683,13 +694,13 @@ was renamed or deleted still groups correctly under its sale-time name. Columns:
 Item / Sold (qty) / Revenue. This is your reorder list, your shelf-layout list,
 and your "why is this always out of stock" list.
 
-### 8.9 "Latest sales" — and the sale detail
+### 8.9 Sale detail
 
-The five most recent sales in the range, tappable. The detail is the receipt:
-shop name, sale number, time, cashier, lines with qty × unit, rounding lines if
-any, total, amount paid, method, and change. **Copy receipt** puts it on the
-clipboard as text — useful for WhatsApp confirmations or dispute handling.
-**Today** (`F2`) lists the same rows for the whole range (max 100).
+**Today** (`F2`) lists every sale in the range (max 100), newest first. Tap a
+row for the receipt: shop name, sale number, time, cashier, lines with qty ×
+unit, rounding lines if any, total, amount paid, method, and change. **Copy
+receipt** puts it on the clipboard as text — useful for WhatsApp confirmations
+or dispute handling.
 
 ### 8.10 Sales export for spreadsheets
 
@@ -710,9 +721,12 @@ a cashier exports only their own sales.
 
 ### 8.12 A weekly rhythm for the owner
 
-1. Monday: **Trends** (`F2`), **Last 7 days**, shop view. Note Revenue trend, Sales trend.
-2. Check **Busiest hour** — is someone rostered?
-3. Check **Top items** vs **Stock** (`F3`) low-stock list — reorder what sells.
+1. Monday: **Trends** (`F2`), **Last 7 days**, shop view. Note the Takings and
+   Sales trends.
+2. Read the two lines under the chart — the best day and the busiest hour. Is
+   someone rostered for the peak?
+3. Check **Top items** against the **Low** filter in **Catalog** (`F3`) —
+   reorder what sells.
 4. Check **By person** — who needs coaching, who ran out of change.
 5. **Today** (`F2`) → **Export**, file it with the week's paper.
 6. Settings → Terminal → **Back up now** if the till has not backed up today.
@@ -724,15 +738,15 @@ a cashier exports only their own sales.
 
 ### 9.1 Keyboard
 
-See §2 table. In dialogs: `Enter` = default action, `Escape` = close. Payment
-modal: `Enter` completes, `Escape` back to cart, after sale `Enter`/`Space` = new
-sale.
+See §2 table. In dialogs: `Enter` = default action, `Escape` = close. While
+tendering: `Enter` completes, `Escape` back to cart, after sale `Enter`/`Space` =
+new sale.
 
 ### 9.2 Command palette (Ctrl+P)
 
-Go to Sell · Go to Dashboard · Go to Products · Go to Sales · Go to Settings ·
-Go to Suppliers · Go to Inventory · Go to Restock · Toggle sidebar · Toggle
-theme · Take payment · Clear cart · Lock till.
+Go to Sell · Go to Today · Go to Trends · Go to Catalog · Go to Restock ·
+Go to Suppliers · Go to Settings · Toggle sidebar · Toggle theme · Take payment ·
+Clear cart · Lock till.
 
 ### 9.3 Files and folders
 
@@ -777,7 +791,7 @@ internet, ever — do not port-forward it.
 | Sign-in rejects correct PIN | lockout active | wait for countdown; owner can reset PIN |
 | Recovery code not accepted | mistyped or already used | codes are single-use; a used one is replaced — use the latest |
 | Owner can't change currency | till has sales | by design — totals can never be re-priced |
-| Dashboard shows only my sales | signed in as cashier | manager approval or sign in as manager/owner |
+| Trends shows only my sales | signed in as cashier | manager approval or sign in as manager/owner |
 | Barcode imports lose leading zeros | Excel auto-format | pre-format the column as text in the spreadsheet |
 | Export greyed / nothing to export | Sales range empty, or nothing visible | widen the range; check search/category filter |
 | Receipt shows app name instead of shop | shop name not saved | Settings → Terminal → type → Save |
@@ -792,7 +806,7 @@ internet, ever — do not port-forward it.
 - Cash only; no mobile money or card tender UI (`payments.method` is `cash`)
 - No printed receipts — copy the confirmation slip as text instead
 - Void / refund / discount / drawer-open are permissioned but have no screens
-- Inventory counts units, not value; a purchase can record a unit cost, but there
+- Stock counting tracks units, not value; a purchase can record a unit cost, but there
   is no full stock valuation
 - Tax is not configured anywhere; cart prints "not configured"
 - No held/parked carts; abandoning a sale means emptying the cart

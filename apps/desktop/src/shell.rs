@@ -539,6 +539,7 @@ impl PosShell {
     fn persist(&mut self) {
         if self.state.prefs_dirty {
             let prefs = Prefs {
+                version: Prefs::CURRENT,
                 module: self.state.module,
                 sidebar: self.state.sidebar_open.clone(),
             };
