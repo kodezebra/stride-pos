@@ -29,6 +29,13 @@ pub struct CartLine {
     pub qty: i64,
     /// Price per unit, in minor units.
     pub unit_minor: i64,
+    /// How many base units one line unit holds: `1` for a loose unit, the pack
+    /// size for a sealed pack. Stock leaves the shelf by this, and the line is
+    /// merged by `(product_id, unit_factor)` so a pack and a loose unit never
+    /// collapse into one row.
+    pub unit_factor: i64,
+    /// What that unit was called at the time, when it was anything but `unit`.
+    pub unit_label: Option<String>,
 }
 
 impl CartLine {
@@ -45,9 +52,11 @@ impl CartLine {
 /// is one tap rather than a Clear and a five.
 #[derive(Debug)]
 pub struct CartQuantity {
-    /// The product the row belongs to. A product appears at most once in the
-    /// cart, so this survives a row being removed while the modal is open.
+    /// The product the row belongs to. A product can appear twice — loose and
+    /// as a pack — so the factor is part of the identity too.
     pub product_id: i64,
+    /// Which of the product's lines this editor is for.
+    pub unit_factor: i64,
     pub digits: String,
     /// True until the first key: tapping `5` should mean five, not fifteen.
     pub replace: bool,
@@ -59,9 +68,10 @@ pub struct CartQuantity {
 }
 
 impl CartQuantity {
-    pub fn new(product_id: i64, qty: i64) -> Self {
+    pub fn new(product_id: i64, unit_factor: i64, qty: i64) -> Self {
         Self {
             product_id,
+            unit_factor,
             digits: qty.to_string(),
             replace: true,
             focus: true,
@@ -114,6 +124,21 @@ pub struct ProductDraft {
     #[allow(dead_code)]
     pub category_id: Option<i64>,
     pub barcode: String,
+    /// What one base unit is called: `tablet`, `sachet`, `unit`.
+    pub unit_label: String,
+    /// How many base units one sealed pack holds, as typed.
+    pub pack_size: String,
+    /// The sealed pack's price, as typed. Empty when there is no pack.
+    pub pack_price: String,
+    /// The barcode printed on the box.
+    pub pack_barcode: String,
+    /// The tablet price this form last filled from the pack price. `None` while
+    /// empty or after the operator clears it.
+    derived_price_minor: Option<i64>,
+    /// Set for good the first time the operator touches the price field. A
+    /// cleared field stays theirs: the helper must not grab an empty box back
+    /// and turn the next keystroke into "283".
+    price_typed: bool,
     pub error: Option<String>,
 }
 
@@ -126,8 +151,57 @@ impl ProductDraft {
             category,
             category_id,
             barcode: String::new(),
+            unit_label: "unit".to_owned(),
+            pack_size: "1".to_owned(),
+            pack_price: String::new(),
+            pack_barcode: String::new(),
+            derived_price_minor: None,
+            price_typed: false,
             error: None,
         }
+    }
+
+    /// A pack size typed into the form, or `None` while it is not a number.
+    fn parsed_pack_size(&self) -> Option<i64> {
+        match self.pack_size.trim() {
+            "" => Some(1),
+            text => text.parse::<i64>().ok().filter(|size| *size >= 1),
+        }
+    }
+
+    /// Fill the loose price from the pack price, rounded up to the next unit.
+    ///
+    /// A shop that prices a box at 2,800 for 100 knows each tablet must be at
+    /// least 28 to break even on the box; rounding up rather than down keeps
+    /// the loose sale from losing money. The helper only owns a price it filled
+    /// itself: once the operator types their own, this leaves it alone.
+    pub fn sync_price_from_pack(&mut self, currency: Currency) {
+        let Some(size) = self.parsed_pack_size().filter(|size| *size > 1) else {
+            return;
+        };
+        let Ok(pack_price) = Money::parse(self.pack_price.trim(), currency) else {
+            return;
+        };
+        if pack_price.minor() < 0 {
+            return;
+        }
+        if self.price_typed {
+            return;
+        }
+        let each = pack_price.minor() / size + i64::from(pack_price.minor() % size != 0);
+        if self.derived_price_minor != Some(each) {
+            self.price = plain_amount(each, currency);
+            self.derived_price_minor = Some(each);
+        }
+    }
+
+    /// Stop the pack-price helper from touching a price the operator typed.
+    ///
+    /// This sticks even if they clear the field afterwards; it is their field
+    /// now, and the helper refilling it would fight the next keystroke.
+    pub fn note_price_typed(&mut self) {
+        self.price_typed = true;
+        self.derived_price_minor = None;
     }
 }
 
@@ -256,6 +330,9 @@ pub struct PurchaseLineDraft {
     pub name: String,
     pub qty: String,
     pub cost: String,
+    /// How many base units one ordered unit holds. Prefilled from the product
+    /// but editable: the shop may buy loose this week and a boxed pack next.
+    pub pack_size: String,
 }
 
 /// A purchase being planned or edited, open as the Restock page.
@@ -1817,23 +1894,44 @@ impl State {
 
     /// Add one unit of a product, merging with an existing line.
     ///
-    /// Scanning the same barcode twice should read "2 × Espresso", not two
-    /// lines: the cashier checks quantities, not line counts. The line keeps the
-    /// name and price it was added at, so editing the catalog mid-sale cannot
-    /// silently reprice something already in the basket.
-    pub fn add_to_cart(&mut self, product: &Product) {
+    /// `unit_factor` is `1` for a loose unit and the pack size for a sealed
+    /// pack. A pack and a loose unit are different lines even though they are
+    /// the same catalog row: the price and what leaves the shelf differ, and
+    /// merging them would erase that. Scanning the same barcode twice still
+    /// reads "2 × Espresso", not two lines: the cashier checks quantities, not
+    /// line counts. The line keeps the name and price it was added at, so
+    /// editing the catalog mid-sale cannot silently reprice something already
+    /// in the basket.
+    pub fn add_to_cart(&mut self, product: &Product, unit_factor: i64) {
         self.notice = None;
+        let unit_factor = unit_factor.max(1);
+        let (unit_minor, unit_label) = if unit_factor > 1 {
+            let Some(pack_price) = product.pack_price_minor else {
+                self.notice = Some(format!(
+                    "{} has no pack price yet; set one in the catalog.",
+                    product.name
+                ));
+                return;
+            };
+            (pack_price, Some(format!("pack of {unit_factor}")))
+        } else {
+            let label = (product.unit_label != "unit").then(|| product.unit_label.clone());
+            (product.price_minor, label)
+        };
+
         match self
             .cart
             .iter_mut()
-            .find(|line| line.product_id == product.id)
+            .find(|line| line.product_id == product.id && line.unit_factor == unit_factor)
         {
             Some(line) => line.qty += 1,
             None => self.cart.push(CartLine {
                 product_id: product.id,
                 name: product.name.clone(),
                 qty: 1,
-                unit_minor: product.price_minor,
+                unit_minor,
+                unit_factor,
+                unit_label,
             }),
         }
     }
@@ -1845,7 +1943,11 @@ impl State {
     /// changes.
     pub fn edit_cart_quantity(&mut self, index: usize) {
         if let Some(line) = self.cart.get(index) {
-            self.cart_quantity = Some(CartQuantity::new(line.product_id, line.qty));
+            self.cart_quantity = Some(CartQuantity::new(
+                line.product_id,
+                line.unit_factor,
+                line.qty,
+            ));
         }
     }
 
@@ -1859,14 +1961,14 @@ impl State {
     /// removing the line: the modal has a separate Cancel, and deleting stock
     /// because a field was empty is not a safe default. The caller decides how
     /// to surface the rejection.
-    pub fn set_cart_quantity(&mut self, product_id: i64, qty: i64) {
+    pub fn set_cart_quantity(&mut self, product_id: i64, unit_factor: i64, qty: i64) {
         if qty <= 0 {
             return;
         }
         let Some(line) = self
             .cart
             .iter_mut()
-            .find(|line| line.product_id == product_id)
+            .find(|line| line.product_id == product_id && line.unit_factor == unit_factor)
         else {
             return;
         };
@@ -1964,6 +2066,16 @@ impl State {
             category: product.category.clone(),
             category_id: product.category_id,
             barcode: product.barcode.clone().unwrap_or_default(),
+            unit_label: product.unit_label.clone(),
+            pack_size: product.pack_size.to_string(),
+            pack_price: product
+                .pack_price_minor
+                .map(|price| plain_amount(price, self.currency))
+                .unwrap_or_default(),
+            pack_barcode: product.pack_barcode.clone().unwrap_or_default(),
+            derived_price_minor: None,
+            // An existing price is the shop's, not the helper's.
+            price_typed: true,
             error: None,
         });
         self.product_delete = None;
@@ -1984,10 +2096,17 @@ impl State {
         let category = draft.category.trim().to_owned();
         let barcode = draft.barcode.trim().to_owned();
         let price_text = draft.price.trim().to_owned();
+        let unit_label = draft.unit_label.trim().to_owned();
+        let pack_size = draft.parsed_pack_size();
+        let pack_price_text = draft.pack_price.trim().to_owned();
+        let pack_barcode = draft.pack_barcode.trim().to_owned();
 
         if name.is_empty() {
             return self.editor_error("A product needs a name.");
         }
+        let Some(pack_size) = pack_size else {
+            return self.editor_error("A pack size must be a whole number of one or more.");
+        };
         // An unnamed category is not worth an error: a product whose shelf has
         // no name yet still sells, so it lands in the default one instead of
         // stopping the save.
@@ -2012,32 +2131,46 @@ impl State {
             Err(error) => return self.editor_error(error.to_string()),
         };
 
+        // A pack of one is the base unit, so a second price for it is not a
+        // second price; the database drops it deliberately. Below two, whatever
+        // was typed in the pack fields is ignored rather than rejected, because
+        // the form keeps stale text when the operator changes the size back.
+        let pack_price_minor = if pack_size <= 1 || pack_price_text.is_empty() {
+            None
+        } else {
+            match Money::parse(&pack_price_text, self.currency) {
+                Ok(price) if price.minor() >= 0 => Some(price.minor()),
+                Ok(_) => return self.editor_error("A pack price cannot be negative."),
+                Err(error) => return self.editor_error(error.to_string()),
+            }
+        };
+
         let barcode = (!barcode.is_empty()).then_some(barcode);
-        if let Some(code) = barcode.as_deref()
-            && crate::db::barcode_taken(&self.store, code, id)
+        let pack_barcode = (pack_size > 1 && !pack_barcode.is_empty()).then_some(pack_barcode);
+        for code in [barcode.as_deref(), pack_barcode.as_deref()]
+            .into_iter()
+            .flatten()
         {
-            return self.editor_error("Another product already uses that barcode.");
+            if crate::db::barcode_taken(&self.store, code, id) {
+                return self.editor_error("Another product already uses that barcode.");
+            }
         }
 
+        let fields = crate::db::ProductFields {
+            name: &name,
+            price_minor,
+            category: &category,
+            category_id,
+            barcode: barcode.as_deref(),
+            unit_label: &unit_label,
+            pack_size,
+            pack_price_minor,
+            pack_barcode: pack_barcode.as_deref(),
+        };
+
         let result = match id {
-            Some(id) => crate::db::update_product(
-                &self.store,
-                id,
-                &name,
-                price_minor,
-                &category,
-                category_id,
-                barcode.as_deref(),
-            ),
-            None => crate::db::insert_product(
-                &self.store,
-                &name,
-                price_minor,
-                &category,
-                category_id,
-                barcode.as_deref(),
-            )
-            .map(|_| ()),
+            Some(id) => crate::db::update_product(&self.store, id, &fields),
+            None => crate::db::insert_product(&self.store, &fields).map(|_| ()),
         };
 
         match result {
@@ -2446,6 +2579,7 @@ impl State {
                     .unit_cost_minor
                     .map(|cost| plain_amount(cost, currency))
                     .unwrap_or_default(),
+                pack_size: line.pack_size.to_string(),
             })
             .collect();
 
@@ -2464,11 +2598,18 @@ impl State {
 
     /// Add one tracked product to the plan being edited.
     pub fn purchase_add_product(&mut self, product_id: i64) {
-        let Some((name, cost)) = self
+        let Some((name, cost, pack_size)) = self
             .stock
             .iter()
             .find(|item| item.product_id == product_id)
-            .map(|item| (item.name.clone(), item.cost_minor))
+            .map(|item| {
+                let cost = if item.pack_size > 1 {
+                    item.pack_cost_minor()
+                } else {
+                    item.unit_cost_minor()
+                };
+                (item.name.clone(), cost, item.pack_size)
+            })
         else {
             return;
         };
@@ -2486,6 +2627,7 @@ impl State {
             cost: cost
                 .map(|cost| plain_amount(cost, currency))
                 .unwrap_or_default(),
+            pack_size: pack_size.to_string(),
         });
         draft.error = None;
     }
@@ -2501,17 +2643,27 @@ impl State {
         };
         let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
         let currency = self.currency;
-        let suggestions: Vec<(i64, String, i64, Option<i64>)> = self
+        let suggestions: Vec<(i64, String, i64, Option<i64>, i64)> = self
             .stock
             .iter()
             .filter(|item| item.needs_restock() && !already.contains(&item.product_id))
             .map(|item| {
-                (
-                    item.product_id,
-                    item.name.clone(),
-                    item.suggested(),
-                    item.cost_minor,
-                )
+                let pack_size = item.pack_size.max(1);
+                // The suggestion is in base units; a purchase line counts
+                // ordered units. Ordering whole packs round up, so the trip
+                // still covers the gap.
+                let units = item.suggested();
+                let qty = if pack_size > 1 {
+                    (units + pack_size - 1) / pack_size
+                } else {
+                    units
+                };
+                let cost = if pack_size > 1 {
+                    item.pack_cost_minor()
+                } else {
+                    item.unit_cost_minor()
+                };
+                (item.product_id, item.name.clone(), qty, cost, pack_size)
             })
             .collect();
 
@@ -2527,7 +2679,7 @@ impl State {
             return;
         }
 
-        for (product_id, name, qty, cost) in suggestions {
+        for (product_id, name, qty, cost, pack_size) in suggestions {
             draft.lines.push(PurchaseLineDraft {
                 product_id,
                 name,
@@ -2535,6 +2687,7 @@ impl State {
                 cost: cost
                     .map(|cost| plain_amount(cost, currency))
                     .unwrap_or_default(),
+                pack_size: pack_size.to_string(),
             });
         }
         draft.error = None;
@@ -2605,10 +2758,23 @@ impl State {
             let unit_cost_minor = self
                 .parse_cost(&line.cost)
                 .map_err(|message| format!("{}: {message}", line.name))?;
+            let pack_size = match line.pack_size.trim() {
+                "" => 1,
+                text => match text.parse::<i64>() {
+                    Ok(size) if size >= 1 => size,
+                    _ => {
+                        return Err(format!(
+                            "{} needs a whole pack size of one or more.",
+                            line.name
+                        ));
+                    }
+                },
+            };
             lines.push(crate::db::PurchaseLineInput {
                 product_id: line.product_id,
                 qty,
                 unit_cost_minor,
+                pack_size,
             });
         }
         Ok(lines)
@@ -2746,6 +2912,7 @@ impl State {
                 product_id: line.product_id,
                 qty: line.qty,
                 unit_cost_minor: line.unit_cost_minor,
+                pack_size: line.pack_size,
             });
         }
         // A line that is no longer on the sheet was a planning mistake. It can
@@ -2762,7 +2929,7 @@ impl State {
             user_id.as_deref(),
         ) {
             Ok(()) => {
-                let units: i64 = received.iter().map(|line| line.qty).sum();
+                let units: i64 = received.iter().map(|line| line.qty * line.pack_size).sum();
                 self.purchase_editor = None;
                 self.purchase_view = None;
                 self.reload_purchases();
@@ -2834,22 +3001,29 @@ impl State {
         let mut skipped = errors.len();
 
         for row in rows {
-            if row
-                .barcode
-                .as_deref()
-                .is_some_and(|code| crate::db::barcode_taken(&self.store, code, None))
+            // Both barcode columns share one namespace: checking only the loose
+            // one would let a pack code collide with another product's code.
+            let codes = [row.barcode.as_deref(), row.pack_barcode.as_deref()];
+            if codes
+                .into_iter()
+                .flatten()
+                .any(|code| crate::db::barcode_taken(&self.store, code, None))
             {
                 skipped += 1;
                 continue;
             }
-            if let Err(error) = crate::db::insert_product(
-                &self.store,
-                &row.name,
-                row.price_minor,
-                &row.category,
-                None,
-                row.barcode.as_deref(),
-            ) {
+            let fields = crate::db::ProductFields {
+                name: &row.name,
+                price_minor: row.price_minor,
+                category: &row.category,
+                category_id: None,
+                barcode: row.barcode.as_deref(),
+                unit_label: &row.unit_label,
+                pack_size: row.pack_size,
+                pack_price_minor: row.pack_price_minor,
+                pack_barcode: row.pack_barcode.as_deref(),
+            };
+            if let Err(error) = crate::db::insert_product(&self.store, &fields) {
                 // The catalog's own rejects count like the file's: a row the
                 // till cannot take does not stop the others.
                 tracing::warn!(error = %error, "a CSV row could not be saved");
@@ -3133,6 +3307,8 @@ impl State {
                 name: line.name.clone(),
                 qty: line.qty,
                 unit_minor: line.unit_minor,
+                unit_factor: line.unit_factor,
+                unit_label: line.unit_label.clone(),
             })
             .collect();
 
@@ -3257,8 +3433,7 @@ mod tests {
         store.migrate(crate::db::MIGRATIONS).expect("migrate");
         // A cart only ever holds real products — `sale_lines.product_id` is a
         // foreign key — so the first row is the one `line()` points at.
-        crate::db::insert_product(&store, "Test item", 100, "Test", None, None)
-            .expect("seed product");
+        seed_product(&store, "Test item", 100, None);
         let mut state = State::new(
             store,
             0,
@@ -3296,7 +3471,53 @@ mod tests {
             name: name.to_owned(),
             qty,
             unit_minor,
+            unit_factor: 1,
+            unit_label: None,
         }
+    }
+
+    /// Seed a plain, loose product row, bypassing the form draft.
+    fn seed_product(store: &storage::Store, name: &str, price: i64, barcode: Option<&str>) {
+        crate::db::insert_product(
+            store,
+            &crate::db::ProductFields {
+                name,
+                price_minor: price,
+                category: "Test",
+                category_id: None,
+                barcode,
+                unit_label: "unit",
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+            },
+        )
+        .expect("seed product");
+    }
+
+    /// Seed a pack product: one tablet price, one box price, no codes.
+    fn seed_pack(
+        store: &storage::Store,
+        name: &str,
+        price: i64,
+        pack_size: i64,
+        pack_price: Option<i64>,
+    ) -> i64 {
+        crate::db::insert_product(
+            store,
+            &crate::db::ProductFields {
+                name,
+                price_minor: price,
+                category: "Test",
+                category_id: None,
+                barcode: None,
+                unit_label: "tablet",
+                pack_size,
+                pack_price_minor: pack_price,
+                pack_barcode: None,
+            },
+        )
+        .expect("seed pack")
     }
 
     /// A trip that was never saved is still a trip: planning at the market and
@@ -3323,6 +3544,7 @@ mod tests {
                 name: "Test item".to_owned(),
                 qty: "3".to_owned(),
                 cost: "500".to_owned(),
+                pack_size: "1".to_owned(),
             });
 
         assert_eq!(state.stock[0].on_hand, 0, "a plan moves no stock");
@@ -3345,8 +3567,7 @@ mod tests {
     #[test]
     fn an_unsaved_trip_can_count_a_line_at_zero() {
         let (mut state, path) = state("receive-unsaved-zero", Currency::UGX);
-        crate::db::insert_product(&state.store, "Soap", 200, "Test", None, None)
-            .expect("seed product");
+        seed_product(&state.store, "Soap", 200, None);
         state
             .store
             .conn()
@@ -3366,6 +3587,7 @@ mod tests {
                     name: name.to_owned(),
                     qty: qty.to_owned(),
                     cost: String::new(),
+                    pack_size: "1".to_owned(),
                 });
         }
         state.receive_purchase();
@@ -3399,8 +3621,7 @@ mod tests {
     fn a_received_trip_keeps_the_difference_between_plan_and_count() {
         let (mut state, path) = state("receive-short", Currency::UGX);
         for (name, price) in [("Test item", 100), ("Soap", 200), ("Tea", 300)] {
-            crate::db::insert_product(&state.store, name, price, "Test", None, None)
-                .expect("seed product");
+            seed_product(&state.store, name, price, None);
         }
         state
             .store
@@ -3422,6 +3643,7 @@ mod tests {
                     name: name.to_owned(),
                     qty: qty.to_owned(),
                     cost: "500".to_owned(),
+                    pack_size: "1".to_owned(),
                 });
         }
         state.save_purchase();
@@ -3561,7 +3783,7 @@ mod tests {
         assert_eq!(editor.value(), Some(50), "later keys append");
 
         assert_eq!(state.cart[0].qty, 1, "nothing changes until Set");
-        state.set_cart_quantity(1, 50);
+        state.set_cart_quantity(1, 1, 50);
         assert_eq!(state.cart[0].qty, 50);
         assert!(state.cart_quantity.is_none(), "Set closes the editor");
 
@@ -3581,7 +3803,7 @@ mod tests {
         editor.push_digit('0');
         assert_eq!(editor.value(), None);
 
-        state.set_cart_quantity(1, 0);
+        state.set_cart_quantity(1, 1, 0);
         assert_eq!(state.cart[0].qty, 1);
         assert!(
             state.cart_quantity.is_some(),
@@ -3729,6 +3951,12 @@ mod tests {
             category: "   ".to_owned(),
             category_id: None,
             barcode: String::new(),
+            unit_label: "unit".to_owned(),
+            pack_size: "1".to_owned(),
+            pack_price: String::new(),
+            pack_barcode: String::new(),
+            derived_price_minor: None,
+            price_typed: true,
             error: None,
         });
         state.save_product();
@@ -4061,5 +4289,125 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A pack and a loose tablet are one product but two lines: adding the box
+    /// must not merge into the loose row, and editing one count leaves the
+    /// other alone.
+    #[test]
+    fn a_pack_and_a_loose_unit_are_two_cart_lines() {
+        let (mut state, path) = state("cart-pack", Currency::UGX);
+        let id = seed_pack(&state.store, "Amoxicillin", 30, 100, Some(2_800));
+        state.reload_products();
+        let product = state
+            .products
+            .iter()
+            .find(|product| product.id == id)
+            .expect("the pack product")
+            .clone();
+
+        state.add_to_cart(&product, 1);
+        state.add_to_cart(&product, 100);
+        state.add_to_cart(&product, 100);
+
+        assert_eq!(state.cart.len(), 2, "loose and sealed do not merge");
+        let loose = &state.cart[0];
+        assert_eq!((loose.qty, loose.unit_factor), (1, 1));
+        assert_eq!(loose.unit_minor, 30);
+        assert_eq!(loose.unit_label.as_deref(), Some("tablet"));
+        let pack = &state.cart[1];
+        assert_eq!((pack.qty, pack.unit_factor), (2, 100));
+        assert_eq!(pack.unit_minor, 2_800);
+        assert_eq!(pack.unit_label.as_deref(), Some("pack of 100"));
+        assert_eq!(pack.total_minor(), 5_600);
+
+        state.set_cart_quantity(id, 100, 3);
+        assert_eq!(state.cart[1].qty, 3, "the box count changed");
+        assert_eq!(state.cart[0].qty, 1, "the loose count did not");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A box with no price cannot be sold: charging the tablet price for a
+    /// hundred tablets would be a giveaway, and guessing would be worse.
+    #[test]
+    fn a_pack_without_a_price_is_refused() {
+        let (mut state, path) = state("cart-pack-unpriced", Currency::UGX);
+        let id = seed_pack(&state.store, "Amoxicillin", 30, 100, None);
+        state.reload_products();
+        let product = state
+            .products
+            .iter()
+            .find(|product| product.id == id)
+            .expect("the pack product")
+            .clone();
+
+        state.add_to_cart(&product, 100);
+
+        assert!(state.cart.is_empty());
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("no pack price")),
+            "{:?}",
+            state.notice
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The pack price pre-fills the tablet price rounded up, keeps following it
+    /// while untouched, and stops the moment the operator types their own.
+    #[test]
+    fn the_pack_price_helper_yields_to_a_typed_price() {
+        let mut draft = ProductDraft::new("Medicine".to_owned(), None);
+        draft.unit_label = "tablet".to_owned();
+        draft.pack_size = "100".to_owned();
+        draft.pack_price = "2800".to_owned();
+
+        draft.sync_price_from_pack(Currency::UGX);
+        assert_eq!(draft.price, "28", "2,800 / 100");
+
+        draft.pack_price = "2900".to_owned();
+        draft.sync_price_from_pack(Currency::UGX);
+        assert_eq!(draft.price, "29", "the helper still owns the field");
+
+        draft.note_price_typed();
+        draft.price = "35".to_owned();
+        draft.pack_price = "5000".to_owned();
+        draft.sync_price_from_pack(Currency::UGX);
+        assert_eq!(draft.price, "35", "a typed price is the operator's");
+    }
+
+    /// Clearing the price to retype it must not let the helper refill the box;
+    /// the next keystroke would land after the helper's digits.
+    #[test]
+    fn a_cleared_price_stays_cleared() {
+        let mut draft = ProductDraft::new("Medicine".to_owned(), None);
+        draft.pack_size = "100".to_owned();
+        draft.pack_price = "2800".to_owned();
+
+        draft.sync_price_from_pack(Currency::UGX);
+        assert_eq!(draft.price, "28");
+
+        draft.note_price_typed();
+        draft.price.clear();
+        draft.sync_price_from_pack(Currency::UGX);
+
+        assert_eq!(draft.price, "");
+    }
+
+    /// Rounding up keeps the loose sale from losing money on the box: 2,801
+    /// over 100 is 28.01, and selling at 28 would give the box away.
+    #[test]
+    fn the_pack_price_helper_rounds_up_not_down() {
+        let mut draft = ProductDraft::new("Medicine".to_owned(), None);
+        draft.pack_size = "100".to_owned();
+        draft.pack_price = "2801".to_owned();
+
+        draft.sync_price_from_pack(Currency::UGX);
+
+        assert_eq!(draft.price, "29");
     }
 }
