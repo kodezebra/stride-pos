@@ -41,6 +41,9 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
     let due_minor = state.due_minor();
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
+    // The field carries the currency as a prefix, so its hint is the bare
+    // number: "UGX" and "USh 3000" together read as two currencies.
+    let due_hint = crate::state::plain_amount(due_minor, currency);
 
     // Everything below draws the form; the keys are routed by `shell`, so a
     // focused field and a bare counter top behave the same.
@@ -82,7 +85,13 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
     ui.add_space(SPACING.xs);
 
     let mut edited = false;
-    let field = crate::modules::text_field(ui, &mut payment.tendered, &due, ui.available_width());
+    let field = crate::modules::prefixed_field(
+        ui,
+        &mut payment.tendered,
+        currency.code(),
+        &due_hint,
+        ui.available_width(),
+    );
     if payment.focus {
         field.request_focus();
         payment.focus = false;
@@ -101,7 +110,7 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
     ui.add_space(SPACING.xs);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-        for &amount in quick_amounts(currency, due_minor).iter().take(4) {
+        for &amount in &quick_amounts(currency, due_minor) {
             let exact_amount = amount == due_minor;
             let label = if exact_amount {
                 "Exact".to_owned()
@@ -113,7 +122,7 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
                     .size(TYPE.small)
                     .family(theme::semibold()),
             )
-            .min_size(egui::vec2(0.0, 34.0));
+            .min_size(egui::vec2(0.0, 44.0));
 
             let hint = if exact_amount {
                 format!("Tender the exact {due}")
@@ -231,39 +240,47 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State) {
 
 /// How many one-tap amounts the tender panel offers, exact amount included.
 ///
-/// Three handovers above the bill is what a customer's pocket realistically
-/// holds; past that the strip stops being a shortcut and becomes the currency.
-const QUICK_AMOUNTS: usize = 5;
+/// A bill is settled with a handful of notes; past four chips the strip stops
+/// being a shortcut and becomes the currency.
+const QUICK_AMOUNTS: usize = 4;
 
-/// The amounts worth one tap, in order: the exact total first, then the bill
-/// rounded up to each of the biggest notes, smallest first.
+/// The amounts worth one tap, in order: the exact total first, then the notes
+/// that can cover it, smallest first.
 ///
-/// A chip is an amount, not a note. A 27,500 bill is settled with a twenty and
-/// a ten (30,000) or with two twenties (40,000) at least as often as with a
-/// single 50,000, so each big note is a step the bill is rounded up to rather
-/// than a chip in its own right. That is also why a total that lands on a note
-/// still gets the round-ups above it: the customer holding two notes of the
-/// exact amount is not the common case.
+/// A chip is a note the drawer holds, not a round-up. A 27,500 bill is settled
+/// with a 50,000 note, not with an invented 30,000; a 12,400 bill never offers
+/// 15,000. When the bill is larger than every note, the smallest multiple of
+/// the largest note that covers it is offered instead — two 50,000s for 60,000.
 ///
-/// Only the biggest notes are steps. Below them rounding turns into change
-/// counting — nobody is helped by a chip that turns 12,400 into 12,500 — and
-/// nothing under the total is offered at all, because it can only produce a
+/// Nothing under the total is offered at all, because it can only produce a
 /// "Short by" line.
 fn quick_amounts(currency: money::Currency, due_minor: i64) -> Vec<i64> {
+    let notes = crate::currencies::denominations(currency);
     let mut amounts = Vec::with_capacity(QUICK_AMOUNTS);
     amounts.push(due_minor);
-    // Denominations are ascending, so the biggest notes are at the end.
-    for &step in crate::currencies::denominations(currency)
-        .iter()
-        .rev()
-        .take(QUICK_AMOUNTS - 1)
-    {
-        let rounded = due_minor - due_minor.rem_euclid(step) + step;
-        if !amounts.contains(&rounded) {
-            amounts.push(rounded);
+
+    // Denominations are ascending, so the notes at or above the bill are the
+    // ones a single hand can cover it with.
+    for &note in notes.iter().filter(|&&note| note >= due_minor) {
+        if amounts.len() == QUICK_AMOUNTS {
+            break;
+        }
+        if !amounts.contains(&note) {
+            amounts.push(note);
         }
     }
-    amounts.sort_unstable();
+
+    // A bill bigger than every note is paid with several of the biggest.
+    if let Some(&largest) = notes.last()
+        && due_minor > largest
+        && amounts.len() < QUICK_AMOUNTS
+    {
+        let multiple = due_minor - due_minor.rem_euclid(largest) + largest;
+        if !amounts.contains(&multiple) {
+            amounts.push(multiple);
+        }
+    }
+
     amounts
 }
 
@@ -314,29 +331,36 @@ mod tests {
     use money::Currency;
 
     #[test]
-    fn quick_amounts_start_at_the_total_and_round_up_to_the_big_notes() {
-        // 12,440 rounds to 12,400. A customer reaches for a 15,000 or a 20,000
-        // long before they reach for 600 shillings to make it 13,000.
+    fn quick_amounts_offer_the_exact_total_then_the_notes_that_cover_it() {
+        // 12,400 is settled with a 20,000 or a 50,000. There is no 15,000 note
+        // in the drawer, so the strip does not invent one.
         assert_eq!(
             quick_amounts(Currency::UGX, 12_400),
-            vec![12_400, 15_000, 20_000, 50_000]
+            vec![12_400, 20_000, 50_000]
         );
 
-        // The case the strip exists for: 27,500 is paid with a twenty and a
-        // ten, with two twenties, or with one fifty — never with one note.
-        assert_eq!(
-            quick_amounts(Currency::UGX, 27_500),
-            vec![27_500, 30_000, 40_000, 50_000]
-        );
+        // The case the strip exists for: a 27,500 bill is one 50,000 note, not
+        // a made-up 30,000 or 40,000.
+        assert_eq!(quick_amounts(Currency::UGX, 27_500), vec![27_500, 50_000]);
 
-        // A total that lands on a note keeps the round-ups above it.
+        // A total that lands on a note keeps the notes above it.
         assert_eq!(
             quick_amounts(Currency::UGX, 10_000),
-            vec![10_000, 15_000, 20_000, 50_000]
+            vec![10_000, 20_000, 50_000]
         );
 
-        // A decimal currency rounds to the same ladder: $12.34 to $20, $50,
-        // $100, and no chip for the two cents that would make it $12.36.
+        // A bill larger than every note is the smallest multiple of the
+        // biggest: two 50,000s cover 60,000.
+        assert_eq!(quick_amounts(Currency::UGX, 60_000), vec![60_000, 100_000]);
+
+        // Four chips is the cap, and the smallest notes win the last places.
+        assert_eq!(
+            quick_amounts(Currency::UGX, 3_400),
+            vec![3_400, 5_000, 10_000, 20_000]
+        );
+
+        // A decimal currency walks the same ladder: $12.34 to $20, $50, $100,
+        // and no chip for the two cents that would make it $12.36.
         assert_eq!(
             quick_amounts(Currency::USD, 1_234),
             vec![1_234, 2_000, 5_000, 10_000]
