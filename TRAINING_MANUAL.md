@@ -16,7 +16,7 @@ This is a teaching document. It is deliberately repetitive: every lesson has ste
 - **If you only have ten minutes:** go to the Quick Reference at the end. It is one page.
 - **If a new cashier starts tomorrow and you cannot train the full course:** teach the Quick Reference sale card today, then teach Lessons 1–3 in the first quiet hour. A cashier can sell without knowing inventory, but the shop cannot trust stock without someone learning it.
 
-**Train on a test till if you can.** Practice sales are real sales: this build has no void or refund screen, so they cannot be removed from the Dashboard. Use a spare computer or a copy of the data file. If you must train on the live till, train before opening and tell the owner the day's figures include practice.
+**Train on a test till if you can.** Practice sales are real sales: this build has no void or refund screen, so they cannot be removed from Day. Use a spare computer or a copy of the data file. If you must train on the live till, train before opening and tell the owner the day's figures include practice.
 
 ---
 
@@ -26,15 +26,14 @@ This is a teaching document. It is deliberately repetitive: every lesson has ste
 
 Stride POS is a cash till for a small shop. It runs on the shop's computer and keeps working with no internet, no account, and no cloud. Every sale is stored in one file on that computer.
 
-It does five jobs, and this manual teaches them in the order goods move through the shop:
+It does four jobs, and this manual teaches them in the order goods move through the shop:
 
-1. **Products** — name and price what you sell.
+1. **Catalog** — name and price what you sell, and record what is on the shelf.
 2. **Suppliers** — record who you buy from.
-3. **Inventory** — record what is on the shelf.
-4. **Restock** — plan a restocking trip and receive what arrived.
-5. **Sell** — take the money.
+3. **Restock** — plan a restocking trip and receive what arrived.
+4. **Sell** — take the money.
 
-That order is intentional. You cannot sell what is not in Products. You cannot receive goods without a product to receive them into. You cannot trust a stock count you never started. Suppliers sit beside that chain: the delivery note needs a name. Learn the order once; after that, nearly all your time is in Lesson 4.
+That order is intentional. You cannot sell what is not in the Catalog. You cannot receive goods without a product to receive them into. You cannot trust a stock count you never started. Suppliers sit beside that chain: the delivery note needs a name. Learn the order once; after that, nearly all your time is in Lesson 4.
 
 ### 0.2 The four sections
 
@@ -42,15 +41,15 @@ That order is intentional. You cannot sell what is not in Products. You cannot r
 |---|---|---|
 | `F1` | **Sell** | The counter: search, scan, cart, payment |
 | `F2` | **Day** | **Today** — every completed sale, newest first; **Trends** — takings, best sellers, busiest hour |
-| `F3` | **Shop** | **Catalog** — the products; **Stock** — what is on the shelf; **Restock** — plan a trip, receive what came back; **Suppliers** — who the shop buys from |
+| `F3` | **Shop** | **Catalog** — the products and what is on the shelf; **Restock** — plan a trip, receive what came back; **Suppliers** — who the shop buys from |
 | `F4` | **Settings** | Shop name, staff, scanner, receipt preview, backup |
 
 The pages are tabs above the page, not another key: `F2` lands on **Today**,
 `F3` on **Catalog**. A cashier has `F1` and `F2` only.
 
 The tabs are named after the job, not the table: **Catalog** is where products
-live, **Stock** is the inventory count, **Restock** is a purchase order,
-**Trends** is the dashboard.
+and their counts live, **Restock** is a purchase order, **Trends** is the
+dashboard.
 
 **Restock** is the shop's shopping list: it plans what to buy and records what came back. The bottom bar shows your name, your role, and the current cart.
 
@@ -244,7 +243,7 @@ Suppliers are a **directory**. A purchase can name one, but it does not have to:
 
 ---
 
-## Lesson 3 — Inventory: what is on the shelf
+## Lesson 3 — Stock: what is on the shelf
 
 **You will learn:** start tracking a product, record a delivery, fix a wrong count, record waste and returns, and read the history.
 
@@ -265,16 +264,16 @@ Because stock is a ledger, you can always answer "why is the count what it is?" 
 
 ### 3.2 Start tracking a product
 
-1. Press `F3` and open the **Stock** tab.
+1. Press `F3` to open **Catalog**.
 2. Press **Track stock**.
 3. Choose the product.
 4. Enter **what is on the shelf right now** — the opening count.
 5. Set **Warn at or below**. For tea with 20 on the shelf, `5` is sensible.
 6. Save.
 
-The product now appears in Inventory with its on-hand count. Every future sale of that product subtracts automatically.
+The product now shows its on-hand count beside its name in Catalog. Every future sale of that product subtracts automatically.
 
-**What the warning level means:** the **Low** filter shows products at or below this number, but above zero; **Out** shows zero or negative. The warning does not stop a sale. It is a reminder to reorder.
+**What the warning level means:** the **Low stock** filter shows products at or below this number, but above zero; **Out of stock** shows zero or negative. The warning does not stop a sale. It is a reminder to reorder.
 
 ### 3.3 Record a movement
 
@@ -297,7 +296,7 @@ The product now appears in Inventory with its on-hand count. Every future sale o
 ### 3.4 History and filters
 
 - **History** shows kind, date, who recorded it, note, and the signed change. The newest 200 are shown.
-- **All / Low / Out** filter the list.
+- **All stock / Low stock / Out of stock** filter the list.
 - Sales are written to the history automatically. You never record a sale by hand.
 
 ### 3.5 Three rules to say out loud
@@ -360,7 +359,7 @@ There is no **Part received** state. Receiving is one act, so the same goods can
 
 1. **A plan is not stock.** Only receiving writes a movement.
 2. **Receive what is real.** Change the quantity to what is in front of you, not what the list hoped for.
-3. **Cost is optional but valuable.** Without it the till can still count stock; with it, the Dashboard can show profit.
+3. **Cost is optional but valuable.** Without it the till can still count stock; with it, Trends can show profit.
 
 ### 3A.5 Practice
 
@@ -407,11 +406,11 @@ All three ways can be mixed in one sale:
 
 ### 4.3 Taking cash
 
-The cart shows **Subtotal**, **Tax** (it says "not configured" in this build — ignore it), and **Total**. The payment dialog shows **Subtotal**, any rounding line, and **To pay** in large type.
+The cart shows **Subtotal**, **Tax** (it says "not configured" in this build — ignore it), and **Total**. The tender panel shows **Subtotal**, any rounding line, and **To pay** in large type.
 
 - Leave the cash field empty to mean **exact amount**.
 - Or type what the customer handed over.
-- Or tap a quick chip. The first chip is always **Exact**. The others round the bill up to a circulating note.
+- Or tap a quick chip. The first chip is always **Exact**. The others are the circulating notes that can cover the bill, smallest first; a bill larger than every note offers the smallest multiple of the biggest note.
 
 As you type, the screen shows **Short by …** in red or **Change …** in green.
 
@@ -573,7 +572,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Check:* It leaves the working list, then comes back when you show archived. Nothing is deleted.
 
-### Inventory
+### Stock
 
 **S7 — Start tracking**
 
@@ -581,7 +580,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Do:* **Track stock** → tea → opening count 20 → warn at 5.
 
-*Check:* Inventory shows the count you entered.
+*Check:* Catalog shows the count you entered beside the product.
 
 **S8 — A delivery arrives**
 
@@ -702,9 +701,9 @@ Two hours, one trainee, one till. Add 30 minutes for a second trainee so each pe
 | 0:00–0:10 | Welcome. Show one complete sale, start to finish, without explaining every click. Say: "By the end, you will do this alone." | Trainer |
 | 0:10–0:35 | Lesson 1 — Products. Add 3 by hand, import 3, edit a price. | Trainee |
 | 0:35–0:50 | Lesson 2 — Suppliers. Add 2, search, archive, restore. | Trainee |
-| 0:50–1:10 | Lesson 3 — Inventory. Track all 6, receive, adjust, waste, return. | Trainee |
+| 0:50–1:10 | Lesson 3 — Stock. Track all 6, receive, adjust, waste, return. | Trainee |
 | 1:10–1:35 | Lesson 4 — Sell. Three practice sales, including rounding and change. | Trainee |
-| 1:35–1:50 | Scenario workbook. Pick six: one products, one suppliers, two inventory, two selling. | Trainee |
+| 1:35–1:50 | Scenario workbook. Pick six: one products, one suppliers, two stock, two selling. | Trainee |
 | 1:50–2:00 | Recap, questions, sign-off. | Both |
 
 **How to teach each step**
@@ -757,7 +756,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 - [ ] Archives and restores a supplier
 - [ ] Knows a purchase can name a supplier, but the supplier is only a record
 
-**Inventory**
+**Stock**
 
 - [ ] Starts tracking with an opening count and warning level
 - [ ] Records a **Received** movement with a note
@@ -777,7 +776,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 
 **End of day**
 
-- [ ] Reads Revenue, Sales, and Payments taken on the Dashboard
+- [ ] Reads takings, sales, and payments taken on Day › Trends
 - [ ] Exports sales to CSV
 - [ ] Takes a backup
 - [ ] Compares the drawer with the Payments card and reports a difference
@@ -844,7 +843,7 @@ IF STUCK     Read the caption under the button.
 | "Another product already uses that barcode" | Duplicate barcode | Search the barcode and edit the existing product |
 | "A manager is needed" | Cashier action above their role | Ask for the one-minute approval |
 | Correct PIN rejected | Lockout is active | Wait for the countdown; the owner can reset the PIN |
-| Dashboard shows only my sales | Signed in as cashier | Manager approval, or sign in as manager/owner |
+| Day shows only my sales | Signed in as cashier | Manager approval, or sign in as manager/owner |
 | Barcode lost its leading zero | Excel formatted it as a number | Format the column as text and re-import |
 | Export greyed out | Empty range or empty list | Widen the range; clear the search/filter |
 | Receipt shows the app name | Shop name not saved | Settings → Terminal → type the name → **Save** |
@@ -887,7 +886,7 @@ Teach these limits so nobody hunts for a button that is not there.
 - **Cash only.** No mobile money, no cards.
 - **No printed receipts.** Copy the receipt as text instead.
 - **No void, refund, or discount screens.** The permissions exist, the screens do not.
-- **No full stock valuation.** Purchases record a unit cost, and the Dashboard shows profit only for sale lines that had a known cost.
+- **No full stock valuation.** Purchases record a unit cost, and Trends shows profit only for sale lines that had a known cost.
 - **No supplier delivery workflow.** Purchases are a shopping list for the owner's trip; there is no sent order, no invoice, no payment to a supplier.
 - **No tax.** The cart says "not configured".
 - **No held carts.** Finishing or clearing the cart is the only way out.

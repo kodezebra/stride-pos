@@ -26,25 +26,26 @@ marked **Sell** puts the item in the cart; **Add** opens a new product with the
 barcode already filled in. The listener is off until you turn it on, and it
 never leaves the shop's network.
 
-**Dashboard** — takings, number of sales, profit where costs are known, and the
-latest transactions for today, the last 7 days, the last 30 days, or all time.
+**Day** — today's takings, number of sales, average basket and gross margin, the
+payment mix, cash by person, and the latest sales; switch the range to 7 days,
+30 days or all time. The same page is the receipt archive: open a sale to read
+its lines.
 
-**Products** — the catalogue of what you sell: add a product, edit its price or
-category, give it a barcode. Everything here becomes a key on the Sell screen.
+**Catalog** — the catalogue of what you sell, and what is on the shelf. Add a
+product, edit its price or category, give it a barcode. Everything here becomes
+a key on the Sell screen. Stock is opt-in per product: choose a product, count
+it, and set the level that counts as low; from then on every sale subtracts
+automatically. Receiving, customer returns, waste and a physical count are
+recorded as movements, and each product keeps its own history. Stock is always
+the sum of those movements; deleting a product deletes its history, because the
+ledger is operational and not a financial record. The **Stock** filter above the
+categories shows all, low or out at a glance. Managers and the owner manage
+stock; cashiers work on Sell and Day only.
 
 **Suppliers** — who the shop buys from: name, contact, phone, email, address and
 notes. Search by any of them, and archive a supplier you no longer use without
 losing the record. A purchase can name a supplier, but it does not have to: most
 trips to market have no delivery note.
-
-**Inventory** — what the ledger says is on the shelf. Tracking is opt-in per
-product: choose a product, count it, and set the level that counts as low. From
-then on every sale of that product subtracts automatically. Receiving, customer
-returns, waste and a physical count are recorded as movements, and each product
-keeps its own history. Stock is always the sum of those movements; deleting a
-product deletes its history, because the ledger is operational and not a
-financial record. Cashiers can see stock; a manager or the owner records a
-movement.
 
 **Restock** — a shopping list for the shop, not a stock movement. Start a list
 before a trip, add what is low in one click, adjust quantities at the market,
@@ -53,8 +54,6 @@ movement and can carry a unit cost, which becomes that product's last known cost
 Receiving is one act: a trip that came home short says so, and a received list is
 read-only because a movement points at its lines. Purchases are local-only for
 now.
-
-**Sales** — every completed sale in the chosen range, newest first.
 
 **Settings** — light or dark appearance, a preview of the receipt layout, the
 staff list, the Android phone scanner, and places for tax rules and terminal
@@ -121,15 +120,14 @@ stops working the moment it has been used once.
 
 This is an early build. You can sign in, sell, lock the till, keep a supplier
 directory, track stock, and plan a restocking trip: build a cart, take the cash,
-and the sale is recorded with the name of whoever took it, on the Dashboard and
-in Sales.
+and the sale is recorded with the name of whoever took it, on Day.
 
 - payments are cash only — mobile money and cards come later
 - the catalogue can be typed in or imported from a CSV
   (`name, category, price, barcode`); stock counts are not imported
 - receipts can be previewed but not printed
 - void, refund and discount have permissions but no screen yet
-- purchases record a unit cost and profit appears on the Dashboard once sales
+- purchases record a unit cost and profit appears in Trends once sales
   with a known cost have happened; there is no full stock valuation yet
 - each till runs alone; there is no sync between terminals yet
 - the phone scanner is a companion Android app, not a mobile till of its own;

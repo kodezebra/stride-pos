@@ -210,9 +210,10 @@ This is the whole counter flow, from idle till to done.
    the amounts (subtotal, the rounding line only if it moved the figure, and the
    **To pay** amount in big type) appear in place, and the grid dims behind it.
 7. Enter the cash received (empty means exact), or tap a quick-tender chip — the
-   first chip is always **Exact**; the others round the bill up to the biggest
-   circulating notes. The screen shows **Short by …** in red or **Change …** in
-   green as you type.
+   first chip is always **Exact**; the others are the circulating notes that can
+   cover the bill, smallest first. A bill larger than every note offers the
+   smallest multiple of the biggest note (two 50,000s for 60,000). The screen
+   shows **Short by …** in red or **Change …** in green as you type.
 8. Press **Complete sale** (or `Enter`). The till:
    - records the sale (`#123`), the lines (name and price snapshotted), and the
      cash payment, in one transaction;
@@ -244,7 +245,7 @@ always match the drawer, not the price list — see §7.3.
 **Morning**
 
 1. Sign in, check **Trends** (`F2`) with range **Today** for yesterday's context,
-   confirm stock warnings under **Catalog** (`F3`) (the **Low** and **Out**
+   confirm stock warnings under **Catalog** (`F3`) (the **Low stock** and **Out of stock**
    filters), and make sure the backup ran (Settings → Terminal → the backup
    folder holds the last 10).
 2. Unlock and open. The status bar shows "local only" — expected.
@@ -363,10 +364,10 @@ new goods.
 
 ### 6.3 The customer pays with a note larger than the bill
 
-- Tap the quick-tender chip for that note. The change shows live. If the entered
-  amount is still short of the bill, tapping a chip **adds** to it
-  (500 + 1,000 = 1,500); once it covers the bill, the next tap replaces it.
-  The **Exact** chip always gives you the exact amount.
+- Tap the quick-tender chip for that note. The change shows live. The chips are
+  the notes that can cover the bill, smallest first; if the field already holds
+  a smaller amount, tapping a chip **adds** to it, and once it covers the bill
+  the next tap replaces it. The **Exact** chip always gives you the exact amount.
 - Or type the received amount and read the green **Change** figure.
 
 ### 6.4 Cash is rounded — why?
@@ -459,7 +460,7 @@ this — it is how the drawer physically balances.
 ### 6.13 Stock tracking, adjustments and history
 
 Stock lives on the catalogue, not on a screen of its own: a tracked product's
-count sits beside its name, and **All / Low / Out** under **Stock** in the
+count sits beside its name, and **All stock / Low stock / Out of stock** under **Stock** in the
 sidebar narrows the list. The summary above it reads how many products are
 tracked and how many need attention. **Move stock** and **History** sit on each
 tracked row.
@@ -725,7 +726,7 @@ a cashier exports only their own sales.
    Sales trends.
 2. Read the two lines under the chart — the best day and the busiest hour. Is
    someone rostered for the peak?
-3. Check **Top items** against the **Low** filter in **Catalog** (`F3`) —
+3. Check **Top items** against the **Low stock** filter in **Catalog** (`F3`) —
    reorder what sells.
 4. Check **By person** — who needs coaching, who ran out of change.
 5. **Today** (`F2`) → **Export**, file it with the week's paper.

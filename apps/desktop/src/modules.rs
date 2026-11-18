@@ -805,14 +805,14 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
     //
     // Paying takes the whole footer, and the tender panel is much taller than
     // the totals it replaces. Its height is the sum of its rows — two 44.8
-    // amount rows, a 44 field, 34 chips, a 52 button, and the hint row that
+    // amount rows, a 44 field, 44 chips, a 52 button, and the hint row that
     // shares its line with "Back to cart" — plus 6px gaps and a little slack.
     // An error replaces the hint rather than stacking under it, so that case
     // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
     let footer = match state.payment.as_ref() {
         Some(_) => {
-            410.0
+            420.0
                 + if rounding_minor != 0 {
                     TYPE.small * 1.8
                 } else {
@@ -907,17 +907,23 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                             .color(palette.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Quick-remove item button (trash)
+                            // Quick-remove item button (trash). The hit area is a
+                            // full 44-point target; the glyph and its hover fill
+                            // stay 32 so the cart line keeps its density.
                             let (trash_rect, trash_resp) = ui
-                                .allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                                .allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
                             let trash_resp = trash_resp
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Remove item");
                             if ui.is_rect_visible(trash_rect) {
                                 let hovered = trash_resp.hovered();
+                                let visual = egui::Rect::from_center_size(
+                                    trash_rect.center(),
+                                    egui::vec2(32.0, 32.0),
+                                );
                                 if hovered {
                                     ui.painter().rect_filled(
-                                        trash_rect,
+                                        visual,
                                         egui::CornerRadius::same(RADII.sm as u8),
                                         ui.visuals().widgets.hovered.weak_bg_fill,
                                     );
@@ -927,9 +933,7 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                                 } else {
                                     egui::Color32::from(palette.text_muted)
                                 };
-                                Icon::TRASH
-                                    .image(12.0, trash_color)
-                                    .paint_at(ui, trash_rect);
+                                Icon::TRASH.image(16.0, trash_color).paint_at(ui, visual);
                             }
                             if trash_resp.clicked() {
                                 remove = Some(index);
@@ -2126,25 +2130,30 @@ struct Products;
 
 impl Module for Products {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        // Categories are facets: they narrow the list without being the list's
-        // question. The question — "which product?" — is the bar's search field,
-        // in the same place as on every other list.
-        categories_sidebar(ui, state);
-
         // Stock is a second facet, not a second screen. The old Stock tab asked
         // the same question over the same rows; folding it here means one list,
         // one search and one place to answer "what is low?".
-        ui.add_space(SPACING.md);
+        //
+        // It sits above the categories because it is three rows and the
+        // categories are unbounded: below them a shop with sixty categories
+        // would bury the filter a manager reaches for every morning.
         components::section_title(ui, "Stock");
-        components::field_label(ui, "Show");
-        ui.add_space(SPACING.xs);
-        for (index, label) in ["All", "Low", "Out"].into_iter().enumerate() {
+        for (index, label) in ["All stock", "Low stock", "Out of stock"]
+            .into_iter()
+            .enumerate()
+        {
             if regions::nav_item(ui, state.stock_filter == index, label).clicked() {
                 state.stock_filter = index;
             }
         }
         ui.add_space(SPACING.sm);
         components::caption(ui, "Low and out count tracked products only.");
+
+        // Categories are facets: they narrow the list without being the list's
+        // question. The question — "which product?" — is the bar's search field,
+        // in the same place as on every other list.
+        ui.add_space(SPACING.md);
+        categories_sidebar(ui, state);
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -2726,10 +2735,10 @@ fn product_row(
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
 
-        // Keep the name clear of the price and row actions. Four icon buttons
-        // are the widest case (a tracked product), and the reserve is fixed so
-        // the price column does not move when a row gains stock.
-        const ACTIONS_WIDTH: f32 = 300.0;
+        // Keep the name clear of the price and row actions. Four 44-point
+        // buttons are the widest case (a tracked product), and the reserve is
+        // fixed so the price column does not move when a row gains stock.
+        const ACTIONS_WIDTH: f32 = 352.0;
         let text_width = (ui.available_width() - ACTIONS_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
             egui::vec2(text_width, 0.0),
@@ -2743,13 +2752,13 @@ fn product_row(
             // Icon-only actions: the row is about the product, and two words of
             // chrome per line crowd the price. The tooltip carries the word.
             if deleting {
-                if components::icon_button(ui, Icon::CHECK, 32.0)
+                if components::icon_button(ui, Icon::CHECK, 44.0)
                     .on_hover_text("Delete")
                     .clicked()
                 {
                     action = Some(ProductAction::Delete(product.id));
                 }
-                if components::icon_button(ui, Icon::CLOSE, 32.0)
+                if components::icon_button(ui, Icon::CLOSE, 44.0)
                     .on_hover_text("Cancel")
                     .clicked()
                 {
@@ -2757,13 +2766,13 @@ fn product_row(
                 }
                 components::caption(ui, "Remove this product?");
             } else {
-                if components::icon_button(ui, Icon::TRASH, 32.0)
+                if components::icon_button(ui, Icon::TRASH, 44.0)
                     .on_hover_text("Delete")
                     .clicked()
                 {
                     action = Some(ProductAction::AskDelete(product.id));
                 }
-                if components::icon_button(ui, edit_icon(), 32.0)
+                if components::icon_button(ui, edit_icon(), 44.0)
                     .on_hover_text("Edit")
                     .clicked()
                 {
@@ -2773,7 +2782,7 @@ fn product_row(
                 // untracked product has no ledger to move or read; the toolbar's
                 // "Track stock" is the way in.
                 if let Some(item) = stock {
-                    if components::icon_button(ui, history_icon(), 32.0)
+                    if components::icon_button(ui, history_icon(), 44.0)
                         .on_hover_text("Stock history")
                         .clicked()
                     {
@@ -2783,7 +2792,7 @@ fn product_row(
                         });
                     }
                     if can_manage
-                        && components::icon_button(ui, move_icon(), 32.0)
+                        && components::icon_button(ui, move_icon(), 44.0)
                             .on_hover_text("Move stock: receive, return, waste or adjust")
                             .clicked()
                     {
@@ -3446,6 +3455,53 @@ pub(crate) fn secret_field(
     field(ui, text, hint, width, true)
 }
 
+/// A field with a fixed prefix inside its frame, for an amount in one currency.
+///
+/// `TextEdit` has no prefix API, so the left margin is widened to make room and
+/// the code is painted over the frame. The number then starts where the code
+/// ends instead of floating in a box that looks empty.
+pub(crate) fn prefixed_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    prefix: &str,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    let palette = theme::current(ui.ctx());
+    let font = egui::FontId::proportional(TYPE.body);
+    let prefix_width = ui
+        .painter()
+        .layout_no_wrap(prefix.to_owned(), font.clone(), ui.visuals().text_color())
+        .size()
+        .x;
+    let left = (12.0 + prefix_width + 6.0)
+        .round()
+        .clamp(0.0, i8::MAX as f32) as i8;
+
+    ui.scope(|ui| {
+        ui.visuals_mut().widgets.inactive.bg_stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from(palette.border_strong));
+        let edit = egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .margin(egui::Margin {
+                left,
+                right: 12,
+                top: 12,
+                bottom: 12,
+            });
+        let response = ui.add_sized([width, 44.0], edit);
+        ui.painter().text(
+            egui::pos2(response.rect.min.x + 12.0, response.rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            prefix,
+            font,
+            egui::Color32::from(palette.text_muted),
+        );
+        response
+    })
+    .inner
+}
+
 fn field(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -3872,7 +3928,7 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                             },
                             |ui| {
                                 let mut removed = false;
-                                if components::icon_button(ui, Icon::TRASH, 32.0)
+                                if components::icon_button(ui, Icon::TRASH, 44.0)
                                     .on_hover_text("Remove")
                                     .clicked()
                                 {
@@ -4285,13 +4341,13 @@ fn supplier_row(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if confirming {
-                if components::icon_button(ui, Icon::CHECK, 32.0)
+                if components::icon_button(ui, Icon::CHECK, 44.0)
                     .on_hover_text("Archive")
                     .clicked()
                 {
                     action = Some(SupplierAction::Archive(supplier.id.clone()));
                 }
-                if components::icon_button(ui, Icon::CLOSE, 32.0)
+                if components::icon_button(ui, Icon::CLOSE, 44.0)
                     .on_hover_text("Cancel")
                     .clicked()
                 {
@@ -4300,19 +4356,19 @@ fn supplier_row(
                 components::caption(ui, "Archive this supplier?");
             } else {
                 if supplier.archived {
-                    if components::icon_button(ui, restore_icon(), 32.0)
+                    if components::icon_button(ui, restore_icon(), 44.0)
                         .on_hover_text("Restore")
                         .clicked()
                     {
                         action = Some(SupplierAction::Restore(supplier.id.clone()));
                     }
-                } else if components::icon_button(ui, archive_icon(), 32.0)
+                } else if components::icon_button(ui, archive_icon(), 44.0)
                     .on_hover_text("Archive")
                     .clicked()
                 {
                     action = Some(SupplierAction::AskArchive(supplier.id.clone()));
                 }
-                if components::icon_button(ui, edit_icon(), 32.0)
+                if components::icon_button(ui, edit_icon(), 44.0)
                     .on_hover_text("Edit")
                     .clicked()
                 {

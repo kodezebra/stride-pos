@@ -473,8 +473,30 @@ impl PosShell {
         // The rail's index is the visible row, not the view: the order is
         // role-filtered, so row 1 is Day for everyone and row 2 only exists for
         // a manager.
-        if let Some(next) = regions::rail(ui, &rail, selected) {
+        //
+        // While the tender owns the screen the rail stops working: switching
+        // views mid-payment would leave a sale open behind a page that cannot
+        // show it. A panel cannot be wrapped in a disabled scope without
+        // breaking the layout it carves, so the click is dropped and a veil
+        // dims the rail the way the grid dims behind the tender.
+        let tendering = state.is_tendering();
+        let rail_rect = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(size::RAIL, ui.available_height()),
+        );
+        if let Some(next) = regions::rail(ui, &rail, selected)
+            && !tendering
+        {
             modules::open(state, modules::landing(order[next]));
+        }
+        if tendering {
+            let palette = ui_kit::theme::current(ui.ctx());
+            let bg = egui::Color32::from(palette.bg);
+            ui.painter().rect_filled(
+                rail_rect,
+                egui::CornerRadius::ZERO,
+                egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 170),
+            );
         }
 
         let module = &mut modules[active];
@@ -489,13 +511,17 @@ impl PosShell {
         // The sidebar is part of the map, not of the cart: while the tender owns
         // the screen it dims with the grid. On Sell that stops a category tap
         // from re-filtering the products behind the panel the cashier is reading.
-        let tendering = state.is_tendering();
         regions::sidebar(ui, spec, &mut open, |ui| {
             if tendering {
                 ui.set_opacity(0.35);
                 ui.disable();
             }
-            module.sidebar(ui, state);
+            // A long category list scrolls instead of running under the panel's
+            // edge; the sidebar owns the height it is given.
+            egui::ScrollArea::vertical()
+                .id_salt(("sidebar", active))
+                .auto_shrink([false, false])
+                .show(ui, |ui| module.sidebar(ui, state));
         });
         state.set_sidebar_open(active, open);
 
