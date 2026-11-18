@@ -87,18 +87,24 @@ pub fn sample() -> SaleDetail {
                 qty: 2,
                 unit_minor: 3_500,
                 total_minor: 7_000,
+                unit_factor: 1,
+                unit_label: None,
             },
             DetailLine {
                 name: "Cinnamon roll".to_owned(),
                 qty: 1,
                 unit_minor: 3_250,
                 total_minor: 3_250,
+                unit_factor: 1,
+                unit_label: None,
             },
             DetailLine {
                 name: "Orange juice".to_owned(),
                 qty: 1,
                 unit_minor: 4_500,
                 total_minor: 4_500,
+                unit_factor: 1,
+                unit_label: None,
             },
         ],
     }
@@ -436,7 +442,19 @@ fn item(ui: &mut egui::Ui, line: &DetailLine, currency: Currency) {
 /// The multiplication sign rather than `x` keeps the count visually separate
 /// from a product whose name happens to start with a letter.
 fn item_label(line: &DetailLine) -> String {
-    format!("{}× {}", line.qty, line.name)
+    let label = if line.unit_factor > 1 {
+        line.unit_label
+            .clone()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| format!("pack of {}", line.unit_factor))
+    } else {
+        line.unit_label.clone().unwrap_or_default()
+    };
+    if label.is_empty() {
+        format!("{}× {}", line.qty, line.name)
+    } else {
+        format!("{}× {} ({})", line.qty, line.name, label)
+    }
 }
 
 /// How many units are on the slip, not how many rows: a customer checking a
@@ -649,6 +667,28 @@ fn amount(minor: i64, currency: Currency) -> String {
 mod tests {
     use super::*;
 
+    /// The slip has to say what left the shelf: a pack of 100 is not one item
+    /// at the tablet price, and a named tablet is not a generic unit.
+    #[test]
+    fn an_item_label_names_the_pack_and_the_loose_unit() {
+        let mut line = DetailLine {
+            name: "Amoxicillin".to_owned(),
+            qty: 1,
+            unit_minor: 2_800,
+            total_minor: 2_800,
+            unit_factor: 100,
+            unit_label: Some("pack of 100".to_owned()),
+        };
+        assert_eq!(item_label(&line), "1× Amoxicillin (pack of 100)");
+
+        line.qty = 3;
+        line.unit_minor = 30;
+        line.total_minor = 90;
+        line.unit_factor = 1;
+        line.unit_label = Some("tablet".to_owned());
+        assert_eq!(item_label(&line), "3× Amoxicillin (tablet)");
+    }
+
     /// One sale with everything on it: two units of one thing, one of another,
     /// small rounding, and change coming back. The shape a real slip has.
     fn sale() -> SaleDetail {
@@ -672,12 +712,16 @@ mod tests {
                     qty: 2,
                     unit_minor: 3_500,
                     total_minor: 7_000,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
                 DetailLine {
                     name: "Cinnamon roll".to_owned(),
                     qty: 1,
                     unit_minor: 5_400,
                     total_minor: 5_400,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
             ],
         }

@@ -76,6 +76,8 @@ fn record_tea(store: &storage::Store) -> db::RecordedSale {
             name: "Tea".to_owned(),
             qty: 2,
             unit_minor: 500,
+            unit_factor: 1,
+            unit_label: None,
         }],
         0,
         0,
@@ -129,6 +131,48 @@ fn a_sale_moves_to_a_peer_and_a_replay_does_nothing() {
         b.scalar::<i64>("SELECT COUNT(*) FROM stock_movements"),
         1,
         "the ledger is written once, from the lines"
+    );
+}
+
+/// A pack crosses the wire as what it is: the factor is kept for the slip,
+/// and the receiving ledger moves a pack's worth of tablets, not one.
+#[test]
+fn a_pack_sale_carries_its_factor_and_moves_a_pack() {
+    let a = Fixture::new("pack-a");
+    let b = Fixture::new("pack-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    db::record_sale(
+        a.db(),
+        &[SaleLine {
+            product_id: Some(10),
+            name: "Tea".to_owned(),
+            qty: 2,
+            unit_minor: 28_000,
+            unit_factor: 100,
+            unit_label: Some("pack of 100".to_owned()),
+        }],
+        0,
+        0,
+        56_000,
+        None,
+        None,
+    )
+    .expect("record a pack sale");
+
+    let sale = pulled(a.db());
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert_eq!(response.rejected.len(), 0, "{:?}", response.rejected);
+
+    assert_eq!(b.scalar::<i64>("SELECT unit_factor FROM sale_lines"), 100);
+    assert_eq!(
+        b.scalar::<String>("SELECT unit_label FROM sale_lines"),
+        "pack of 100"
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT delta FROM stock_movements"),
+        -200,
+        "two packs of a hundred"
     );
 }
 

@@ -12,6 +12,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The default for every "how many units" field that predates packs.
+fn one() -> i64 {
+    1
+}
+
+/// The default label for a product that never named its base unit.
+fn unit_label() -> String {
+    "unit".to_owned()
+}
+
 /// Bumped when a shape changes in a way an older peer cannot read.
 pub const PROTOCOL: i64 = 1;
 
@@ -58,6 +68,14 @@ pub struct LineDto {
     pub qty: i64,
     pub unit_minor: i64,
     pub total_minor: i64,
+    /// How many base units one line unit held: `1` for a loose unit, the pack
+    /// size for a sealed pack. Additive: a peer built before packs sold only
+    /// base units, which is exactly what the default says.
+    #[serde(default = "one")]
+    pub unit_factor: i64,
+    /// What that unit was called, when it was anything but `unit`.
+    #[serde(default)]
+    pub unit_label: Option<String>,
 }
 
 /// One tender. A sale may be split, so the method is a field rather than three
@@ -191,6 +209,19 @@ pub struct ProductDto {
     pub tracked: i64,
     #[serde(default)]
     pub archived: i64,
+    /// What one base unit is called: `tablet`, `sachet`, `unit`.
+    #[serde(default = "unit_label")]
+    pub unit_label: String,
+    /// How many base units one sealed pack holds. `1` means the product has no
+    /// pack.
+    #[serde(default = "one")]
+    pub pack_size: i64,
+    /// The sealed pack's price, when it is sold as a pack.
+    #[serde(default)]
+    pub pack_price_minor: Option<i64>,
+    /// The barcode printed on the box. The loose barcode stays in `barcode`.
+    #[serde(default)]
+    pub pack_barcode: Option<String>,
 }
 
 /// One category row. Categories are upserted by id and never deleted.

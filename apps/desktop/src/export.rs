@@ -1,10 +1,10 @@
 //! Writing the books out as CSV.
 //!
-//! The import this shop already trusts reads `name, category, price, barcode`,
-//! so the catalog export writes exactly that: a file that went out of the till
-//! can come back in without a spreadsheet in the middle. Sales are for the
-//! owner's accountant, not for re-import, and name their columns the way the
-//! ledger does.
+//! The import this shop already trusts reads `name, category, price, barcode`
+//! and the pack columns, so the catalog export writes exactly that: a file that
+//! went out of the till can come back in without a spreadsheet in the middle,
+//! packs included. Sales are for the owner's accountant, not for re-import, and
+//! name their columns the way the ledger does.
 //!
 //! Amounts are plain decimals with no symbol and no grouping: `1200` for UGX,
 //! `12.50` for KES. That is the only spelling both a spreadsheet and
@@ -67,13 +67,32 @@ fn csv_row(fields: impl IntoIterator<Item = String>) -> String {
 /// Empty input still writes the header: a file that says what it would have
 /// contained is a usable file, and an empty one is a mystery.
 pub fn products_csv(products: &[Product], currency: Currency) -> String {
-    let mut text = csv_row(["name", "category", "price", "barcode"].map(str::to_owned));
+    let mut text = csv_row(
+        [
+            "name",
+            "category",
+            "price",
+            "barcode",
+            "unit",
+            "pack_size",
+            "pack_price",
+            "pack_barcode",
+        ]
+        .map(str::to_owned),
+    );
     for product in products {
         text.push_str(&csv_row([
             product.name.clone(),
             product.category.clone(),
             decimal(product.price_minor, currency),
             product.barcode.clone().unwrap_or_default(),
+            product.unit_label.clone(),
+            product.pack_size.to_string(),
+            product
+                .pack_price_minor
+                .map(|price| decimal(price, currency))
+                .unwrap_or_default(),
+            product.pack_barcode.clone().unwrap_or_default(),
         ]));
     }
     text
@@ -95,6 +114,11 @@ pub fn template_csv(currency: Currency) -> String {
                 category_id: None,
                 price_minor: 4_500,
                 barcode: None,
+                unit_label: "unit".to_owned(),
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+                cost_milli: None,
             },
             Product {
                 id: 0,
@@ -103,6 +127,11 @@ pub fn template_csv(currency: Currency) -> String {
                 category_id: None,
                 price_minor: 3_400,
                 barcode: None,
+                unit_label: "unit".to_owned(),
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+                cost_milli: None,
             },
         ],
         currency,
@@ -164,6 +193,11 @@ mod tests {
             category_id: None,
             price_minor,
             barcode: barcode.map(str::to_owned),
+            unit_label: "unit".to_owned(),
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            cost_milli: None,
         }
     }
 
@@ -200,15 +234,18 @@ mod tests {
         let text = products_csv(&products, ugx());
         assert_eq!(
             text,
-            "name,category,price,barcode\n\
-             \"Bread, white\",Bakery,3400,0123\n\
-             Milk,Dairy,5000,\n"
+            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n\
+             \"Bread, white\",Bakery,3400,0123,unit,1,,\n\
+             Milk,Dairy,5000,,unit,1,,\n"
         );
     }
 
     #[test]
     fn an_empty_catalog_still_names_its_columns() {
-        assert_eq!(products_csv(&[], ugx()), "name,category,price,barcode\n");
+        assert_eq!(
+            products_csv(&[], ugx()),
+            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n"
+        );
     }
 
     #[test]
@@ -244,11 +281,13 @@ mod tests {
         let text = template_csv(kes());
 
         assert!(
-            text.starts_with("name,category,price,barcode\n"),
+            text.starts_with(
+                "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n"
+            ),
             "the template must lead with the columns the import expects: {text}"
         );
         assert!(
-            text.contains("Sugar 1 kg,Groceries,45.00,\n"),
+            text.contains("Sugar 1 kg,Groceries,45.00,,unit,1,,\n"),
             "the example price must be the export's own spelling: {text}"
         );
 
@@ -280,5 +319,29 @@ mod tests {
         assert_eq!(rows[2].category, "General");
         assert_eq!(rows[2].price_minor, 12_500);
         assert_eq!(rows[2].barcode.as_deref(), Some("4001"));
+    }
+
+    /// A catalog with a pack must not lose the box on the way out: the columns
+    /// the import understands carry the size, the box price and both codes.
+    #[test]
+    fn a_pack_survives_the_export_and_import_round_trip() {
+        let mut medicine = product("Amoxicillin", "Medicine", 30, Some("100100"));
+        medicine.unit_label = "tablet".to_owned();
+        medicine.pack_size = 100;
+        medicine.pack_price_minor = Some(2_800);
+        medicine.pack_barcode = Some("100200".to_owned());
+
+        let text = products_csv(&[medicine], ugx());
+        let (rows, errors) = crate::import::parse(&text, ugx());
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.price_minor, 30);
+        assert_eq!(row.unit_label, "tablet");
+        assert_eq!(row.pack_size, 100);
+        assert_eq!(row.pack_price_minor, Some(2_800));
+        assert_eq!(row.barcode.as_deref(), Some("100100"));
+        assert_eq!(row.pack_barcode.as_deref(), Some("100200"));
     }
 }

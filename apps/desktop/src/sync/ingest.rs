@@ -119,6 +119,7 @@ fn validate(sale: &SaleDto) -> Result<HashMap<i64, i64>> {
         );
         anyhow::ensure!(!line.name.trim().is_empty(), "a line needs a name");
         anyhow::ensure!(line.qty > 0, "a line needs a positive quantity");
+        anyhow::ensure!(line.unit_factor >= 1, "a line needs at least one unit");
         anyhow::ensure!(line.unit_minor >= 0, "a unit price cannot be negative");
         anyhow::ensure!(line.total_minor >= 0, "a line total cannot be negative");
 
@@ -137,9 +138,14 @@ fn validate(sale: &SaleDto) -> Result<HashMap<i64, i64>> {
         if let Some(product_id) = line.product_id
             && product_id > 0
         {
+            // Stock counts base units: a pack of 100 moves one hundred tablets.
+            let units = line
+                .qty
+                .checked_mul(line.unit_factor)
+                .context("a product quantity is too large")?;
             let entry = expected.entry(product_id).or_insert(0);
             *entry = entry
-                .checked_add(line.qty)
+                .checked_add(units)
                 .context("a product quantity is too large")?;
         }
     }
@@ -320,8 +326,9 @@ fn apply_lines(
 
         transaction.execute(
             "INSERT INTO sale_lines
-                 (sale_id, product_id, name, qty, unit_minor, total_minor, uid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (sale_id, product_id, name, qty, unit_minor, total_minor, uid,
+                  unit_factor, unit_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT DO NOTHING",
             rusqlite::params![
                 sale_id,
@@ -331,6 +338,11 @@ fn apply_lines(
                 line.unit_minor,
                 line.total_minor,
                 line.uid.trim(),
+                line.unit_factor,
+                line.unit_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty()),
             ],
         )?;
     }

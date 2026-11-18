@@ -68,6 +68,13 @@ pub struct SaleLine {
     pub name: String,
     pub qty: i64,
     pub unit_minor: i64,
+    /// How many base units one line unit held at the moment of sale: `1` for a
+    /// loose tablet, `pack_size` for a sealed pack. Stock moves by the product
+    /// of this and `qty`.
+    pub unit_factor: i64,
+    /// What the line's unit was called, e.g. `tablet` or `pack of 100`. `None`
+    /// keeps a receipt printed by an older build reading exactly as it did.
+    pub unit_label: Option<String>,
 }
 
 /// A sale after it is written.
@@ -170,12 +177,31 @@ impl Drawer {
 pub struct Product {
     pub id: i64,
     pub name: String,
+    /// Price of one base unit — the smallest thing that can leave the shelf.
     pub price_minor: i64,
     pub category: String,
     pub category_id: Option<i64>,
     /// Optional, and unique when present: two products claiming one barcode is
     /// a scanning bug rather than a preference.
     pub barcode: Option<String>,
+    /// What one base unit is called: `tablet`, `bottle`, `box`. Shown on the
+    /// receipt and on a loose cart line; `unit` when the shop has no better name.
+    pub unit_label: String,
+    /// How many base units one sealed pack holds. `1` means the product has no
+    /// pack of its own and is sold only by the base unit.
+    pub pack_size: i64,
+    /// Price of one sealed pack. `None` when the shop does not sell packs, or
+    /// has not priced one yet.
+    pub pack_price_minor: Option<i64>,
+    /// The barcode on the box. Separate from [`Self::barcode`], which is the
+    /// code on the loose goods; scanning either resolves to this row, with the
+    /// pack code buying a whole pack.
+    pub pack_barcode: Option<String>,
+    /// What one base unit costs, in thousandths of a minor unit. The pack's
+    /// cost divided by its size rarely lands on a whole amount — a 1,850 pack
+    /// of 100 is 18.5 a tablet — and rounding the stored cost would make every
+    /// profit figure drift. `None` until the shop records a purchase.
+    pub cost_milli: Option<i64>,
 }
 
 /// One of the shops or people the shop buys from.
@@ -294,18 +320,39 @@ pub struct StockItem {
     pub category: String,
     pub on_hand: i64,
     pub low_stock: i64,
-    /// What the shop last paid for one, when it has said. Prefills the next
-    /// purchase line and lets the catalog show a margin.
-    pub cost_minor: Option<i64>,
+    /// What one base unit cost, in thousandths of a minor unit. Kept exact so a
+    /// pack of 100 costing 1,850 does not lose the half-unit. `None` until a
+    /// purchase has recorded a price.
+    pub cost_milli: Option<i64>,
+    /// How many base units one pack holds; the purchase form prefills its
+    /// "units per pack" from here.
+    pub pack_size: i64,
+    /// What one base unit is called, so the stock screen can say "tablets".
+    pub unit_label: String,
     /// How many the shop wants to keep. `None` means "twice the warning line",
     /// which is a sensible default for a shop that never sets one.
     pub target_stock: Option<i64>,
-    /// Ordered but not yet received, across planned purchases. Suggestions
-    /// subtract this so a trip in progress cannot be ordered twice.
+    /// Ordered but not yet received, across planned purchases, counted in base
+    /// units. Suggestions subtract this so a trip in progress cannot be ordered
+    /// twice.
     pub incoming: i64,
 }
 
 impl StockItem {
+    /// The per-base-unit cost rounded to a whole minor unit, for display and
+    /// for a loose purchase line. The stored figure stays exact.
+    pub fn unit_cost_minor(&self) -> Option<i64> {
+        self.cost_milli.map(|cost| (cost + 500) / 1000)
+    }
+
+    /// The per-pack cost rounded to a whole minor unit. Prefills a purchase line
+    /// priced by the pack; the shop's own invoice is the authority, this is only
+    /// the last one it paid.
+    pub fn pack_cost_minor(&self) -> Option<i64> {
+        self.cost_milli
+            .map(|cost| (cost * self.pack_size + 500) / 1000)
+    }
+
     pub fn is_out(&self) -> bool {
         self.on_hand <= 0
     }
@@ -436,6 +483,9 @@ pub struct PurchaseLine {
     pub qty_ordered: i64,
     pub qty_received: i64,
     pub unit_cost_minor: Option<i64>,
+    /// How many base units one ordered unit holds. The shop may buy a sealed
+    /// box one week and loose tablets the next; the line remembers which.
+    pub pack_size: i64,
 }
 
 /// A purchase and its lines, for the editor and the receiving screen.
@@ -449,8 +499,11 @@ pub struct PurchaseDetail {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PurchaseLineInput {
     pub product_id: i64,
+    /// How many ordered units — packs, when `pack_size` is above one.
     pub qty: i64,
     pub unit_cost_minor: Option<i64>,
+    /// How many base units one ordered unit holds.
+    pub pack_size: i64,
 }
 
 /// One line counted at receiving time.
@@ -461,8 +514,12 @@ pub struct PurchaseLineInput {
 pub struct ReceiveLine {
     pub line_id: Option<i64>,
     pub product_id: i64,
+    /// How many ordered units arrived — packs, when `pack_size` is above one.
     pub qty: i64,
     pub unit_cost_minor: Option<i64>,
+    /// How many base units one ordered unit holds. Snapshotted onto the line so
+    /// a later change to the product's pack does not rewrite what was bought.
+    pub pack_size: i64,
 }
 
 /// Revenue, cost and coverage for a range.
@@ -1067,6 +1124,69 @@ pub const MIGRATIONS: &[Migration] = &[
                        SELECT 1 FROM purchase_lines l
                         WHERE l.purchase_id = purchases.id AND l.qty_received > 0
                    );
+        "#,
+    },
+    // A product sold loose and in a sealed pack.
+    //
+    // The base unit — the smallest thing that can leave the shelf — stays the
+    // row. `pack_size` is how many base units one sealed pack holds, and the
+    // pack is priced and barcoded separately on the same row. A product that
+    // only ever sells as a pack uses `pack_size = 1` and `unit_label = 'box'`;
+    // there is no second catalog row for the same goods.
+    //
+    // Cost is now the truth per base unit, in thousandths of a minor unit
+    // (`cost_milli`). A pack of 100 costing 1,850 costs 18.5 per tablet, and an
+    // integer per-base column would round that away. `cost_minor` stays for
+    // older builds but nothing here reads it again; the backfill keeps a
+    // database that has been through this migration able to answer margin.
+    //
+    // Sale lines snapshot the factor and label, like the name and price, so a
+    // receipt reprinted after the pack size changes still reads as the sale
+    // that happened. `unit_factor` is how many base units one line unit held:
+    // one tablet is 1, a pack of 100 is 100.
+    //
+    // The purchase line carries its own `pack_size` rather than inheriting one:
+    // the shop may buy loose tablets one week and a sealed box the next, and
+    // the receiving screen is the only place that knows which it did.
+    //
+    // A pack barcode needs its own partial unique index. The existing index is
+    // on `products.barcode`; a second index cannot stop a pack code colliding
+    // with a loose code, so the write path and the catalog import check across
+    // both columns before either index has to speak.
+    Migration {
+        version: 16,
+        name: "packs_and_units",
+        sql: r#"
+            ALTER TABLE products ADD COLUMN unit_label TEXT NOT NULL DEFAULT 'unit'
+                CHECK (length(trim(unit_label)) > 0);
+            ALTER TABLE products ADD COLUMN pack_size INTEGER NOT NULL DEFAULT 1
+                CHECK (pack_size >= 1);
+            ALTER TABLE products ADD COLUMN pack_price_minor INTEGER
+                CHECK (pack_price_minor >= 0);
+            ALTER TABLE products ADD COLUMN pack_barcode TEXT;
+            ALTER TABLE products ADD COLUMN cost_milli INTEGER
+                CHECK (cost_milli >= 0);
+
+            UPDATE products
+               SET cost_milli = cost_minor * 1000
+             WHERE cost_minor IS NOT NULL;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS products_pack_barcode
+                ON products (pack_barcode)
+                WHERE pack_barcode IS NOT NULL AND archived = 0;
+
+            ALTER TABLE sale_lines ADD COLUMN unit_factor INTEGER NOT NULL DEFAULT 1
+                CHECK (unit_factor >= 1);
+            ALTER TABLE sale_lines ADD COLUMN unit_label TEXT;
+            ALTER TABLE sale_lines ADD COLUMN cost_milli INTEGER
+                CHECK (cost_milli >= 0);
+
+            UPDATE sale_lines
+               SET cost_milli = cost_minor * 1000
+             WHERE cost_minor IS NOT NULL;
+
+            ALTER TABLE purchase_lines ADD COLUMN pack_size INTEGER NOT NULL DEFAULT 1
+                CHECK (pack_size >= 1);
         "#,
     },
 ];
@@ -1674,7 +1794,8 @@ pub fn pull_sales(
     for mut pulled in rows {
         pulled.sale.lines = {
             let mut statement = conn.prepare(
-                "SELECT uid, product_id, name, qty, unit_minor, total_minor
+                "SELECT uid, product_id, name, qty, unit_minor, total_minor,
+                        unit_factor, unit_label
                  FROM sale_lines
                  WHERE sale_id = ?1 AND uid IS NOT NULL
                  ORDER BY id",
@@ -1687,6 +1808,8 @@ pub fn pull_sales(
                     qty: row.get(3)?,
                     unit_minor: row.get(4)?,
                     total_minor: row.get(5)?,
+                    unit_factor: row.get(6)?,
+                    unit_label: row.get(7)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -1760,7 +1883,8 @@ pub fn catalog_snapshot(
     let products = {
         let mut statement = store.conn().prepare(
             "SELECT id, name, price_minor, barcode, category, category_id,
-                    tracked, archived
+                    tracked, archived, unit_label, pack_size,
+                    pack_price_minor, pack_barcode
              FROM products
              ORDER BY id",
         )?;
@@ -1774,6 +1898,10 @@ pub fn catalog_snapshot(
                 category_id: row.get(5)?,
                 tracked: row.get(6)?,
                 archived: row.get(7)?,
+                unit_label: row.get(8)?,
+                pack_size: row.get(9)?,
+                pack_price_minor: row.get(10)?,
+                pack_barcode: row.get(11)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -1891,6 +2019,20 @@ pub fn apply_catalog_snapshot(
             product.archived == 0 || product.archived == 1,
             "archived must be 0 or 1"
         );
+        anyhow::ensure!(
+            !product.unit_label.trim().is_empty(),
+            "a product unit needs a name"
+        );
+        anyhow::ensure!(
+            product.pack_size >= 1,
+            "product {} says a pack holds {} units",
+            product.id,
+            product.pack_size
+        );
+        anyhow::ensure!(
+            product.pack_price_minor.is_none_or(|price| price >= 0),
+            "a pack price cannot be negative"
+        );
         if let Some(category_id) = product.category_id {
             anyhow::ensure!(
                 category_ids.contains(&category_id),
@@ -1898,18 +2040,32 @@ pub fn apply_catalog_snapshot(
                 product.id
             );
         }
-        if product.archived == 0
-            && let Some(barcode) = product
-                .barcode
-                .as_deref()
+        if product.archived == 0 {
+            for barcode in [product.barcode.as_deref(), product.pack_barcode.as_deref()]
+                .into_iter()
+                .flatten()
                 .map(str::trim)
                 .filter(|barcode| !barcode.is_empty())
-        {
+            {
+                anyhow::ensure!(
+                    !barcodes.contains_key(barcode),
+                    "the catalog puts barcode {barcode} on two active products"
+                );
+                barcodes.insert(barcode.to_owned(), product.id);
+            }
+        }
+        if product.pack_size <= 1 {
+            // A blank code is no code: an older or hand-built peer may send
+            // `Some("")` where this binary would store `None`.
+            let has_pack_code = product
+                .pack_barcode
+                .as_deref()
+                .is_some_and(|code| !code.trim().is_empty());
             anyhow::ensure!(
-                !barcodes.contains_key(barcode),
-                "the catalog puts barcode {barcode} on two active products"
+                product.pack_price_minor.is_none() && !has_pack_code,
+                "product {} prices a pack of one",
+                product.id
             );
-            barcodes.insert(barcode.to_owned(), product.id);
         }
     }
 
@@ -1975,10 +2131,11 @@ pub fn apply_catalog_snapshot(
 
     // Two products may swap barcodes in one snapshot. Clearing the barcodes of
     // every product in the snapshot first avoids a transient unique-index
-    // conflict that has nothing to do with the final state.
+    // conflict that has nothing to do with the final state. Both columns are
+    // cleared, because a pack code may take a loose code's place.
     for product in &snapshot.products {
         transaction.execute(
-            "UPDATE products SET barcode = NULL WHERE id = ?1",
+            "UPDATE products SET barcode = NULL, pack_barcode = NULL WHERE id = ?1",
             [product.id],
         )?;
     }
@@ -1989,11 +2146,17 @@ pub fn apply_catalog_snapshot(
             .as_deref()
             .map(str::trim)
             .filter(|barcode| !barcode.is_empty());
+        let pack_barcode = product
+            .pack_barcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|barcode| !barcode.is_empty());
         transaction.execute(
             "INSERT INTO products
                  (id, name, price_minor, category, category_id, barcode,
-                  tracked, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  tracked, archived, unit_label, pack_size, pack_price_minor,
+                  pack_barcode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  price_minor = excluded.price_minor,
@@ -2001,7 +2164,11 @@ pub fn apply_catalog_snapshot(
                  category_id = excluded.category_id,
                  barcode = excluded.barcode,
                  tracked = excluded.tracked,
-                 archived = excluded.archived",
+                 archived = excluded.archived,
+                 unit_label = excluded.unit_label,
+                 pack_size = excluded.pack_size,
+                 pack_price_minor = excluded.pack_price_minor,
+                 pack_barcode = excluded.pack_barcode",
             rusqlite::params![
                 product.id,
                 product.name.trim(),
@@ -2011,6 +2178,10 @@ pub fn apply_catalog_snapshot(
                 barcode,
                 product.tracked,
                 product.archived,
+                product.unit_label.trim(),
+                product.pack_size,
+                product.pack_price_minor,
+                pack_barcode,
             ],
         )?;
     }
@@ -2059,7 +2230,8 @@ pub fn has_sales(store: &storage::Store) -> bool {
 /// that they are gone.
 pub fn products(store: &storage::Store) -> Vec<Product> {
     let mut statement = match store.conn().prepare(
-        "SELECT id, name, price_minor, category, category_id, barcode
+        "SELECT id, name, price_minor, category, category_id, barcode,
+                unit_label, pack_size, pack_price_minor, pack_barcode, cost_milli
          FROM products WHERE archived = 0 ORDER BY name COLLATE NOCASE",
     ) {
         Ok(statement) => statement,
@@ -2077,6 +2249,11 @@ pub fn products(store: &storage::Store) -> Vec<Product> {
             category: row.get(3)?,
             category_id: row.get(4)?,
             barcode: row.get(5)?,
+            unit_label: row.get(6)?,
+            pack_size: row.get(7)?,
+            pack_price_minor: row.get(8)?,
+            pack_barcode: row.get(9)?,
+            cost_milli: row.get(10)?,
         })
     });
 
@@ -2173,23 +2350,146 @@ pub fn find_or_insert_category(store: &storage::Store, name: &str) -> anyhow::Re
     Ok(store.conn().last_insert_rowid())
 }
 
+/// The editable facts of a product, as the form and the importer collect them.
+///
+/// A struct rather than eight positional arguments: two fields are optional
+/// money and two are optional barcodes, and a call site that swapped them would
+/// still compile.
+pub struct ProductFields<'a> {
+    pub name: &'a str,
+    pub price_minor: i64,
+    pub category: &'a str,
+    pub category_id: Option<i64>,
+    pub barcode: Option<&'a str>,
+    pub unit_label: &'a str,
+    pub pack_size: i64,
+    pub pack_price_minor: Option<i64>,
+    pub pack_barcode: Option<&'a str>,
+}
+
+/// A product after trimming, defaulting and the pack-of-one rule.
+struct CleanProduct {
+    name: String,
+    category: String,
+    unit_label: String,
+    pack_size: i64,
+    pack_price_minor: Option<i64>,
+    barcode: Option<String>,
+    pack_barcode: Option<String>,
+}
+
+impl ProductFields<'_> {
+    fn clean(&self) -> anyhow::Result<CleanProduct> {
+        let name = self.name.trim();
+        anyhow::ensure!(!name.is_empty(), "a product needs a name");
+        anyhow::ensure!(self.price_minor >= 0, "a price cannot be negative");
+
+        let category = self.category.trim();
+        let category = if category.is_empty() {
+            "General"
+        } else {
+            category
+        };
+
+        let unit_label = self.unit_label.trim();
+        let unit_label = if unit_label.is_empty() {
+            "unit"
+        } else {
+            unit_label
+        };
+
+        anyhow::ensure!(self.pack_size >= 1, "a pack holds at least one unit");
+        anyhow::ensure!(
+            self.pack_price_minor.is_none_or(|price| price >= 0),
+            "a pack price cannot be negative"
+        );
+
+        let barcode = self
+            .barcode
+            .map(str::trim)
+            .filter(|barcode| !barcode.is_empty())
+            .map(str::to_owned);
+
+        // A pack of one is the base unit. Keeping a second price and code for
+        // it would be a second name for the same thing.
+        let (pack_price_minor, pack_barcode) = if self.pack_size <= 1 {
+            (None, None)
+        } else {
+            (
+                self.pack_price_minor,
+                self.pack_barcode
+                    .map(str::trim)
+                    .filter(|barcode| !barcode.is_empty())
+                    .map(str::to_owned),
+            )
+        };
+
+        anyhow::ensure!(
+            barcode.is_none() || barcode != pack_barcode,
+            "the loose and pack barcodes cannot be the same"
+        );
+
+        Ok(CleanProduct {
+            name: name.to_owned(),
+            category: category.to_owned(),
+            unit_label: unit_label.to_owned(),
+            pack_size: self.pack_size,
+            pack_price_minor,
+            barcode,
+            pack_barcode,
+        })
+    }
+}
+
+impl CleanProduct {
+    /// Both codes are checked against both columns: a pack code that collides
+    /// with a loose code on another row scans the wrong thing, and the two
+    /// unique indexes cannot see each other. Only the codes that survive
+    /// `clean` are checked, so a pack code dropped by a pack of one cannot
+    /// block the save.
+    fn ensure_barcodes_free(
+        &self,
+        store: &storage::Store,
+        except: Option<i64>,
+    ) -> anyhow::Result<()> {
+        for barcode in [self.barcode.as_deref(), self.pack_barcode.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            anyhow::ensure!(
+                !barcode_taken(store, barcode, except),
+                "another product already uses the barcode {barcode}"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Add a product and return its id.
 ///
 /// `category_id` links to the `categories` table when the product was saved
 /// with a known shelf; `None` when it was saved with free text that was never
 /// added to the categories table.
-pub fn insert_product(
-    store: &storage::Store,
-    name: &str,
-    price_minor: i64,
-    category: &str,
-    category_id: Option<i64>,
-    barcode: Option<&str>,
-) -> anyhow::Result<i64> {
+pub fn insert_product(store: &storage::Store, fields: &ProductFields<'_>) -> anyhow::Result<i64> {
+    let product = fields.clean()?;
+    product.ensure_barcodes_free(store, None)?;
+
     store.conn().execute(
-        "INSERT INTO products (name, price_minor, category, category_id, barcode)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        (name, price_minor, category, category_id, barcode),
+        "INSERT INTO products
+             (name, price_minor, category, category_id, barcode,
+              unit_label, pack_size, pack_price_minor, pack_barcode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            product.name,
+            fields.price_minor,
+            product.category,
+            fields.category_id,
+            product.barcode,
+            product.unit_label,
+            product.pack_size,
+            product.pack_price_minor,
+            product.pack_barcode,
+        ],
     )?;
     Ok(store.conn().last_insert_rowid())
 }
@@ -2199,20 +2499,63 @@ pub fn insert_product(
 /// Returns an error when the row is gone: the list on screen is a cache, and
 /// "Saved" over a product that no longer exists is a lie the operator would
 /// only discover on the next restart.
+///
+/// A product that has moved stock cannot change what its base unit is called:
+/// "tablet" becoming "bottle" would silently reinterpret every count already in
+/// the ledger. The pack size is free to change — the movement is in base units,
+/// and each sale and purchase line snapshotted the factor it used — but the
+/// thing the base unit names is not.
 pub fn update_product(
     store: &storage::Store,
     id: i64,
-    name: &str,
-    price_minor: i64,
-    category: &str,
-    category_id: Option<i64>,
-    barcode: Option<&str>,
+    fields: &ProductFields<'_>,
 ) -> anyhow::Result<()> {
+    let product = fields.clean()?;
+    product.ensure_barcodes_free(store, Some(id))?;
+
+    let existing = store
+        .conn()
+        .query_row(
+            "SELECT unit_label FROM products WHERE id = ?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(existing_label) = existing else {
+        anyhow::bail!("product {id} is no longer in the catalog");
+    };
+
+    if existing_label != product.unit_label {
+        let moved: bool = store.conn().query_row(
+            "SELECT EXISTS(SELECT 1 FROM stock_movements WHERE product_id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            !moved,
+            "this product has stock history, so its unit cannot be renamed. \
+             Archive it and add the new unit as a product."
+        );
+    }
+
     let changed = store.conn().execute(
         "UPDATE products
-         SET name = ?2, price_minor = ?3, category = ?4, category_id = ?5, barcode = ?6
+         SET name = ?2, price_minor = ?3, category = ?4, category_id = ?5,
+             barcode = ?6, unit_label = ?7, pack_size = ?8,
+             pack_price_minor = ?9, pack_barcode = ?10
          WHERE id = ?1",
-        (id, name, price_minor, category, category_id, barcode),
+        rusqlite::params![
+            id,
+            product.name,
+            fields.price_minor,
+            product.category,
+            fields.category_id,
+            product.barcode,
+            product.unit_label,
+            product.pack_size,
+            product.pack_price_minor,
+            product.pack_barcode,
+        ],
     )?;
     anyhow::ensure!(changed == 1, "product {id} is no longer in the catalog");
     Ok(())
@@ -2235,14 +2578,18 @@ pub fn delete_product(store: &storage::Store, id: i64) -> anyhow::Result<()> {
 /// Whether a barcode already belongs to a product other than `except`.
 ///
 /// Checked before the write so the operator gets "that barcode is taken"
-/// instead of a constraint error. The unique index still enforces it.
+/// instead of a constraint error. Both columns are searched: a pack code that
+/// matches another row's loose code is the same scanning bug, and each column's
+/// unique index is blind to the other. The unique indexes still enforce each
+/// column on their own.
 pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>) -> bool {
     store
         .conn()
         .query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM products
-                 WHERE barcode = ?1 AND id IS NOT ?2 AND archived = 0
+                 WHERE (barcode = ?1 OR pack_barcode = ?1)
+                   AND id IS NOT ?2 AND archived = 0
              )",
             (barcode, except),
             |row| row.get::<_, bool>(0),
@@ -2410,14 +2757,15 @@ fn optional_text(value: &str) -> Option<&str> {
 /// small enough to read whole, like the catalog.
 pub fn stock(store: &storage::Store) -> Vec<StockItem> {
     let mut statement = match store.conn().prepare(
-        "SELECT p.id, p.name, p.category, p.low_stock, p.cost_minor, p.target_stock,
+        "SELECT p.id, p.name, p.category, p.low_stock, p.cost_milli, p.target_stock,
                 COALESCE(SUM(m.delta), 0),
                 COALESCE((
-                    SELECT SUM(pl.qty_ordered - pl.qty_received)
+                    SELECT SUM((pl.qty_ordered - pl.qty_received) * pl.pack_size)
                     FROM purchase_lines pl
                     JOIN purchases pu ON pu.id = pl.purchase_id
                     WHERE pl.product_id = p.id AND pu.status = 'planned'
-                ), 0)
+                ), 0),
+                p.pack_size, p.unit_label
          FROM products p
          LEFT JOIN stock_movements m ON m.product_id = p.id
          WHERE p.tracked = 1 AND p.archived = 0
@@ -2437,10 +2785,12 @@ pub fn stock(store: &storage::Store) -> Vec<StockItem> {
             name: row.get(1)?,
             category: row.get(2)?,
             low_stock: row.get(3)?,
-            cost_minor: row.get(4)?,
+            cost_milli: row.get(4)?,
             target_stock: row.get(5)?,
             on_hand: row.get(6)?,
             incoming: row.get(7)?,
+            pack_size: row.get(8)?,
+            unit_label: row.get(9)?,
         })
     });
 
@@ -2621,7 +2971,7 @@ pub fn purchases(store: &storage::Store) -> Vec<Purchase> {
                 COALESCE(SUM(l.qty_ordered), 0),
                 COALESCE(SUM(l.qty_received), 0),
                 SUM(CASE WHEN p.status = 'received' THEN l.qty_received
-                         ELSE l.qty_ordered END * l.unit_cost_minor)
+                         ELSE l.qty_ordered END * l.unit_cost_minor * l.pack_size)
          FROM purchases p
          LEFT JOIN suppliers sup ON sup.id = p.supplier_id
          LEFT JOIN purchase_lines l ON l.purchase_id = p.id
@@ -2674,7 +3024,8 @@ pub fn purchase_detail(store: &storage::Store, id: i64) -> Option<PurchaseDetail
         .find(|purchase| purchase.id == id)?;
 
     let mut statement = match store.conn().prepare(
-        "SELECT id, product_id, name_snapshot, qty_ordered, qty_received, unit_cost_minor
+        "SELECT id, product_id, name_snapshot, qty_ordered, qty_received,
+                unit_cost_minor, pack_size
          FROM purchase_lines WHERE purchase_id = ?1 ORDER BY position, id",
     ) {
         Ok(statement) => statement,
@@ -2692,6 +3043,7 @@ pub fn purchase_detail(store: &storage::Store, id: i64) -> Option<PurchaseDetail
             qty_ordered: row.get(3)?,
             qty_received: row.get(4)?,
             unit_cost_minor: row.get(5)?,
+            pack_size: row.get(6)?,
         })
     });
 
@@ -2892,6 +3244,7 @@ pub fn receive_purchase(
             line.unit_cost_minor.is_none_or(|cost| cost >= 0),
             "a cost cannot be negative"
         );
+        anyhow::ensure!(line.pack_size >= 1, "a pack holds at least one unit");
         if line.qty == 0 {
             continue;
         }
@@ -2937,9 +3290,10 @@ pub fn receive_purchase(
                     "UPDATE purchase_lines
                      SET qty_ordered = MAX(qty_ordered, ?2),
                          qty_received = qty_received + ?2,
-                         unit_cost_minor = COALESCE(?3, unit_cost_minor)
+                         unit_cost_minor = COALESCE(?3, unit_cost_minor),
+                         pack_size = ?4
                      WHERE id = ?1",
-                    (line_id, line.qty, line.unit_cost_minor),
+                    (line_id, line.qty, line.unit_cost_minor, line.pack_size),
                 )?;
                 line_id
             }
@@ -2957,8 +3311,8 @@ pub fn receive_purchase(
                 transaction.execute(
                     "INSERT INTO purchase_lines
                          (uid, purchase_id, product_id, name_snapshot, qty_ordered,
-                          qty_received, unit_cost_minor, position)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                          qty_received, unit_cost_minor, position, pack_size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
                     (
                         uuid::Uuid::now_v7().to_string(),
                         id,
@@ -2967,6 +3321,7 @@ pub fn receive_purchase(
                         line.qty,
                         line.unit_cost_minor,
                         position,
+                        line.pack_size,
                     ),
                 )?;
                 transaction.last_insert_rowid()
@@ -2979,7 +3334,7 @@ pub fn receive_purchase(
              VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6)",
             (
                 line.product_id,
-                line.qty,
+                line.qty * line.pack_size,
                 optional_text(note),
                 user_id,
                 line_id,
@@ -2988,9 +3343,15 @@ pub fn receive_purchase(
         )?;
 
         if let Some(cost) = line.unit_cost_minor {
+            // `unit_cost_minor` is the price of one ordered unit — a pack when
+            // `pack_size` is above one. The product cost that margin and the
+            // loose-price prefill read is per base unit, so it is divided down
+            // and kept in thousandths. Rounding to nearest keeps 1,850 per 100
+            // at 18.5 rather than truncating to 18.
+            let cost_milli = (cost * 1000 + line.pack_size / 2) / line.pack_size;
             transaction.execute(
-                "UPDATE products SET cost_minor = ?2 WHERE id = ?1",
-                (line.product_id, cost),
+                "UPDATE products SET cost_milli = ?2 WHERE id = ?1",
+                (line.product_id, cost_milli),
             )?;
         }
     }
@@ -3053,6 +3414,7 @@ fn insert_purchase_lines(
             line.unit_cost_minor.is_none_or(|cost| cost >= 0),
             "a cost cannot be negative"
         );
+        anyhow::ensure!(line.pack_size >= 1, "a pack holds at least one unit");
         anyhow::ensure!(
             seen.insert(line.product_id),
             "the same product is on the list twice"
@@ -3075,8 +3437,8 @@ fn insert_purchase_lines(
         transaction.execute(
             "INSERT INTO purchase_lines
                  (uid, purchase_id, product_id, name_snapshot, qty_ordered,
-                  unit_cost_minor, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  unit_cost_minor, position, pack_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 uuid::Uuid::now_v7().to_string(),
                 purchase_id,
@@ -3085,6 +3447,7 @@ fn insert_purchase_lines(
                 line.qty,
                 line.unit_cost_minor,
                 position as i64,
+                line.pack_size,
             ),
         )?;
     }
@@ -3127,6 +3490,11 @@ pub fn record_sale(
     let total_minor = lines.iter().try_fold(0_i64, |sum, line| {
         anyhow::ensure!(line.qty > 0, "{} has no quantity", line.name);
         anyhow::ensure!(line.unit_minor >= 0, "{} has a negative price", line.name);
+        anyhow::ensure!(
+            line.unit_factor >= 1,
+            "{} needs at least one unit in its pack",
+            line.name
+        );
         anyhow::ensure!(
             !line.name.trim().is_empty(),
             "a sale line needs a name to print on the receipt"
@@ -3191,11 +3559,13 @@ pub fn record_sale(
         // The cost is the one the shop last paid, snapshotted here. Profit is a
         // historical fact: a supplier's next price must not rewrite last
         // month's margin. An untracked or never-costed product stores NULL,
-        // which the margin query reads as "not known" rather than zero.
-        let cost_minor: Option<i64> = match line.product_id {
+        // which the margin query reads as "not known" rather than zero. The
+        // product's cost is per base unit in thousandths, so a pack line's
+        // cost is `qty × unit_factor × cost_milli / 1000`.
+        let cost_milli: Option<i64> = match line.product_id {
             Some(product_id) => transaction
                 .query_row(
-                    "SELECT cost_minor FROM products WHERE id = ?1",
+                    "SELECT cost_milli FROM products WHERE id = ?1",
                     [product_id],
                     |row| row.get::<_, Option<i64>>(0),
                 )
@@ -3205,8 +3575,9 @@ pub fn record_sale(
         };
         transaction.execute(
             "INSERT INTO sale_lines
-                 (sale_id, product_id, name, qty, unit_minor, total_minor, cost_minor, uid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (sale_id, product_id, name, qty, unit_minor, total_minor, cost_minor,
+                  uid, unit_factor, unit_label, cost_milli)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             (
                 id,
                 line.product_id,
@@ -3214,8 +3585,11 @@ pub fn record_sale(
                 line.qty,
                 line.unit_minor,
                 line.qty * line.unit_minor,
-                cost_minor,
+                cost_milli.map(|cost| (cost + 500) / 1000),
                 line_uid.as_str(),
+                line.unit_factor,
+                line.unit_label.as_deref(),
+                cost_milli,
             ),
         )?;
 
@@ -3235,12 +3609,16 @@ pub fn record_sale(
                 |row| row.get(0),
             )?;
             if tracked {
+                let units = line
+                    .qty
+                    .checked_mul(line.unit_factor)
+                    .context("a line's stock movement does not fit in 64 bits")?;
                 let movement_uid = uuid::Uuid::now_v7().to_string();
                 transaction.execute(
                     "INSERT INTO stock_movements
                          (product_id, delta, kind, sale_id, user_id, uid)
                      VALUES (?1, ?2, 'sale', ?3, ?4, ?5)",
-                    (product_id, -line.qty, id, user_id, movement_uid.as_str()),
+                    (product_id, -units, id, user_id, movement_uid.as_str()),
                 )?;
             }
         }
@@ -3550,11 +3928,12 @@ pub fn margin(store: &storage::Store, range: usize, user: Option<&str>) -> Margi
     let clause = window_clause(range, "s.created_at");
     let sql = format!(
         "SELECT
-             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL
+             COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL
                                THEN l.qty * l.unit_minor ELSE 0 END), 0),
-             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL
-                               THEN l.qty * l.cost_minor ELSE 0 END), 0),
-             COALESCE(SUM(CASE WHEN l.cost_minor IS NOT NULL THEN 1 ELSE 0 END), 0),
+             (COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL
+                                THEN l.qty * l.unit_factor * l.cost_milli ELSE 0 END), 0)
+              + 500) / 1000,
+             COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL THEN 1 ELSE 0 END), 0),
              COUNT(l.id)
          FROM sale_lines l JOIN sales s ON s.id = l.sale_id
          WHERE {clause}"
@@ -3742,6 +4121,10 @@ pub struct DetailLine {
     /// `qty * unit` as recorded, not recomputed: the sale is the record of
     /// what was charged, and recomputing would only invite disagreement.
     pub total_minor: i64,
+    /// How many base units one sold unit held: `1` loose, `pack_size` sealed.
+    pub unit_factor: i64,
+    /// The label on the line at the time, when it was anything but `unit`.
+    pub unit_label: Option<String>,
 }
 
 /// The whole record of one sale: its lines, its money, and who took it.
@@ -3814,9 +4197,10 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     };
 
     let lines = {
-        let mut statement = match conn
-            .prepare("SELECT name, qty, unit_minor, total_minor FROM sale_lines WHERE sale_id = ?1")
-        {
+        let mut statement = match conn.prepare(
+            "SELECT name, qty, unit_minor, total_minor, unit_factor, unit_label
+             FROM sale_lines WHERE sale_id = ?1",
+        ) {
             Ok(statement) => statement,
             Err(err) => {
                 tracing::warn!(error = %err, "sale lines prepare failed");
@@ -3829,6 +4213,8 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
                 qty: row.get(1)?,
                 unit_minor: row.get(2)?,
                 total_minor: row.get(3)?,
+                unit_factor: row.get(4)?,
+                unit_label: row.get(5)?,
             })
         });
         match rows {
@@ -4403,6 +4789,59 @@ mod tests {
     use crate::auth::{CredentialKind, Role};
     use std::path::PathBuf;
 
+    /// The pre-pack call shape, kept for the many tests that only care about a
+    /// name, a price and a barcode. The production entry point takes the whole
+    /// set of fields; these wrappers fill the rest with the neutral defaults.
+    fn insert_product(
+        store: &storage::Store,
+        name: &str,
+        price_minor: i64,
+        category: &str,
+        category_id: Option<i64>,
+        barcode: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        super::insert_product(
+            store,
+            &ProductFields {
+                name,
+                price_minor,
+                category,
+                category_id,
+                barcode,
+                unit_label: "unit",
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+            },
+        )
+    }
+
+    fn update_product(
+        store: &storage::Store,
+        id: i64,
+        name: &str,
+        price_minor: i64,
+        category: &str,
+        category_id: Option<i64>,
+        barcode: Option<&str>,
+    ) -> anyhow::Result<()> {
+        super::update_product(
+            store,
+            id,
+            &ProductFields {
+                name,
+                price_minor,
+                category,
+                category_id,
+                barcode,
+                unit_label: "unit",
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+            },
+        )
+    }
+
     /// A real file, not `:memory:`: the till runs with pragmas that only exist
     /// on disk, and a test that skips them is testing a different database.
     fn store(name: &str) -> (storage::Store, PathBuf) {
@@ -4681,6 +5120,8 @@ mod tests {
             name: name.to_owned(),
             qty: 1,
             unit_minor,
+            unit_factor: 1,
+            unit_label: None,
         };
         let ring = |user: &str, shift: &str, name: &str, amount: i64| {
             record_sale(
@@ -5182,12 +5623,16 @@ mod tests {
                 name: "Espresso".to_owned(),
                 qty: 1,
                 unit_minor: 2_800,
+                unit_factor: 1,
+                unit_label: None,
             },
             SaleLine {
                 product_id: None,
                 name: "Unlisted bun".to_owned(),
                 qty: 2,
                 unit_minor: 500,
+                unit_factor: 1,
+                unit_label: None,
             },
         ];
 
@@ -5254,6 +5699,8 @@ mod tests {
             name: "Bun".to_owned(),
             qty: 1,
             unit_minor,
+            unit_factor: 1,
+            unit_label: None,
         };
         record_sale(&store, &[line(2_000)], 0, 0, 2_000, None, Some(&shift.uid))
             .expect("first sale");
@@ -5377,12 +5824,16 @@ mod tests {
                     name: "Soap".to_owned(),
                     qty: 3,
                     unit_minor: 1_000,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
                 SaleLine {
                     product_id: Some(bun),
                     name: "Bun".to_owned(),
                     qty: 2,
                     unit_minor: 500,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
             ],
             0,
@@ -5484,6 +5935,8 @@ mod tests {
                 name: "Soap".to_owned(),
                 qty: 4,
                 unit_minor: 1_000,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -5532,6 +5985,8 @@ mod tests {
             name: "Espresso".to_owned(),
             qty: 1,
             unit_minor: 2_800,
+            unit_factor: 1,
+            unit_label: None,
         }];
 
         assert!(
@@ -5562,6 +6017,8 @@ mod tests {
             name: "Milk".to_owned(),
             qty: 1,
             unit_minor: 2_000,
+            unit_factor: 1,
+            unit_label: None,
         };
 
         let first = record_sale(&store, &[line()], 0, 0, 2_000, None, None).expect("first");
@@ -5614,6 +6071,8 @@ mod tests {
                 name: "Milk".to_owned(),
                 qty: 1,
                 unit_minor: 2_000,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -5672,6 +6131,8 @@ mod tests {
                 name: "Flat white".to_owned(),
                 qty: 1,
                 unit_minor: 3_400,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -5714,6 +6175,8 @@ mod tests {
             name: "Soap".to_owned(),
             qty: 1,
             unit_minor: 1_000,
+            unit_factor: 1,
+            unit_label: None,
         };
         let first = record_sale(&store, std::slice::from_ref(&line), 0, 0, 1_000, None, None)
             .expect("first");
@@ -5863,6 +6326,8 @@ mod tests {
                 name: "Tea".to_owned(),
                 qty: 1,
                 unit_minor: 500,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -5944,12 +6409,16 @@ mod tests {
                     name: "Sugar 1kg".to_owned(),
                     qty: 2,
                     unit_minor: 8000,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
                 SaleLine {
                     product_id: None,
                     name: "Tea".to_owned(),
                     qty: 1,
                     unit_minor: 500,
+                    unit_factor: 1,
+                    unit_label: None,
                 },
             ],
             // Total is 16 500; UGX coins end in 100, so the till rounds up 100.
@@ -5996,6 +6465,8 @@ mod tests {
                 name: "Tea".to_owned(),
                 qty: 1,
                 unit_minor: 500,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -6029,6 +6500,8 @@ mod tests {
                 name: "Bread".to_owned(),
                 qty: 1,
                 unit_minor: 340,
+                unit_factor: 1,
+                unit_label: None,
             }],
             60,
             0,
@@ -6044,6 +6517,8 @@ mod tests {
                 name: "Milk".to_owned(),
                 qty: 1,
                 unit_minor: 500,
+                unit_factor: 1,
+                unit_label: None,
             }],
             0,
             0,
@@ -6290,6 +6765,7 @@ mod tests {
                 product_id: soap,
                 qty: 5,
                 unit_cost_minor: Some(100),
+                pack_size: 1,
             }],
             None,
         )
@@ -6328,6 +6804,7 @@ mod tests {
                 product_id: soap,
                 qty: 3,
                 unit_cost_minor: Some(120),
+                pack_size: 1,
             }],
             &[],
             "",
@@ -6341,7 +6818,11 @@ mod tests {
             .expect("stock");
         assert_eq!(item.on_hand, 3);
         assert_eq!(item.incoming, 0, "the list is closed, nothing is coming");
-        assert_eq!(item.cost_minor, Some(120), "last cost came from receiving");
+        assert_eq!(
+            item.cost_milli,
+            Some(120_000),
+            "last cost came from receiving"
+        );
 
         let list = purchases(&store);
         assert_eq!(list[0].status, PurchaseStatus::Received);
@@ -6367,6 +6848,7 @@ mod tests {
                     product_id: soap,
                     qty: 2,
                     unit_cost_minor: None,
+                    pack_size: 1,
                 }],
                 &[],
                 "",
@@ -6395,6 +6877,7 @@ mod tests {
                 product_id: soap,
                 qty: 2,
                 unit_cost_minor: Some(100),
+                pack_size: 1,
             }],
             None,
         )
@@ -6409,6 +6892,7 @@ mod tests {
                 product_id: soap,
                 qty: 7,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             &[],
             "",
@@ -6436,6 +6920,7 @@ mod tests {
                 product_id: soap,
                 qty: 4,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             None,
         )
@@ -6449,7 +6934,8 @@ mod tests {
                 &[PurchaseLineInput {
                     product_id: soap,
                     qty: 9,
-                    unit_cost_minor: None
+                    unit_cost_minor: None,
+                    pack_size: 1,
                 }]
             )
             .is_ok(),
@@ -6465,6 +6951,7 @@ mod tests {
                 product_id: soap,
                 qty: 4,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             None,
         )
@@ -6478,6 +6965,7 @@ mod tests {
                 product_id: soap,
                 qty: 1,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             &[],
             "",
@@ -6494,7 +6982,8 @@ mod tests {
                 &[PurchaseLineInput {
                     product_id: soap,
                     qty: 4,
-                    unit_cost_minor: None
+                    unit_cost_minor: None,
+                    pack_size: 1,
                 }]
             )
             .is_err(),
@@ -6531,7 +7020,16 @@ mod tests {
             .collect();
         store.migrate(&older).expect("migrate to 14");
 
-        let soap = stocked(&store, "Soap", 0, 2, None);
+        // The old schema has no pack columns, so seed the row the old way.
+        store
+            .conn()
+            .execute(
+                "INSERT INTO products (name, price_minor, category) VALUES ('Soap', 500, 'Shop')",
+                [],
+            )
+            .expect("legacy product");
+        let soap = store.conn().last_insert_rowid();
+        track_product(&store, soap, 0, 2, None, None).expect("track");
         store
             .conn()
             .execute(
@@ -6595,6 +7093,7 @@ mod tests {
                     product_id: soap,
                     qty: 3,
                     unit_cost_minor: None,
+                    pack_size: 1,
                 }],
                 &[],
                 "",
@@ -6623,11 +7122,13 @@ mod tests {
                     product_id: soap,
                     qty: 2,
                     unit_cost_minor: None,
+                    pack_size: 1,
                 },
                 PurchaseLineInput {
                     product_id: rice,
                     qty: 5,
                     unit_cost_minor: None,
+                    pack_size: 1,
                 },
             ],
             None,
@@ -6654,12 +7155,14 @@ mod tests {
                     product_id: soap,
                     qty: 2,
                     unit_cost_minor: Some(50),
+                    pack_size: 1,
                 },
                 ReceiveLine {
                     line_id: None,
                     product_id: salt,
                     qty: 3,
                     unit_cost_minor: Some(80),
+                    pack_size: 1,
                 },
             ],
             &[rice_line],
@@ -6697,6 +7200,7 @@ mod tests {
                 product_id: soap,
                 qty: 2,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             None,
         )
@@ -6728,6 +7232,7 @@ mod tests {
                 product_id: soap,
                 qty: 2,
                 unit_cost_minor: Some(70),
+                pack_size: 1,
             }],
             None,
         )
@@ -6741,6 +7246,7 @@ mod tests {
                 product_id: soap,
                 qty: 2,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             &[],
             "",
@@ -6770,7 +7276,8 @@ mod tests {
                 &[PurchaseLineInput {
                     product_id: soap,
                     qty: 1,
-                    unit_cost_minor: None
+                    unit_cost_minor: None,
+                    pack_size: 1,
                 }]
             )
             .is_err(),
@@ -6794,7 +7301,8 @@ mod tests {
                 &[PurchaseLineInput {
                     product_id: loose,
                     qty: 5,
-                    unit_cost_minor: None
+                    unit_cost_minor: None,
+                    pack_size: 1,
                 }],
                 None
             )
@@ -6811,6 +7319,7 @@ mod tests {
                 product_id: soap,
                 qty: 5,
                 unit_cost_minor: None,
+                pack_size: 1,
             }],
             None,
         )
@@ -6829,6 +7338,7 @@ mod tests {
                     product_id: soap,
                     qty: 1,
                     unit_cost_minor: None,
+                    pack_size: 1,
                 }],
                 &[],
                 "",
@@ -6848,7 +7358,7 @@ mod tests {
         store
             .conn()
             .execute(
-                "UPDATE sale_lines SET cost_minor = 100 WHERE sale_id = ?1 AND name = 'Tea'",
+                "UPDATE sale_lines SET cost_milli = 100000 WHERE sale_id = ?1 AND name = 'Tea'",
                 [id],
             )
             .expect("cost one line");
@@ -6865,6 +7375,208 @@ mod tests {
         assert!(reported.has_cost());
 
         assert_eq!(margin(&store, 3, None).profit_minor(), 400);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A pack is a conversion on one catalog row, not a second product: both
+    /// codes point at the row, and the second code is never free for another
+    /// product to take.
+    #[test]
+    fn a_pack_lives_on_the_same_row_as_its_loose_units() {
+        let (store, path) = store("pack-fields");
+        let id = super::insert_product(
+            &store,
+            &ProductFields {
+                name: "Amoxicillin",
+                price_minor: 30,
+                category: "Medicine",
+                category_id: None,
+                barcode: Some("100100"),
+                unit_label: "tablet",
+                pack_size: 100,
+                pack_price_minor: Some(2_800),
+                pack_barcode: Some("100200"),
+            },
+        )
+        .expect("insert");
+
+        let list = products(&store);
+        assert_eq!(list.len(), 1, "a pack is not a second product");
+        let product = &list[0];
+        assert_eq!(product.id, id);
+        assert_eq!(product.price_minor, 30, "the tablet price");
+        assert_eq!(product.unit_label, "tablet");
+        assert_eq!(product.pack_size, 100);
+        assert_eq!(product.pack_price_minor, Some(2_800));
+        assert_eq!(product.pack_barcode.as_deref(), Some("100200"));
+        assert!(barcode_taken(&store, "100100", None), "the loose code");
+        assert!(barcode_taken(&store, "100200", None), "the box code");
+
+        // The box code cannot be reused as a loose code on another product.
+        let error = super::insert_product(
+            &store,
+            &ProductFields {
+                name: "Other",
+                price_minor: 10,
+                category: "Medicine",
+                category_id: None,
+                barcode: Some("100200"),
+                unit_label: "unit",
+                pack_size: 1,
+                pack_price_minor: None,
+                pack_barcode: None,
+            },
+        )
+        .expect_err("a code belongs to one product");
+        assert!(error.to_string().contains("barcode"), "{error}");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A pack of one is just the base unit. Keeping its second price and code
+    /// would offer two names for the same thing.
+    #[test]
+    fn a_pack_of_one_keeps_no_pack_price_or_code() {
+        let (store, path) = store("pack-of-one");
+        super::insert_product(
+            &store,
+            &ProductFields {
+                name: "Single",
+                price_minor: 500,
+                category: "Shop",
+                category_id: None,
+                barcode: None,
+                unit_label: "box",
+                pack_size: 1,
+                pack_price_minor: Some(9_000),
+                pack_barcode: Some("999"),
+            },
+        )
+        .expect("insert");
+
+        let product = products(&store).into_iter().next().expect("product");
+        assert_eq!(product.pack_size, 1);
+        assert_eq!(product.pack_price_minor, None);
+        assert_eq!(product.pack_barcode, None);
+        assert!(!barcode_taken(&store, "999", None), "the code was dropped");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Buying a pack stores the cost per tablet, not the cost of the box, so a
+    /// later loose sale can be costed at the exact half-unit it cost.
+    #[test]
+    fn receiving_a_pack_stores_the_cost_per_tablet() {
+        let (store, path) = store("pack-receive");
+        let id = super::insert_product(
+            &store,
+            &ProductFields {
+                name: "Amoxicillin",
+                price_minor: 30,
+                category: "Medicine",
+                category_id: None,
+                barcode: None,
+                unit_label: "tablet",
+                pack_size: 100,
+                pack_price_minor: Some(2_800),
+                pack_barcode: None,
+            },
+        )
+        .expect("insert");
+        track_product(&store, id, 0, 0, None, None).expect("track");
+
+        let purchase = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: id,
+                qty: 2,
+                unit_cost_minor: Some(1_850),
+                pack_size: 100,
+            }],
+            None,
+        )
+        .expect("plan");
+        let line = purchase_detail(&store, purchase).expect("detail").lines[0].id;
+        receive_purchase(
+            &store,
+            purchase,
+            &[ReceiveLine {
+                line_id: Some(line),
+                product_id: id,
+                qty: 2,
+                unit_cost_minor: Some(1_850),
+                pack_size: 100,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive");
+
+        let item = stock(&store).into_iter().next().expect("stock");
+        assert_eq!(item.on_hand, 200, "two packs of 100");
+        assert_eq!(item.cost_milli, Some(18_500), "1,850 / 100, exact");
+        assert_eq!(item.unit_cost_minor(), Some(19), "rounded for a loose line");
+        assert_eq!(item.pack_cost_minor(), Some(1_850), "back to the invoice");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The pack leaves the shelf as its size, and the profit uses the same
+    /// factor so a box sale is not costed as one tablet.
+    #[test]
+    fn a_pack_sale_moves_a_pack_of_stock_and_costs_a_pack() {
+        let (store, path) = store("pack-sale");
+        let id = super::insert_product(
+            &store,
+            &ProductFields {
+                name: "Amoxicillin",
+                price_minor: 30,
+                category: "Medicine",
+                category_id: None,
+                barcode: None,
+                unit_label: "tablet",
+                pack_size: 100,
+                pack_price_minor: Some(2_800),
+                pack_barcode: None,
+            },
+        )
+        .expect("insert");
+        track_product(&store, id, 200, 0, None, None).expect("track");
+        store
+            .conn()
+            .execute("UPDATE products SET cost_milli = 18500 WHERE id = ?1", [id])
+            .expect("cost");
+
+        record_sale(
+            &store,
+            &[SaleLine {
+                product_id: Some(id),
+                name: "Amoxicillin".to_owned(),
+                qty: 1,
+                unit_minor: 2_800,
+                unit_factor: 100,
+                unit_label: Some("pack of 100".to_owned()),
+            }],
+            0,
+            0,
+            2_800,
+            None,
+            None,
+        )
+        .expect("sell a pack");
+
+        let item = stock(&store).into_iter().next().expect("stock");
+        assert_eq!(item.on_hand, 100, "one pack left the shelf");
+
+        let reported = margin(&store, 0, None);
+        assert_eq!(reported.revenue_minor, 2_800);
+        assert_eq!(reported.cost_minor, 1_850, "100 tablets, not one");
+        assert_eq!(reported.profit_minor(), 950);
+        assert!(reported.is_complete());
 
         let _ = std::fs::remove_file(path);
     }

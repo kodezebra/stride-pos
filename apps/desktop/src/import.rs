@@ -8,8 +8,13 @@
 //! Rows are flexible rather than a fixed dialect: a file with the shop's own
 //! column headings (`product_name`, `category_name`, `retail_price_ugx`,
 //! `barcode`) and a plain `name, category, price, barcode` file both work.
-//! Weights, cost prices and units are columns the till cannot price yet; they
-//! are ignored, not a reason to refuse the rest of the file.
+//! Weights and cost prices are columns the till cannot price yet; they are
+//! ignored, not a reason to refuse the rest of the file.
+//!
+//! A file may also carry `unit`, `pack_size`, `pack_price` and `pack_barcode`.
+//! The price column stays the price of one base unit, so a pack row says how
+//! many units the box holds and what the sealed box costs, without turning the
+//! row into a second product.
 
 use money::{Currency, Money};
 
@@ -24,6 +29,13 @@ pub struct Row {
     /// and the import caption says so.
     pub price_minor: i64,
     pub barcode: Option<String>,
+    /// What one base unit is called; `unit` when the file says nothing.
+    pub unit_label: String,
+    /// How many base units one sealed pack holds; `1` when there is no pack.
+    pub pack_size: i64,
+    /// The sealed pack's price. Only meaningful when `pack_size` is above one.
+    pub pack_price_minor: Option<i64>,
+    pub pack_barcode: Option<String>,
 }
 
 /// Parse CSV text into importable rows plus per-line errors.
@@ -92,11 +104,84 @@ pub fn parse(text: &str, currency: Currency) -> (Vec<Row>, Vec<String>) {
             .map(|column| cell(&fields, column))
             .filter(|code| !code.is_empty());
 
+        let unit_label = columns
+            .unit_label
+            .map(|column| cell(&fields, column))
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "unit".to_owned());
+
+        let pack_size_text = columns
+            .pack_size
+            .map(|column| cell(&fields, column))
+            .unwrap_or_default();
+        let pack_size = if pack_size_text.is_empty() {
+            1
+        } else {
+            match pack_size_text.parse::<i64>() {
+                Ok(size) if size >= 1 => size,
+                _ => {
+                    errors.push(format!(
+                        "line {number}: the pack size must be a whole number of one or more."
+                    ));
+                    continue;
+                }
+            }
+        };
+
+        let pack_price_text = columns
+            .pack_price
+            .map(|column| cell(&fields, column))
+            .unwrap_or_default();
+        let pack_barcode = columns
+            .pack_barcode
+            .map(|column| cell(&fields, column))
+            .filter(|code| !code.is_empty());
+
+        // A row that names a pack price or pack barcode but no pack is a
+        // contradiction, not a small typo: dropping the pack quietly would
+        // import a box at the loose price. Say so and keep the rest of the file.
+        if pack_size <= 1 && (!pack_price_text.is_empty() || pack_barcode.is_some()) {
+            errors.push(format!(
+                "line {number}: a pack price or barcode needs a pack size above one."
+            ));
+            continue;
+        }
+
+        let pack_price_minor = if pack_size <= 1 || pack_price_text.is_empty() {
+            None
+        } else {
+            match Money::parse(&pack_price_text, currency) {
+                Ok(price) if price.minor() >= 0 => Some(price.minor()),
+                Ok(_) => {
+                    errors.push(format!("line {number}: the pack price cannot be negative."));
+                    continue;
+                }
+                Err(error) => {
+                    errors.push(format!("line {number}: {error}"));
+                    continue;
+                }
+            }
+        };
+
+        if pack_size > 1
+            && let Some(pack_code) = pack_barcode.as_deref()
+            && barcode.as_deref() == Some(pack_code)
+        {
+            errors.push(format!(
+                "line {number}: the loose and pack barcodes cannot be the same."
+            ));
+            continue;
+        }
+
         rows.push(Row {
             name: name.to_owned(),
             category,
             price_minor,
             barcode,
+            unit_label,
+            pack_size,
+            pack_price_minor,
+            pack_barcode,
         });
     }
 
@@ -111,16 +196,30 @@ struct Columns {
     /// `None` when there is no barcode column at all, so a file without one
     /// imports cleanly rather than reading a name as a barcode.
     barcode: Option<usize>,
+    /// The name of one base unit, when the file names it.
+    unit_label: Option<usize>,
+    /// How many base units one sealed pack holds, when the file has packs.
+    pack_size: Option<usize>,
+    /// The sealed pack's price, when the file has packs.
+    pack_price: Option<usize>,
+    /// The barcode printed on the box, when the file has packs.
+    pack_barcode: Option<usize>,
 }
 
 impl Columns {
-    /// Columns of a file with no heading row.
+    /// Columns of a file with no heading row. The plain order stays the four
+    /// original fields: a file that predates packs must keep importing the
+    /// same way it always did.
     fn plain() -> Self {
         Columns {
             name: 0,
             category: 1,
             price: 2,
             barcode: Some(3),
+            unit_label: None,
+            pack_size: None,
+            pack_price: None,
+            pack_barcode: None,
         }
     }
 }
@@ -136,6 +235,11 @@ fn is_heading(field: &str) -> bool {
         "retail_price",
         "retail_price_ugx",
         "barcode",
+        "unit",
+        "unit_label",
+        "pack_size",
+        "pack_price",
+        "pack_barcode",
     ];
     HEADINGS
         .iter()
@@ -157,6 +261,10 @@ fn columns_from_headings(headings: &[String]) -> Columns {
         category: position(&["category_name", "category"]).unwrap_or(1),
         price: position(&["retail_price_ugx", "retail_price", "price"]).unwrap_or(2),
         barcode: position(&["barcode"]),
+        unit_label: position(&["unit_label", "unit"]),
+        pack_size: position(&["pack_size"]),
+        pack_price: position(&["pack_price", "pack_retail_price"]),
+        pack_barcode: position(&["pack_barcode", "box_barcode"]),
     }
 }
 
@@ -239,6 +347,38 @@ cost_price_ugx,retail_price_ugx,is_weighted,barcode";
         assert_eq!(rows[0].category, "Cleaning");
         assert_eq!(rows[0].price_minor, 3500);
         assert_eq!(rows[0].barcode, None);
+    }
+
+    /// A pack row is still one product: the price is per tablet, and the pack
+    /// columns describe the box without becoming a second line in the file.
+    #[test]
+    fn a_pack_row_carries_its_own_size_price_and_code() {
+        let text = "name,category,price,unit,pack_size,pack_price,barcode,pack_barcode\n\
+                    Amoxicillin,Medicine,30,tablet,100,2800,100100,100200";
+        let (rows, errors) = parse(text, ugx());
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.price_minor, 30, "the tablet price");
+        assert_eq!(row.unit_label, "tablet");
+        assert_eq!(row.pack_size, 100);
+        assert_eq!(row.pack_price_minor, Some(2_800));
+        assert_eq!(row.barcode.as_deref(), Some("100100"));
+        assert_eq!(row.pack_barcode.as_deref(), Some("100200"));
+    }
+
+    /// A pack of one with a box price is a contradiction: importing it would
+    /// quietly sell the whole box for the loose price.
+    #[test]
+    fn a_pack_of_one_with_a_pack_price_is_refused() {
+        let text = "name,category,price,unit,pack_size,pack_price,pack_barcode\n\
+                    Single,Shop,500,box,1,9000,999";
+        let (rows, errors) = parse(text, ugx());
+
+        assert!(rows.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("pack size above one"), "{errors:?}");
     }
 
     #[test]

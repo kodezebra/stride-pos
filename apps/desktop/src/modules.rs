@@ -483,11 +483,11 @@ impl Module for Sell {
             let needle = scanned.to_lowercase();
             let visible = visible_products(&state.products, state.category.as_deref(), &needle);
             match scan_target(&state.products, &scanned, &visible) {
-                Scan::One(index) => {
+                Scan::One { index, unit_factor } => {
                     // Cloned because the lookup holds `state.products` borrowed
                     // and `add_to_cart` needs the whole state.
                     let product = state.products[index].clone();
-                    state.add_to_cart(&product);
+                    state.add_to_cart(&product, unit_factor);
                     // Clear the field so the next scan starts clean, and keep the
                     // focus so it lands here without a mouse.
                     state.sell_search.clear();
@@ -600,9 +600,9 @@ impl Sell {
             SellView::List => product_rows(ui, state, &visible),
         };
 
-        if let Some(index) = clicked {
+        if let Some((index, unit_factor)) = clicked {
             let product = state.products[index].clone();
-            state.add_to_cart(&product);
+            state.add_to_cart(&product, unit_factor);
         }
     }
 }
@@ -653,7 +653,7 @@ fn sell_view_toggle(ui: &mut egui::Ui, view: &mut SellView) {
 /// two-line label can never push its neighbour onto the next row. Cell width
 /// follows the count, so a narrow panel fills instead of leaving a stub of dead
 /// space next to every key.
-fn product_tiles(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<usize> {
+fn product_tiles(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<(usize, i64)> {
     let gap = SPACING.sm;
     let available = ui.available_width();
     let columns = (((available + gap) / (TILE_MIN + gap)).floor() as usize).clamp(1, 6);
@@ -684,8 +684,35 @@ fn product_tiles(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<
                     name: &product.name,
                     price: &price,
                 };
-                if ui.put(rect, tile).clicked() {
-                    clicked = Some(product_index);
+                let response = ui.put(rect, tile);
+                let response = if product.pack_size > 1
+                    && let Some(pack_price) = product.pack_price_minor
+                {
+                    response.on_hover_text(format!(
+                        "Pack of {}: {}",
+                        product.pack_size,
+                        state.money(pack_price)
+                    ))
+                } else {
+                    response
+                };
+                response.context_menu(|ui| {
+                    if ui.button("Add loose").clicked() {
+                        clicked = Some((product_index, 1));
+                        ui.close();
+                    }
+                    if product.pack_size > 1
+                        && product.pack_price_minor.is_some()
+                        && ui
+                            .button(format!("Add pack of {}", product.pack_size))
+                            .clicked()
+                    {
+                        clicked = Some((product_index, product.pack_size));
+                        ui.close();
+                    }
+                });
+                if response.clicked() {
+                    clicked = Some((product_index, 1));
                 }
             }
 
@@ -705,7 +732,7 @@ fn product_tiles(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<
 /// A list is for products whose names are long enough that a tile would cut
 /// them, so the row is one line high and the name wears the ellipsis, never the
 /// price.
-fn product_rows(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<usize> {
+fn product_rows(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<(usize, i64)> {
     let mut clicked = None;
     egui::ScrollArea::vertical()
         .id_salt("sell_list")
@@ -715,8 +742,35 @@ fn product_rows(ui: &mut egui::Ui, state: &State, visible: &[usize]) -> Option<u
             for &product_index in visible {
                 let product = &state.products[product_index];
                 let price = state.money(product.price_minor);
-                if sell_row(ui, &product.name, &price).clicked() {
-                    clicked = Some(product_index);
+                let response = sell_row(ui, &product.name, &price);
+                let response = if product.pack_size > 1
+                    && let Some(pack_price) = product.pack_price_minor
+                {
+                    response.on_hover_text(format!(
+                        "Pack of {}: {}",
+                        product.pack_size,
+                        state.money(pack_price)
+                    ))
+                } else {
+                    response
+                };
+                response.context_menu(|ui| {
+                    if ui.button("Add loose").clicked() {
+                        clicked = Some((product_index, 1));
+                        ui.close();
+                    }
+                    if product.pack_size > 1
+                        && product.pack_price_minor.is_some()
+                        && ui
+                            .button(format!("Add pack of {}", product.pack_size))
+                            .clicked()
+                    {
+                        clicked = Some((product_index, product.pack_size));
+                        ui.close();
+                    }
+                });
+                if response.clicked() {
+                    clicked = Some((product_index, 1));
                 }
             }
         });
@@ -897,14 +951,19 @@ fn cart(ui: &mut egui::Ui, state: &mut State) {
                     // which is how a cashier sells ten of something without
                     // tapping `+` ten times.
                     ui.horizontal(|ui| {
+                        let each = format!(
+                            "{} × {}{}",
+                            line.qty,
+                            state.money(line.unit_minor),
+                            line.unit_label
+                                .as_deref()
+                                .map(|label| format!(" · {label}"))
+                                .unwrap_or_default()
+                        );
                         ui.label(
-                            components::numeric(format!(
-                                "{} × {}",
-                                line.qty,
-                                state.money(line.unit_minor)
-                            ))
-                            .size(TYPE.small)
-                            .color(palette.text_muted),
+                            components::numeric(each)
+                                .size(TYPE.small)
+                                .color(palette.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Quick-remove item button (trash). The hit area is a
@@ -2577,6 +2636,12 @@ fn matches(product: &Product, category: Option<&str>, needle: &str) -> bool {
         || product
             .barcode
             .as_deref()
+            .is_some_and(|barcode| barcode.to_lowercase().contains(needle))
+        // The code on the box finds the same row: a cashier typing it should
+        // see the product before the last digit resolves the scan.
+        || product
+            .pack_barcode
+            .as_deref()
             .is_some_and(|barcode| barcode.to_lowercase().contains(needle));
     in_category && in_search
 }
@@ -2634,7 +2699,12 @@ fn visible_catalog(
 /// What a scanned code or a typed name resolved to.
 #[derive(Debug, PartialEq, Eq)]
 enum Scan {
-    One(usize),
+    /// The product and which of its units was chosen: `1` loose, the pack size
+    /// when the code on the box matched.
+    One {
+        index: usize,
+        unit_factor: i64,
+    },
     Ambiguous(usize),
     None,
 }
@@ -2644,7 +2714,8 @@ enum Scan {
 /// The order is the contract:
 /// 1. an exact barcode wins outright, **ignoring the category filter** — a scan
 ///    is an explicit instruction, so a sidebar the cashier forgot about must not
-///    turn it into "no product matches";
+///    turn it into "no product matches". The pack barcode is checked too, and
+///    resolves to the pack, not the loose unit;
 /// 2. an exact name within what the cashier can see;
 /// 3. the only product the current filter shows;
 /// 4. nothing, or a count so the message can say how many.
@@ -2654,14 +2725,29 @@ fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
         return Scan::None;
     }
 
-    // Barcodes are unique when present, so `position` is enough here.
+    // Barcodes are unique across both columns when present, so `position` is
+    // enough here. Loose first: a product with no pack never reaches the second.
     if let Some(index) = products.iter().position(|product| {
         product
             .barcode
             .as_deref()
             .is_some_and(|barcode| barcode.trim().to_lowercase() == needle)
     }) {
-        return Scan::One(index);
+        return Scan::One {
+            index,
+            unit_factor: 1,
+        };
+    }
+    if let Some(index) = products.iter().position(|product| {
+        product
+            .pack_barcode
+            .as_deref()
+            .is_some_and(|barcode| barcode.trim().to_lowercase() == needle)
+    }) {
+        return Scan::One {
+            index,
+            unit_factor: products[index].pack_size.max(1),
+        };
     }
 
     let named: Vec<usize> = visible
@@ -2674,12 +2760,18 @@ fn scan_target(products: &[Product], needle: &str, visible: &[usize]) -> Scan {
         return Scan::Ambiguous(named.len());
     }
     if let Some(&index) = named.first() {
-        return Scan::One(index);
+        return Scan::One {
+            index,
+            unit_factor: 1,
+        };
     }
 
     match visible {
         [] => Scan::None,
-        [index] => Scan::One(*index),
+        [index] => Scan::One {
+            index: *index,
+            unit_factor: 1,
+        },
         _ => Scan::Ambiguous(visible.len()),
     }
 }
@@ -2747,7 +2839,17 @@ fn product_row(
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(components::numeric(state.money(product.price_minor)).size(TYPE.body));
+            let price =
+                ui.label(components::numeric(state.money(product.price_minor)).size(TYPE.body));
+            if product.pack_size > 1
+                && let Some(pack_price) = product.pack_price_minor
+            {
+                price.on_hover_text(format!(
+                    "Pack of {}: {}",
+                    product.pack_size,
+                    state.money(pack_price)
+                ));
+            }
 
             // Icon-only actions: the row is about the product, and two words of
             // chrome per line crowd the price. The tooltip carries the word.
@@ -2858,7 +2960,14 @@ fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockIt
     } else {
         product.category.clone()
     };
+    if product.pack_size > 1 {
+        detail.push_str(&format!(" · pack of {}", product.pack_size));
+    }
     if let Some(barcode) = &product.barcode {
+        detail.push_str(" · ");
+        detail.push_str(barcode);
+    }
+    if let Some(barcode) = &product.pack_barcode {
         detail.push_str(" · ");
         detail.push_str(barcode);
     }
@@ -2868,20 +2977,31 @@ fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockIt
 /// The stock pill's colour and the sentence behind it.
 fn stock_badge(ui: &egui::Ui, item: &StockItem) -> (Rgb, String) {
     let palette = theme::current(ui.ctx());
+    let unit = |count: i64| {
+        if item.unit_label == "unit" {
+            count.to_string()
+        } else {
+            format!("{count} {}", item.unit_label)
+        }
+    };
     if item.is_out() {
         (
             palette.danger,
-            format!("Out of stock · warns at {}", item.low_stock),
+            format!("Out of stock · warns at {}", unit(item.low_stock)),
         )
     } else if item.is_low() {
         (
             palette.danger,
-            format!("Low stock · warns at {}", item.low_stock),
+            format!("Low stock · warns at {}", unit(item.low_stock)),
         )
     } else {
         (
             palette.success,
-            format!("{} on hand · warns at {}", item.on_hand, item.low_stock),
+            format!(
+                "{} on hand · warns at {}",
+                unit(item.on_hand),
+                unit(item.low_stock)
+            ),
         )
     }
 }
@@ -2961,16 +3081,65 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         ui.add_space(SPACING.xs);
         components::search_field(ui, &mut draft.name, "Espresso");
 
-        // Price and category share a row because the modal has the width for
-        // it; the barcode gets its own, since it is scanned rather than typed.
+        // Pack first: a shop buys and prices a box, then works out what one
+        // tablet must cost. The base unit is still what the till stores and
+        // sells loose, so both prices live on this one row.
         ui.add_space(SPACING.md);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACING.md;
 
             ui.vertical(|ui| {
-                components::field_label(ui, &format!("Price ({})", currency.code()));
+                components::field_label(ui, "Sold as");
                 ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.price, "0", 150.0);
+                text_field(ui, &mut draft.unit_label, "unit", 110.0);
+            });
+
+            ui.vertical(|ui| {
+                components::field_label(ui, "Units per pack");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.pack_size, "1", 90.0);
+            });
+
+            ui.vertical(|ui| {
+                components::field_label(ui, &format!("Pack price ({})", currency.code()));
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.pack_price, "Optional", 130.0);
+            });
+        });
+        ui.add_space(SPACING.xs);
+        components::caption(
+            ui,
+            "A pack of one means the product is sold only by the unit.",
+        );
+
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Pack barcode (optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.pack_barcode, "On the box", 350.0);
+
+        // Price and category share a row because the modal has the width for
+        // it; the barcode gets its own, since it is scanned rather than typed.
+        ui.add_space(SPACING.md);
+        let each = {
+            let label = draft.unit_label.trim();
+            if label.is_empty() {
+                "unit".to_owned()
+            } else {
+                label.to_owned()
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+
+            ui.vertical(|ui| {
+                components::field_label(ui, &format!("Price per {each} ({})", currency.code()));
+                ui.add_space(SPACING.xs);
+                let response = text_field(ui, &mut draft.price, "0", 150.0);
+                // A typed price belongs to the operator: stop the pack helper
+                // from replacing it as they keep adjusting the pack price.
+                if response.changed() {
+                    draft.note_price_typed();
+                }
             });
 
             ui.vertical(|ui| {
@@ -3000,6 +3169,11 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                 });
             });
         });
+
+        // Fill the loose price from the pack price on the first pass, and keep
+        // it in step while the operator tunes the pack. Once they type a price
+        // of their own the helper steps aside.
+        draft.sync_price_from_pack(currency);
 
         ui.add_space(SPACING.md);
         components::field_label(ui, "Barcode (optional)");
@@ -3266,6 +3440,23 @@ pub fn cart_quantity_modal(ctx: &egui::Context, state: &mut State) {
     modal(ctx, egui::Id::new("pos_cart_quantity")).show(ctx, |ui| {
         ui.set_width(280.0);
         ui.label(components::semibold("Set quantity").size(TYPE.heading));
+
+        // A pack and a loose unit are two rows for the same product, so the
+        // editor names which one. A cashier editing "12" needs to know whether
+        // that is twelve tablets or twelve boxes before pressing Set.
+        if let Some(editor) = &state.cart_quantity
+            && let Some(line) = state.cart.iter().find(|line| {
+                line.product_id == editor.product_id && line.unit_factor == editor.unit_factor
+            })
+        {
+            components::caption(
+                ui,
+                &match line.unit_label.as_deref() {
+                    Some(label) => format!("{} · {label}", line.name),
+                    None => line.name.clone(),
+                },
+            );
+        }
         ui.add_space(SPACING.sm);
 
         if let Some(editor) = state.cart_quantity.as_mut() {
@@ -3352,7 +3543,7 @@ pub fn cart_quantity_modal(ctx: &egui::Context, state: &mut State) {
 
     if confirm && let Some(editor) = &state.cart_quantity {
         match editor.value() {
-            Some(qty) => state.set_cart_quantity(editor.product_id, qty),
+            Some(qty) => state.set_cart_quantity(editor.product_id, editor.unit_factor, qty),
             None => {
                 if let Some(editor) = state.cart_quantity.as_mut() {
                     editor.error = Some("Enter a quantity of 1 or more.".to_owned());
@@ -3934,9 +4125,14 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                                 {
                                     removed = true;
                                 }
-                                text_field(ui, &mut line.cost, "Cost", 110.0);
+                                text_field(ui, &mut line.cost, "Cost", 110.0)
+                                    .on_hover_text("Cost of one purchase unit");
                                 components::caption(ui, "×");
-                                text_field(ui, &mut line.qty, "Qty", 70.0);
+                                text_field(ui, &mut line.qty, "Qty", 70.0)
+                                    .on_hover_text("How many purchase units");
+                                components::caption(ui, "units/pack");
+                                text_field(ui, &mut line.pack_size, "1", 54.0)
+                                    .on_hover_text("Base units in one purchase unit");
                                 removed
                             },
                         );
@@ -6674,6 +6870,11 @@ mod tests {
             category: "Drinks".to_owned(),
             category_id: None,
             barcode: barcode.map(str::to_owned),
+            unit_label: "unit".to_owned(),
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            cost_milli: None,
         }
     }
 
@@ -6689,7 +6890,13 @@ mod tests {
         let visible = visible_products(&products, None, "6001234");
 
         assert_eq!(visible.len(), 2, "both read as matches before resolution");
-        assert_eq!(scan_target(&products, "6001234", &visible), Scan::One(1));
+        assert_eq!(
+            scan_target(&products, "6001234", &visible),
+            Scan::One {
+                index: 1,
+                unit_factor: 1
+            }
+        );
     }
 
     #[test]
@@ -6697,7 +6904,13 @@ mod tests {
         let products = [product(1, "Cola", None), product(2, "Fanta", None)];
         let visible = visible_products(&products, None, "fan");
 
-        assert_eq!(scan_target(&products, "fan", &visible), Scan::One(1));
+        assert_eq!(
+            scan_target(&products, "fan", &visible),
+            Scan::One {
+                index: 1,
+                unit_factor: 1
+            }
+        );
     }
 
     /// Two tiles are a choice the cashier has to make. Picking the first would
@@ -6718,7 +6931,13 @@ mod tests {
         let visible = visible_products(&products, Some("Food"), "");
 
         assert!(visible.is_empty(), "the sidebar hides the product");
-        assert_eq!(scan_target(&products, "6001234", &visible), Scan::One(0));
+        assert_eq!(
+            scan_target(&products, "6001234", &visible),
+            Scan::One {
+                index: 0,
+                unit_factor: 1
+            }
+        );
     }
 
     /// An exact name is the cashier confirming which of the matches they meant.
@@ -6727,7 +6946,13 @@ mod tests {
         let products = [product(1, "Cola 500", None), product(2, "Cola", None)];
         let visible = visible_products(&products, None, "cola");
 
-        assert_eq!(scan_target(&products, "Cola", &visible), Scan::One(1));
+        assert_eq!(
+            scan_target(&products, "Cola", &visible),
+            Scan::One {
+                index: 1,
+                unit_factor: 1
+            }
+        );
     }
 
     #[test]
@@ -6737,6 +6962,42 @@ mod tests {
 
         assert_eq!(scan_target(&products, "999", &visible), Scan::None);
         assert_eq!(scan_target(&products, "   ", &visible), Scan::None);
+    }
+
+    /// The box code is one scan of one thing: the line must carry the pack's
+    /// size so the shelf loses a hundred tablets, not one. The loose code still
+    /// buys a single tablet from the same row.
+    #[test]
+    fn a_pack_barcode_adds_a_pack_but_the_loose_code_adds_one() {
+        let mut medicine = product(1, "Amoxicillin", Some("100100"));
+        medicine.unit_label = "tablet".to_owned();
+        medicine.pack_size = 100;
+        medicine.pack_price_minor = Some(2_800);
+        medicine.pack_barcode = Some("100200".to_owned());
+        let products = [medicine];
+
+        let loose = visible_products(&products, None, "100100");
+        assert_eq!(
+            scan_target(&products, "100100", &loose),
+            Scan::One {
+                index: 0,
+                unit_factor: 1
+            }
+        );
+
+        let pack = visible_products(&products, None, "100200");
+        assert_eq!(
+            pack,
+            vec![0],
+            "typing the box code finds the row before the scan resolves"
+        );
+        assert_eq!(
+            scan_target(&products, "100200", &pack),
+            Scan::One {
+                index: 0,
+                unit_factor: 100
+            }
+        );
     }
 
     /// The two product buttons answer different questions: one is "what I am
