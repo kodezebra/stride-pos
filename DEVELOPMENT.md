@@ -29,9 +29,8 @@ apps/desktop/src/
   main.rs       wiring only: open db → migrate → settings → state → shell
   db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
-  modules.rs    Sell / Dashboard / Products / Sales / Settings / Suppliers /
-                Inventory / Restock
-  checkout.rs   the payment modal and its change panel
+  modules.rs    Sell / Day / Catalog / Restock / Suppliers / Settings
+  checkout.rs   the inline tender and its change panel
   auth.rs       roles, credentials, lockout, lock screen, approvals, staff card
   commands.rs   the Ctrl+P palette
   prefs.rs      active module + sidebar visibility
@@ -136,7 +135,7 @@ The shared crates come from `stride-libs` at a pinned `rev` in
 ## State
 
 Sell's grid reads the `products` table, which Products writes; there is no
-sample data. Dashboard and Sales read the `sales` table, which stays empty until
+sample data. Day reads the `sales` table, which stays empty until
 someone pays.
 
 A sale writes three tables in one transaction:
@@ -189,7 +188,7 @@ already received, dating `received_at` from the last movement that arrived.
 because a database file is something a person can edit.
 
 `products.cost_minor` stores the last known cost, not a valuation. `record_sale()`
-copies it into `sale_lines.cost_minor`; the Dashboard's `margin()` sums only the
+copies it into `sale_lines.cost_minor`; the `margin()` in Trends sums only the
 lines that have a cost and reports the coverage beside the figure. Rows sold
 before their product had a cost are excluded from both revenue and cost, never
 treated as pure profit.
