@@ -641,3 +641,104 @@ pub(super) fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovemen
     });
     components::divider(ui);
 }
+impl Module for Suppliers {
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Directory");
+        ui.checkbox(&mut state.show_archived_suppliers, "Show archived");
+        components::caption(
+            ui,
+            "Archived suppliers leave the working list but stay for the record.",
+        );
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The workspace is a locked card without the permission, so the page has
+        // no bar at all rather than a search field over a card that cannot use it.
+        if !state.permits(crate::auth::Permission::ManageSuppliers) {
+            return;
+        }
+        let mut new = false;
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.supplier_search,
+                hint: "Name, contact or phone",
+                count: None,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New supplier").clicked() {
+                    new = true;
+                }
+            },
+        );
+        if new {
+            state.start_supplier();
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ManageSuppliers) {
+            return locked_card(ui, crate::auth::Permission::ManageSuppliers);
+        }
+
+        components::caption(
+            ui,
+            "Who the shop buys from. Only a name is required; add a contact and \
+             phone number as you learn them.",
+        );
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
+
+        if state.suppliers.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No suppliers yet",
+                "Add the first supplier. The directory is separate from the catalog.",
+                180.0,
+            );
+            return;
+        }
+
+        let needle = state.supplier_search.trim().to_lowercase();
+        let visible = visible_suppliers(&state.suppliers, &needle, state.show_archived_suppliers);
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or show archived suppliers.",
+                160.0,
+            );
+            return;
+        }
+
+        let mut action = None;
+        // The page scrolls (the shell owns it), so the directory card is laid
+        // out whole: a list inside a list would fight the page for the wheel.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            supplier_header(ui);
+            for &index in &visible {
+                let supplier = &state.suppliers[index];
+                let confirming = state.supplier_archive.as_deref() == Some(supplier.id.as_str());
+                if let Some(row_action) = supplier_row(ui, supplier, confirming) {
+                    action = Some(row_action);
+                }
+            }
+        });
+
+        match action {
+            Some(SupplierAction::Edit(id)) => {
+                if let Some(supplier) = state.suppliers.iter().find(|supplier| supplier.id == id) {
+                    let supplier = supplier.clone();
+                    state.edit_supplier(&supplier);
+                }
+            }
+            Some(SupplierAction::AskArchive(id)) => state.supplier_archive = Some(id),
+            Some(SupplierAction::Archive(id)) => state.set_supplier_archived(&id, true),
+            Some(SupplierAction::Restore(id)) => state.set_supplier_archived(&id, false),
+            Some(SupplierAction::CancelArchive) => state.supplier_archive = None,
+            None => {}
+        }
+    }
+}

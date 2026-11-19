@@ -524,3 +524,168 @@ pub(super) fn bought_label(line: &crate::db::PurchaseLine) -> String {
         format!("{} bought", line.qty_received)
     }
 }
+impl Module for Purchases {
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Buying");
+        components::field_label(ui, "Show");
+        ui.add_space(SPACING.xs);
+        for (index, label) in ["All", "To buy", "Received"].into_iter().enumerate() {
+            if regions::nav_item(ui, state.purchase_filter == index, label).clicked() {
+                state.purchase_filter = index;
+            }
+        }
+
+        ui.add_space(SPACING.md);
+        components::caption(
+            ui,
+            "Plan a trip before you go, then change the quantities to what came \
+             home. Stock changes only when you mark it received.",
+        );
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+
+        // A trip takes the whole tab: the heading names what is open, and the
+        // one way back is on the same row, so the page never hides its exits.
+        if state.purchase_editor.is_some() || state.purchase_view.is_some() {
+            let editing = state.purchase_editor.is_some();
+            let title = purchase_title(state);
+            // Receiving writes stock and cannot be undone, so the button asks
+            // twice: the first press turns it into a confirmation.
+            let receive_label = match state.purchase_editor.as_ref() {
+                Some(draft) if draft.confirm_receive => "Confirm received",
+                _ => "Received",
+            };
+            let mut back = false;
+            let mut save = false;
+            let mut receive = false;
+            action_bar(ui, PageLeft::Title(&title), |ui| {
+                if editing && can_manage {
+                    if actions::primary_compact(ui, receive_label).clicked() {
+                        receive = true;
+                    }
+                    if actions::secondary_compact(ui, "Save").clicked() {
+                        save = true;
+                    }
+                }
+                if actions::quiet_compact(ui, "Back").clicked() {
+                    back = true;
+                }
+            });
+            if receive {
+                state.receive_purchase();
+            }
+            if save {
+                state.save_purchase();
+            }
+            if back {
+                state.purchase_editor = None;
+                state.purchase_view = None;
+            }
+            return;
+        }
+
+        if !can_manage {
+            return;
+        }
+
+        let mut new = false;
+        let mut low = false;
+        let any_low = state.stock.iter().any(|item| item.needs_restock());
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.purchase_search,
+                hint: "Supplier or note",
+                count: None,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New list").clicked() {
+                    new = true;
+                }
+                if any_low && actions::secondary_compact(ui, "Add low stock").clicked() {
+                    low = true;
+                }
+            },
+        );
+        if new {
+            state.start_purchase();
+        }
+        if low {
+            state.start_purchase();
+            state.purchase_add_low_stock();
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ManageInventory) {
+            return locked_card(ui, crate::auth::Permission::ManageInventory);
+        }
+
+        if state.purchase_editor.is_some() {
+            return purchase_page(ui, state);
+        }
+        if state.purchase_view.is_some() {
+            return purchase_received_page(ui, state);
+        }
+
+        components::caption(
+            ui,
+            "A shopping list for the shop. Add what is low, adjust the quantities \
+             at the market, and receive what you actually bought.",
+        );
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
+
+        if state.purchases.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No lists yet",
+                "Start a list before the next trip. Everything that is low can be \
+                 added in one click.",
+                180.0,
+            );
+            return;
+        }
+
+        let to_buy = state
+            .purchases
+            .iter()
+            .filter(|purchase| purchase.status == PurchaseStatus::Planned)
+            .count();
+        let received = state.purchases.len() - to_buy;
+        ui.add_space(SPACING.xs);
+        components::caption(ui, &format!("{to_buy} to buy · {received} received"));
+
+        let needle = state.purchase_search.trim().to_lowercase();
+        let visible = visible_purchases(&state.purchases, &needle, state.purchase_filter);
+        if visible.is_empty() {
+            components::empty_state_card(
+                ui,
+                "Nothing matches",
+                "Clear the search or choose another filter.",
+                160.0,
+            );
+            return;
+        }
+
+        let currency = state.currency;
+        let mut open = None;
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            purchase_header(ui);
+            for &index in &visible {
+                let purchase = &state.purchases[index];
+                if let Some(id) = purchase_row(ui, purchase, currency) {
+                    open = Some(id);
+                }
+            }
+        });
+
+        if let Some(id) = open {
+            state.edit_purchase(id);
+        }
+    }
+}

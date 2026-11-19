@@ -1327,3 +1327,59 @@ pub(super) fn receipt_sample(ui: &mut egui::Ui, state: &State) {
         components::caption(ui, "Printer and paper width arrive with the receipt flow.");
     });
 }
+impl Module for Settings {
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Settings");
+        for (index, section) in state::SETTINGS_SECTIONS.iter().enumerate() {
+            if regions::nav_item(ui, state.settings_section == index, section).clicked() {
+                state.settings_section = index;
+            }
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The section name is the page title. It stays even when the section
+        // below is locked, so the chrome never depends on a permission.
+        let section = state::SETTINGS_SECTIONS
+            .get(state.settings_section)
+            .copied()
+            .unwrap_or("Terminal");
+        action_bar(ui, PageLeft::Title(section), |_ui| {});
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::EditSettings) {
+            return locked_card(ui, crate::auth::Permission::EditSettings);
+        }
+
+        let section = state::SETTINGS_SECTIONS
+            .get(state.settings_section)
+            .copied()
+            .unwrap_or("Terminal");
+
+        match section {
+            "Appearance" => appearance_card(ui, state),
+            "Receipt" => receipt_preview(ui, state),
+            "Terminal" => {
+                shop_card(ui, state);
+                ui.add_space(SPACING.lg);
+                terminal_card(ui, state);
+                ui.add_space(SPACING.lg);
+                business_type_card(ui, state);
+                ui.add_space(SPACING.lg);
+                backup_card(ui, state);
+            }
+            "Scanner" => scanner_card(ui, state),
+            "Staff" => {
+                if state.permits(crate::auth::Permission::ManageUsers) {
+                    crate::auth::staff_card(ui, state);
+                } else {
+                    locked_card(ui, crate::auth::Permission::ManageUsers);
+                }
+            }
+            "Money" => money_card(ui, state),
+            "Sync" => sync_card(ui, state),
+            _ => {}
+        }
+    }
+}

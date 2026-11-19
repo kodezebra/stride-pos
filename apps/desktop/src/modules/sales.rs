@@ -267,3 +267,95 @@ pub(super) fn drawer_figure(
         });
     });
 }
+impl Module for Sales {
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        components::section_title(ui, "Range");
+        for (index, range) in state::RANGES.iter().enumerate() {
+            if regions::nav_item(ui, state.range == index, range).clicked() {
+                state.range = index;
+            }
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let title = if state.report_scope().is_shop() {
+            "Transactions"
+        } else {
+            "Your transactions"
+        };
+        let mut export = false;
+        action_bar(ui, PageLeft::Title(title), |ui| {
+            // Text, not an icon: "Export" is a page action, and a page action
+            // says what it does. The columns it writes belong in the tooltip.
+            if actions::secondary_compact(ui, "Export")
+                .on_hover_text(
+                    "Export sales as sale_id, receipt, when, cashier, total, rounding, paid, method",
+                )
+                .clicked()
+            {
+                export = true;
+            }
+        });
+        if export {
+            state.start_export(ExportKind::Sales);
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // The drawer belongs to Today. "7 days" is a report, and a report is not
+        // something you count.
+        if state.range == 0 {
+            drawer_card(ui, state);
+        }
+
+        let scope = state.report_scope();
+        let shop = scope.is_shop();
+        let user = scope.user().map(str::to_owned);
+        let user = user.as_deref();
+
+        if !shop {
+            // The export reads the same scope as the list, so the caption
+            // promises the same thing about both.
+            components::caption(ui, "Only your sales · the export matches this list");
+        }
+        file_feedback(ui, state);
+
+        let sales = crate::db::sales(&state.store, state.range, 100, user);
+        if sales.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No transactions",
+                "Every completed sale in this range is listed here, newest first.",
+                240.0,
+            );
+            return;
+        }
+
+        // The page scrolls (the shell owns it), so the table is laid out whole.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            table_row(ui, "Sale", "When", "By", "Total", true, false);
+            for (index, sale) in sales.iter().enumerate() {
+                // The number the customer's slip carries. A sale from before
+                // numbers had a device keeps the row id it was printed with.
+                let receipt = sale
+                    .receipt_no
+                    .clone()
+                    .unwrap_or_else(|| format!("#{}", sale.id));
+                if table_row(
+                    ui,
+                    &receipt,
+                    &sale.created_at,
+                    sale.cashier.as_deref().unwrap_or("-"),
+                    &state.money(sale.paid_minor),
+                    false,
+                    index % 2 == 1,
+                )
+                .clicked()
+                {
+                    state.open_sale(sale.id);
+                }
+            }
+        });
+    }
+}

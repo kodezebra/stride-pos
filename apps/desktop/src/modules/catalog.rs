@@ -940,3 +940,360 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
         state.import = None;
     }
 }
+impl Module for Products {
+    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // Stock is a second facet, not a second screen. The old Stock tab asked
+        // the same question over the same rows; folding it here means one list,
+        // one search and one place to answer "what is low?".
+        //
+        // It sits above the categories because it is three rows and the
+        // categories are unbounded: below them a shop with sixty categories
+        // would bury the filter a manager reaches for every morning.
+        components::section_title(ui, "Stock");
+        for (index, label) in ["All stock", "Low stock", "Out of stock", "Expiring"]
+            .into_iter()
+            .enumerate()
+        {
+            if regions::nav_item(ui, state.stock_filter == index, label).clicked() {
+                state.stock_filter = index;
+            }
+        }
+        ui.add_space(SPACING.sm);
+        components::caption(ui, "Low, out and expiring count tracked products only.");
+
+        // Categories are facets: they narrow the list without being the list's
+        // question. The question — "which product?" — is the bar's search field,
+        // in the same place as on every other list.
+        ui.add_space(SPACING.md);
+        categories_sidebar(ui, state);
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        // A locked page has no bar: a search field over a card that says "ask a
+        // manager" is a control that cannot do anything.
+        if !state.permits(crate::auth::Permission::ChangePrice) {
+            return;
+        }
+
+        // The count only appears while a filter is on. With no filter every row
+        // is on screen, so "48 of 48" would be a number the reader already knows.
+        let filtered = !state.catalog_search.trim().is_empty()
+            || state.category.is_some()
+            || state.stock_filter != 0;
+        let count = filtered.then(|| {
+            let needle = state.catalog_search.trim().to_lowercase();
+            let visible = visible_catalog(
+                &state.products,
+                &state.stock,
+                &state.expiring,
+                state.expiry_warning_days(),
+                state.category.as_deref(),
+                &needle,
+                state.stock_filter,
+            );
+            format!("{} of {}", visible.len(), state.products.len())
+        });
+
+        // Offer the way in only while there is something left to count. A button
+        // that opens "every product is tracked" is a dead end.
+        let untracked = state
+            .products
+            .iter()
+            .filter(|product| stock_item(&state.stock, product.id).is_none())
+            .count();
+        let can_track = state.permits(crate::auth::Permission::ManageInventory) && untracked > 0;
+
+        let mut new = false;
+        let mut track = false;
+        let mut import = false;
+        let mut template = false;
+        let mut export_visible = false;
+        let mut export_all = false;
+        action_bar(
+            ui,
+            PageLeft::Search {
+                text: &mut state.catalog_search,
+                hint: "Name or barcode",
+                count,
+            },
+            |ui| {
+                if actions::primary_compact(ui, "New product").clicked() {
+                    new = true;
+                }
+                if can_track && actions::secondary_compact(ui, "Track stock").clicked() {
+                    track = true;
+                }
+                // Import and both exports are setup actions, not everyday ones.
+                // One menu keeps them a click away without letting four
+                // file-shaped icons compete with the catalog's primary action
+                // for the bar's width.
+                actions::toolbar_menu(ui, transfer_icon(), "Import / Export", |ui| {
+                    ui.set_min_width(210.0);
+                    if ui
+                        .button("Import from CSV…")
+                        .on_hover_text(
+                            "Read name, category, price and barcode. A barcode that \
+                             starts with 0 may need a text column in Excel.",
+                        )
+                        .clicked()
+                    {
+                        import = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Save a template…")
+                        .on_hover_text(
+                            "A blank CSV with the columns the import reads and two \
+                             example rows",
+                        )
+                        .clicked()
+                    {
+                        template = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Export this view")
+                        .on_hover_text(
+                            "Save the products on screen with the columns the import reads",
+                        )
+                        .clicked()
+                    {
+                        export_visible = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button("Export all products")
+                        .on_hover_text("Save every product with the columns the import reads")
+                        .clicked()
+                    {
+                        export_all = true;
+                        ui.close();
+                    }
+                });
+            },
+        );
+
+        if new {
+            state.start_product();
+        }
+        if track {
+            state.start_tracking();
+        }
+        if import {
+            state.start_import_picker();
+        }
+        if export_visible {
+            state.start_export(ExportKind::Products);
+        }
+        if export_all {
+            state.start_export(ExportKind::AllProducts);
+        }
+        if template {
+            state.start_export(ExportKind::Template);
+        }
+    }
+
+    fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        if !state.permits(crate::auth::Permission::ChangePrice) {
+            return locked_card(ui, crate::auth::Permission::ChangePrice);
+        }
+
+        // Seeing stock is part of the catalog; changing it is a separate gate.
+        // The page gate already keeps cashiers out, but the row still asks, so
+        // a future role that may read prices cannot silently move stock.
+        let can_manage = state.permits(crate::auth::Permission::ManageInventory);
+
+        let needle = state.catalog_search.trim().to_lowercase();
+        let visible = visible_catalog(
+            &state.products,
+            &state.stock,
+            &state.expiring,
+            state.expiry_warning_days(),
+            state.category.as_deref(),
+            &needle,
+            state.stock_filter,
+        );
+
+        file_feedback(ui, state);
+        if let Some(notice) = state.notice.as_deref() {
+            components::caption(ui, notice);
+        }
+
+        if state.products.is_empty() {
+            components::empty_state_card(
+                ui,
+                "No products yet",
+                "Add the first product. Products become keys on the Sell screen.",
+                200.0,
+            );
+            return;
+        }
+
+        if state.stock.is_empty() {
+            components::caption(
+                ui,
+                "Stock is not tracked yet. Track a product to subtract sales from a count.",
+            );
+        } else {
+            let tracked = state.stock.len();
+            let low = state.stock.iter().filter(|item| item.is_low()).count();
+            let out = state.stock.iter().filter(|item| item.is_out()).count();
+            components::caption(
+                ui,
+                &format!("{tracked} tracked · {low} low · {out} out of stock"),
+            );
+        }
+
+        // Dates worth acting on now, whatever the catalog filter says. Expired
+        // stock is not a report line: it is on the shelf, and the shop has to
+        // take it off. The card only lists the warning window, so it is quiet
+        // until a date gets close.
+        let warn = state.expiry_warning_days();
+        let due: Vec<ExpiryBucket> = state
+            .expiring
+            .iter()
+            .filter(|bucket| bucket.expires_within(warn))
+            .cloned()
+            .collect();
+        let mut pull = None;
+        if !due.is_empty() {
+            ui.add_space(SPACING.sm);
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let palette = theme::current(ui.ctx());
+                components::section_title(ui, "Expiring stock");
+                components::caption(
+                    ui,
+                    &format!(
+                        "Dates inside {warn} days, earliest first. Pull what is past \
+                         into waste so it leaves the shelf."
+                    ),
+                );
+                for bucket in due.iter().take(8) {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(40.0);
+                        let (label, color) = match bucket.days_left {
+                            Some(days) if days < 0 => ("Expired".to_owned(), palette.danger),
+                            Some(0) => ("Today".to_owned(), palette.danger),
+                            Some(days) => (format!("{days}d"), palette.warning),
+                            None => (String::new(), palette.text_muted),
+                        };
+                        components::badge(ui, &label, color);
+                        ui.label(components::semibold(&bucket.name).size(TYPE.body));
+                        components::caption(ui, bucket.expires_on.as_deref().unwrap_or(""));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if bucket.is_expired()
+                                && can_manage
+                                && actions::secondary_compact(ui, "Pull to waste").clicked()
+                            {
+                                pull = Some((
+                                    bucket.product_id,
+                                    bucket.expires_on.clone().unwrap_or_default(),
+                                    bucket.name.clone(),
+                                ));
+                            }
+                            components::caption(
+                                ui,
+                                &count_label(bucket.on_hand, &bucket.unit_label),
+                            );
+                        });
+                    });
+                }
+                if due.len() > 8 {
+                    components::caption(
+                        ui,
+                        &format!(
+                            "{} more — choose Expiring in the sidebar to see them all.",
+                            due.len() - 8
+                        ),
+                    );
+                }
+            });
+        }
+        if let Some((product_id, expires_on, name)) = pull {
+            state.pull_expired(product_id, &expires_on, &name);
+        }
+
+        if visible.is_empty() {
+            let narrowed = !needle.is_empty() || state.category.is_some();
+            let (title, body) = if narrowed {
+                (
+                    "Nothing matches",
+                    "Clear the search or pick another category.",
+                )
+            } else {
+                match state.stock_filter {
+                    1 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    1 => (
+                        "Nothing is low",
+                        "Every tracked product is above its warning line.",
+                    ),
+                    2 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    2 => (
+                        "Nothing is out",
+                        "Every tracked product has stock on the shelf.",
+                    ),
+                    3 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    3 => (
+                        "Nothing is expiring",
+                        "No dated stock is inside the warning window.",
+                    ),
+                    _ => (
+                        "Nothing matches",
+                        "Clear the search or pick another category.",
+                    ),
+                }
+            };
+            components::empty_state_card(ui, title, body, 160.0);
+            return;
+        }
+
+        let mut action = None;
+        // The page scrolls (the shell owns it), so the catalog card is laid out
+        // whole: a list inside a list would fight the page for the wheel.
+        components::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            product_header(ui);
+            for &product_index in &visible {
+                let product = &state.products[product_index];
+                let stock = stock_item(&state.stock, product.id);
+                let deleting = state.product_delete == Some(product.id);
+                if let Some(row_action) =
+                    product_row(ui, product, stock, state, deleting, can_manage)
+                {
+                    action = Some(row_action);
+                }
+            }
+        });
+
+        match action {
+            Some(ProductAction::Edit(id)) => {
+                if let Some(product) = state.products.iter().find(|product| product.id == id) {
+                    let product = product.clone();
+                    state.edit_product(&product);
+                }
+            }
+            Some(ProductAction::AskDelete(id)) => state.product_delete = Some(id),
+            Some(ProductAction::Delete(id)) => state.delete_product(id),
+            Some(ProductAction::CancelDelete) => state.product_delete = None,
+            Some(ProductAction::MoveStock { id, name, on_hand }) => {
+                state.start_stock_move(id, &name, on_hand, StockKind::Receive);
+            }
+            Some(ProductAction::StockHistory { id, name }) => {
+                state.open_stock_history(id, &name);
+            }
+            None => {}
+        }
+    }
+}
