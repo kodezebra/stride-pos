@@ -222,6 +222,21 @@ pub struct ProductDto {
     /// The barcode printed on the box. The loose barcode stays in `barcode`.
     #[serde(default)]
     pub pack_barcode: Option<String>,
+    /// Loose-unit price breaks, ascending by quantity. Empty on a peer older
+    /// than this field, and always empty for a pack: the box price is already
+    /// the bulk deal.
+    #[serde(default)]
+    pub price_breaks: Vec<PriceBreakDto>,
+}
+
+/// One rung of a product's loose-unit price ladder: from `min_qty` units upward,
+/// one costs `price_minor`. The shelf price is the rung below the first break,
+/// so `min_qty` is two or more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PriceBreakDto {
+    pub min_qty: i64,
+    pub price_minor: i64,
 }
 
 /// One category row. Categories are upserted by id and never deleted.

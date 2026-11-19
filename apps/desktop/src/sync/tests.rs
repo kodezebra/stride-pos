@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 
 use super::ingest::ingest_sales;
-use super::protocol::{CatalogSnapshot, PROTOCOL, PullResponse, PushRequest, SaleDto};
+use super::protocol::{
+    CatalogSnapshot, PROTOCOL, PriceBreakDto, PullResponse, PushRequest, SaleDto,
+};
 use super::worker::{PeerCursor, PeerLink, sync_once};
 use crate::db::{self, SaleLine, StockKind};
 
@@ -474,6 +476,84 @@ fn a_catalog_snapshot_upserts_and_archives_without_losing_history() {
     );
     let live: Vec<i64> = db::products(b.db()).into_iter().map(|p| p.id).collect();
     assert_eq!(live, vec![10], "the shop no longer lists coffee");
+}
+
+#[test]
+fn a_catalog_snapshot_carries_the_price_ladder_and_removes_a_dropped_rung() {
+    let a = Fixture::new("ladder-a");
+    let b = Fixture::new("ladder-b");
+    seed_catalog(&a);
+    a.execute(
+        "INSERT INTO price_breaks (product_id, min_qty, price_minor)
+         VALUES (10, 10, 400), (10, 50, 350)",
+    );
+
+    let first = db::catalog_snapshot(a.db(), 0).expect("snapshot");
+    let tea = first
+        .products
+        .iter()
+        .find(|product| product.id == 10)
+        .expect("tea");
+    assert_eq!(
+        tea.price_breaks,
+        vec![
+            PriceBreakDto {
+                min_qty: 10,
+                price_minor: 400
+            },
+            PriceBreakDto {
+                min_qty: 50,
+                price_minor: 350
+            },
+        ]
+    );
+    db::apply_catalog_snapshot(b.db(), &first).expect("apply");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM price_breaks"), 2);
+
+    // A rung the owner deleted is gone here too: the replica holds the
+    // ladder, it does not accumulate one.
+    a.execute("DELETE FROM price_breaks WHERE product_id = 10 AND min_qty = 50");
+    let second = db::catalog_snapshot(a.db(), 0).expect("second snapshot");
+    db::apply_catalog_snapshot(b.db(), &second).expect("re-apply");
+    let qty: i64 = b.scalar("SELECT min_qty FROM price_breaks WHERE product_id = 10");
+    assert_eq!(qty, 10);
+
+    // Clearing the ladder is the ordinary way to stop offering one.
+    a.execute("DELETE FROM price_breaks WHERE product_id = 10");
+    let third = db::catalog_snapshot(a.db(), 0).expect("third snapshot");
+    db::apply_catalog_snapshot(b.db(), &third).expect("re-apply");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM price_breaks"), 0);
+}
+
+#[test]
+fn a_catalog_snapshot_cannot_climb_its_ladder() {
+    let a = Fixture::new("ladder-climb-a");
+    let b = Fixture::new("ladder-climb-b");
+    seed_catalog(&a);
+    a.execute("INSERT INTO price_breaks (product_id, min_qty, price_minor) VALUES (10, 10, 400)");
+
+    // Hand-built rather than snapped, because a ladder that climbs is exactly
+    // what the snapshot reader has to refuse: ten units may not cost more
+    // than the shelf price.
+    let mut snapshot = db::catalog_snapshot(a.db(), 0).expect("snapshot");
+    snapshot
+        .products
+        .iter_mut()
+        .find(|product| product.id == 10)
+        .expect("tea")
+        .price_breaks = vec![PriceBreakDto {
+        min_qty: 10,
+        price_minor: 600,
+    }];
+
+    let error = db::apply_catalog_snapshot(b.db(), &snapshot).expect_err("must refuse");
+    let message = format!("{error:#}");
+    assert!(message.contains("cannot be above"), "{message}");
+    assert_eq!(
+        b.scalar::<i64>("SELECT COUNT(*) FROM products"),
+        0,
+        "nothing was applied"
+    );
 }
 
 #[test]

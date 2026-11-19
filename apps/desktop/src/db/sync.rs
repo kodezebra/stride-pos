@@ -432,10 +432,41 @@ pub fn catalog_snapshot(
                 pack_size: row.get(9)?,
                 pack_price_minor: row.get(10)?,
                 pack_barcode: row.get(11)?,
+                price_breaks: Vec::new(),
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+
+    // Breaks in a second pass, grouped by product: one statement for the whole
+    // catalog rather than one per row.
+    let mut products = products;
+    {
+        let mut statement = store.conn().prepare(
+            "SELECT product_id, min_qty, price_minor FROM price_breaks
+             ORDER BY product_id, min_qty",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                sync_proto::PriceBreakDto {
+                    min_qty: row.get(1)?,
+                    price_minor: row.get(2)?,
+                },
+            ))
+        })?;
+        let mut grouped: std::collections::HashMap<i64, Vec<sync_proto::PriceBreakDto>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (product_id, tier) = row?;
+            grouped.entry(product_id).or_default().push(tier);
+        }
+        for product in &mut products {
+            if let Some(tiers) = grouped.remove(&product.id) {
+                product.price_breaks = tiers;
+            }
+        }
+    }
 
     let categories = categories_list(store)
         .into_iter()
@@ -525,6 +556,12 @@ pub fn apply_catalog_snapshot(
 
     let mut product_ids = std::collections::HashSet::new();
     let mut barcodes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    // The ladder is cleaned once, here, and the cleaned copy is what gets
+    // written. A peer that sends rungs out of order is sorted, not rejected;
+    // a peer that sends a climbing ladder is rejected, because honouring it
+    // would charge a wholesale count more than a single unit.
+    let mut ladders: std::collections::HashMap<i64, Vec<PriceTier>> =
+        std::collections::HashMap::new();
     for product in &snapshot.products {
         anyhow::ensure!(product.id > 0, "a product needs a positive id");
         anyhow::ensure!(
@@ -596,6 +633,19 @@ pub fn apply_catalog_snapshot(
                 "product {} prices a pack of one",
                 product.id
             );
+        }
+        let breaks: Vec<PriceTier> = product
+            .price_breaks
+            .iter()
+            .map(|tier| PriceTier {
+                min_qty: tier.min_qty,
+                price_minor: tier.price_minor,
+            })
+            .collect();
+        let breaks = super::catalog::clean_tiers(product.price_minor, &breaks)
+            .with_context(|| format!("product {} has an unusable price ladder", product.id))?;
+        if !breaks.is_empty() {
+            ladders.insert(product.id, breaks);
         }
     }
 
@@ -714,6 +764,23 @@ pub fn apply_catalog_snapshot(
                 pack_barcode,
             ],
         )?;
+    }
+
+    // Breaks are replaced with the product, not merged: the owner's ladder is
+    // the whole ladder, and a rung removed there has to disappear here. Done
+    // after every product row so the foreign key holds.
+    for product in &snapshot.products {
+        transaction.execute(
+            "DELETE FROM price_breaks WHERE product_id = ?1",
+            [product.id],
+        )?;
+        for tier in ladders.get(&product.id).into_iter().flatten() {
+            transaction.execute(
+                "INSERT INTO price_breaks (product_id, min_qty, price_minor)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![product.id, tier.min_qty, tier.price_minor],
+            )?;
+        }
     }
 
     // A product the owner stopped listing is archived here. This is the only
