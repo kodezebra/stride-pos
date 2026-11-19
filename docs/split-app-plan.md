@@ -54,14 +54,17 @@ module changes.
 A pure move: `impl State` blocks go to `state/{cart,catalog,suppliers,purchasing,staff,sync,day,prefs}.rs`.
 Fields do **not** move — `state.cart` keeps working, so no call site changes.
 
-- [ ] **2.1** Extract `state/cart.rs`
-- [ ] **2.2** Extract `state/catalog.rs`
-- [ ] **2.3** Extract `state/suppliers.rs`
-- [ ] **2.4** Extract `state/purchasing.rs`
-- [ ] **2.5** Extract `state/staff.rs`
-- [ ] **2.6** Extract `state/sync.rs`
-- [ ] **2.7** Extract `state/day.rs`
-- [ ] **2.8** Extract `state/prefs.rs`
+- [x] **2.0** `state.rs` → `state/mod.rs` (pure rename, no content change)
+- [x] **2.1** Extract `state/cart.rs`
+- [x] **2.2** Extract `state/catalog.rs`
+- [x] **2.3** Extract `state/suppliers.rs`
+- [x] **2.4** Extract `state/purchasing.rs`
+- [x] **2.5** Extract `state/staff.rs`
+- [x] **2.6** Extract `state/sync.rs`
+- [x] **2.7** Extract `state/day.rs`
+- [x] **2.8** Extract `state/prefs.rs`
+- [x] **2.9** Move the state tests to `state/tests.rs`
+- [x] **2.10** Final verification: 259 tests, clippy, release build
 
 ## Step 3 — split `db.rs` (8,773 lines)
 
