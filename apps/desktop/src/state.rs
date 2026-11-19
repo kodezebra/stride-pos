@@ -139,6 +139,14 @@ pub struct ProductDraft {
     /// cleared field stays theirs: the helper must not grab an empty box back
     /// and turn the next keystroke into "283".
     price_typed: bool,
+    /// Whether the ledger tracks this product. Only a tracked product can be
+    /// perishable, because a date has to sit on a movement.
+    pub tracked: bool,
+    /// Whether the product goes off, so every delivery must be dated.
+    pub perishable: bool,
+    /// The shop's usual life for a delivery, as typed. A prefill for repacked
+    /// goods only; the date printed on the pack always wins.
+    pub shelf_life_days: String,
     pub error: Option<String>,
 }
 
@@ -157,6 +165,9 @@ impl ProductDraft {
             pack_barcode: String::new(),
             derived_price_minor: None,
             price_typed: false,
+            tracked: false,
+            perishable: false,
+            shelf_life_days: String::new(),
             error: None,
         }
     }
@@ -297,11 +308,25 @@ pub struct StockMoveDraft {
     pub kind: crate::db::StockKind,
     pub quantity: String,
     pub note: String,
+    /// The date printed on the pack, as typed. Only a delivery, a return or
+    /// stock pulled off a dated bucket carries one.
+    pub expires_on: String,
+    /// Whether a date is required here: a perishable product's delivery.
+    pub perishable: bool,
+    /// The shop's usual life, shown as a hint beside the date field.
+    pub shelf_life_days: Option<i64>,
     pub error: Option<String>,
 }
 
 impl StockMoveDraft {
-    fn new(product_id: i64, product_name: &str, on_hand: i64, kind: crate::db::StockKind) -> Self {
+    fn new(
+        product_id: i64,
+        product_name: &str,
+        on_hand: i64,
+        kind: crate::db::StockKind,
+        perishable: bool,
+        shelf_life_days: Option<i64>,
+    ) -> Self {
         Self {
             product_id,
             product_name: product_name.to_owned(),
@@ -309,6 +334,9 @@ impl StockMoveDraft {
             kind,
             quantity: String::new(),
             note: String::new(),
+            expires_on: String::new(),
+            perishable,
+            shelf_life_days,
             error: None,
         }
     }
@@ -333,6 +361,9 @@ pub struct PurchaseLineDraft {
     /// How many base units one ordered unit holds. Prefilled from the product
     /// but editable: the shop may buy loose this week and a boxed pack next.
     pub pack_size: String,
+    /// The date printed on the pack, as typed. Optional while planning, required
+    /// when a perishable delivery is received.
+    pub expires_on: String,
 }
 
 /// A purchase being planned or edited, open as the Restock page.
@@ -742,9 +773,12 @@ pub struct State {
     /// sale and every movement: a cached count would be the thing that
     /// disagrees with the ledger.
     pub stock: Vec<StockItem>,
-    /// `0` all, `1` low, `2` out. The filter a shopkeeper uses standing in
-    /// front of the shelf, not a report.
+    /// `0` all, `1` low, `2` out, `3` expiring. The filter a shopkeeper uses
+    /// standing in front of the shelf, not a report.
     pub stock_filter: usize,
+    /// What is left on every dated slice of a perishable product's stock,
+    /// earliest date first. Derived from the ledger by FEFO, never stored.
+    pub expiring: Vec<crate::db::ExpiryBucket>,
     /// The "start tracking" form, when it is open.
     pub stock_editor: Option<TrackDraft>,
     /// A receive/return/waste/adjust form, when it is open.
@@ -917,6 +951,7 @@ impl State {
         let categories = crate::db::categories(&store);
         let suppliers = crate::db::suppliers(&store);
         let stock = crate::db::stock(&store);
+        let expiring = crate::db::expiring(&store);
         let purchases = crate::db::purchases(&store);
         let users = crate::db::users(&store);
         let drawer = crate::db::drawer(&store);
@@ -964,6 +999,7 @@ impl State {
             supplier_archive: None,
             stock,
             stock_filter: 0,
+            expiring,
             stock_editor: None,
             stock_move: None,
             stock_history: None,
@@ -2063,6 +2099,11 @@ impl State {
 
     /// Open the form on an existing product.
     pub fn edit_product(&mut self, product: &Product) {
+        let stock = self
+            .stock
+            .iter()
+            .find(|item| item.product_id == product.id)
+            .cloned();
         self.product_editor = Some(ProductDraft {
             id: Some(product.id),
             name: product.name.clone(),
@@ -2080,6 +2121,13 @@ impl State {
             derived_price_minor: None,
             // An existing price is the shop's, not the helper's.
             price_typed: true,
+            tracked: stock.is_some(),
+            perishable: stock.as_ref().is_some_and(|item| item.perishable),
+            shelf_life_days: stock
+                .as_ref()
+                .and_then(|item| item.shelf_life_days)
+                .map(|days| days.to_string())
+                .unwrap_or_default(),
             error: None,
         });
         self.product_delete = None;
@@ -2172,13 +2220,42 @@ impl State {
             pack_barcode: pack_barcode.as_deref(),
         };
 
+        let perishable = draft.perishable;
+        let tracked = draft.tracked;
+        if perishable && !tracked {
+            return self.editor_error(
+                "Only a product the ledger tracks can be perishable. Start tracking it from Inventory first.",
+            );
+        }
+        let shelf_life_days = if perishable {
+            match draft.shelf_life_days.trim() {
+                "" => None,
+                text => match text.parse::<i64>() {
+                    Ok(days) if days > 0 => Some(days),
+                    _ => return self.editor_error("A shelf life must be a whole number of days."),
+                },
+            }
+        } else {
+            None
+        };
+
         let result = match id {
-            Some(id) => crate::db::update_product(&self.store, id, &fields),
-            None => crate::db::insert_product(&self.store, &fields).map(|_| ()),
+            Some(id) => crate::db::update_product(&self.store, id, &fields).map(|()| id),
+            None => crate::db::insert_product(&self.store, &fields),
         };
 
         match result {
-            Ok(()) => {
+            Ok(id) => {
+                // Perishability lives beside tracking, not on the catalog
+                // fields: saving a name must not silently clear it, and an
+                // untracked product has nowhere to keep a date.
+                if let Err(error) =
+                    crate::db::set_perishability(&self.store, id, perishable, shelf_life_days)
+                {
+                    tracing::error!(error = %error, "saving perishability failed");
+                    return self
+                        .editor_error(format!("Saved {name}, but could not set expiry: {error}"));
+                }
                 self.product_editor = None;
                 self.reload_products();
                 // A tracked product's name and category are shown in Inventory;
@@ -2339,6 +2416,27 @@ impl State {
     /// Re-read tracked stock after a movement or a sale.
     pub fn reload_stock(&mut self) {
         self.stock = crate::db::stock(&self.store);
+        self.expiring = crate::db::expiring(&self.store);
+    }
+
+    /// The expiry warning window, from settings.
+    pub fn expiry_warning_days(&self) -> i64 {
+        self.settings.warn_within_days()
+    }
+
+    /// Everything left on one expired date, pulled into waste in one movement.
+    pub fn pull_expired(&mut self, product_id: i64, expires_on: &str, product_name: &str) {
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+        match crate::db::pull_expired(&self.store, product_id, expires_on, user_id.as_deref()) {
+            Ok(units) => {
+                self.reload_stock();
+                self.notice = Some(format!("Pulled {units} of {product_name} into waste."));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "pulling expired stock failed");
+                self.notice = Some(format!("Could not pull it: {error}"));
+            }
+        }
     }
 
     /// Open the "start tracking" form.
@@ -2420,7 +2518,15 @@ impl State {
         on_hand: i64,
         kind: crate::db::StockKind,
     ) {
-        self.stock_move = Some(StockMoveDraft::new(product_id, product_name, on_hand, kind));
+        let item = self.stock.iter().find(|item| item.product_id == product_id);
+        self.stock_move = Some(StockMoveDraft::new(
+            product_id,
+            product_name,
+            on_hand,
+            kind,
+            item.is_some_and(|item| item.perishable),
+            item.and_then(|item| item.shelf_life_days),
+        ));
         self.stock_editor = None;
         self.stock_history = None;
         self.notice = None;
@@ -2432,17 +2538,27 @@ impl State {
     /// form validates before the write as well: a rejected form keeps the typed
     /// quantity and note on screen.
     pub fn save_stock_move(&mut self) {
-        let Some((product_id, product_name, on_hand, kind, quantity_text, note)) =
-            self.stock_move.as_ref().map(|draft| {
-                (
-                    draft.product_id,
-                    draft.product_name.clone(),
-                    draft.on_hand,
-                    draft.kind,
-                    draft.quantity.trim().to_owned(),
-                    draft.note.clone(),
-                )
-            })
+        let Some((
+            product_id,
+            product_name,
+            on_hand,
+            kind,
+            quantity_text,
+            note,
+            expires_text,
+            perishable,
+        )) = self.stock_move.as_ref().map(|draft| {
+            (
+                draft.product_id,
+                draft.product_name.clone(),
+                draft.on_hand,
+                draft.kind,
+                draft.quantity.trim().to_owned(),
+                draft.note.clone(),
+                draft.expires_on.trim().to_owned(),
+                draft.perishable,
+            )
+        })
         else {
             return;
         };
@@ -2487,12 +2603,37 @@ impl State {
 
         let user_id = self.session.as_ref().map(|session| session.user_id.clone());
 
+        // Only an arrival, a return or stock pulled off a dated bucket names a
+        // date. A correction changes the count as a whole and has none.
+        let expires_on = match kind {
+            crate::db::StockKind::Receive
+            | crate::db::StockKind::Return
+            | crate::db::StockKind::Waste => {
+                if expires_text.is_empty() {
+                    None
+                } else {
+                    match crate::db::parse_expiry_date(&expires_text) {
+                        Some(date) => Some(date),
+                        None => {
+                            return self.stock_move_error("Write the date like 31/12/2026.");
+                        }
+                    }
+                }
+            }
+            _ => None,
+        };
+        if kind == crate::db::StockKind::Receive && perishable && expires_on.is_none() {
+            return self
+                .stock_move_error("This product is perishable; date the delivery from the pack.");
+        }
+
         match crate::db::record_stock_movement(
             &self.store,
             product_id,
             delta,
             kind,
             &note,
+            expires_on.as_deref(),
             user_id.as_deref(),
         ) {
             Ok(()) => {
@@ -2585,6 +2726,7 @@ impl State {
                     .map(|cost| plain_amount(cost, currency))
                     .unwrap_or_default(),
                 pack_size: line.pack_size.to_string(),
+                expires_on: line.expires_on.clone().unwrap_or_default(),
             })
             .collect();
 
@@ -2623,9 +2765,6 @@ impl State {
         let Some(draft) = self.purchase_editor.as_mut() else {
             return;
         };
-        if draft.lines.iter().any(|line| line.product_id == product_id) {
-            return;
-        }
         draft.lines.push(PurchaseLineDraft {
             product_id,
             name,
@@ -2634,6 +2773,9 @@ impl State {
                 .map(|cost| plain_amount(cost, currency))
                 .unwrap_or_default(),
             pack_size: pack_size.to_string(),
+            // Typed from the pack at receiving time; a plan may hold the same
+            // product twice only when the two deliveries are dated apart.
+            expires_on: String::new(),
         });
         draft.confirm_receive = false;
         draft.error = None;
@@ -2695,15 +2837,18 @@ impl State {
                     .map(|cost| plain_amount(cost, currency))
                     .unwrap_or_default(),
                 pack_size: pack_size.to_string(),
+                expires_on: String::new(),
             });
         }
         draft.confirm_receive = false;
         draft.error = None;
     }
 
-    pub fn purchase_remove_line(&mut self, product_id: i64) {
+    pub fn purchase_remove_line(&mut self, index: usize) {
         if let Some(draft) = self.purchase_editor.as_mut() {
-            draft.lines.retain(|line| line.product_id != product_id);
+            if index < draft.lines.len() {
+                draft.lines.remove(index);
+            }
             draft.confirm_delete = false;
             draft.confirm_receive = false;
         }
@@ -2779,11 +2924,32 @@ impl State {
                     }
                 },
             };
+            let expires_on = match line.expires_on.trim() {
+                "" => None,
+                text => match crate::db::parse_expiry_date(text) {
+                    Some(date) => Some(date),
+                    None => return Err(format!("{}: write the date like 31/12/2026.", line.name)),
+                },
+            };
+            if allow_zero && qty > 0 {
+                let perishable = self
+                    .stock
+                    .iter()
+                    .any(|item| item.product_id == line.product_id && item.perishable);
+                if perishable && expires_on.is_none() {
+                    return Err(format!(
+                        "{} is perishable; date the delivery from the pack.",
+                        line.name
+                    ));
+                }
+            }
+
             lines.push(crate::db::PurchaseLineInput {
                 product_id: line.product_id,
                 qty,
                 unit_cost_minor,
                 pack_size,
+                expires_on,
             });
         }
         Ok(lines)
@@ -2948,6 +3114,7 @@ impl State {
                 qty: line.qty,
                 unit_cost_minor: line.unit_cost_minor,
                 pack_size: line.pack_size,
+                expires_on: line.expires_on,
             });
         }
         // A line that is no longer on the sheet was a planning mistake. It can
@@ -3587,6 +3754,7 @@ mod tests {
                 qty: "3".to_owned(),
                 cost: "500".to_owned(),
                 pack_size: "1".to_owned(),
+                expires_on: String::new(),
             });
 
         assert_eq!(state.stock[0].on_hand, 0, "a plan moves no stock");
@@ -3627,6 +3795,7 @@ mod tests {
                 qty: "2".to_owned(),
                 cost: String::new(),
                 pack_size: "1".to_owned(),
+                expires_on: String::new(),
             });
 
         state.receive_purchase();
@@ -3683,6 +3852,7 @@ mod tests {
                     qty: qty.to_owned(),
                     cost: String::new(),
                     pack_size: "1".to_owned(),
+                    expires_on: String::new(),
                 });
         }
         state.receive_purchase();
@@ -3740,6 +3910,7 @@ mod tests {
                     qty: qty.to_owned(),
                     cost: "500".to_owned(),
                     pack_size: "1".to_owned(),
+                    expires_on: String::new(),
                 });
         }
         state.save_purchase();
@@ -3751,8 +3922,7 @@ mod tests {
         let draft = state.purchase_editor.as_mut().expect("reopened");
         draft.lines[0].qty = "2".to_owned(); // short
         draft.lines[1].qty = "0".to_owned(); // not bought
-        let tea = draft.lines[2].product_id;
-        state.purchase_remove_line(tea); // never bought
+        state.purchase_remove_line(2); // never bought
         state.receive_purchase();
         state.receive_purchase();
 
@@ -4054,6 +4224,9 @@ mod tests {
             pack_barcode: String::new(),
             derived_price_minor: None,
             price_typed: true,
+            tracked: false,
+            perishable: false,
+            shelf_life_days: String::new(),
             error: None,
         });
         state.save_product();

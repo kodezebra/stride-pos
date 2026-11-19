@@ -282,30 +282,45 @@ The product now shows its on-hand count beside its name in Catalog. Every future
 
 | Choice | Use it when | Effect |
 |---|---|---|
-| **Received** | A supplier delivery arrives | Adds the quantity |
+| **Received** | A supplier delivery arrives | Adds the quantity; a perishable product needs the date on the pack |
 | **Customer return** | A customer brings goods back | Adds the quantity |
 | **Waste** | Spoiled, broken, or unsellable | Subtracts the quantity |
 | **Adjustment** | A physical count differs | Sets stock to the counted number |
 
 3. Type the **Quantity**. For an adjustment, type the **counted quantity**, not the difference.
-4. Type a **Note** — invoice number, delivery date, or reason.
-5. Press **Record**.
+4. If the product is perishable, type the **Expiry date** printed on the pack. It is required for a delivery, optional for a return or waste. The till will not take a date that does not exist (`31/02`); a past date is allowed and flagged.
+5. Type a **Note** — invoice number, delivery date, or reason.
+6. Press **Record**.
 
 **Adjustment example:** the till says 12 sugar, you count 9. Choose **Adjustment**, type `9`, and record. The till stores a difference of −3. If you type the number the till already has, it tells you they match and keeps the form open.
 
 ### 3.4 History and filters
 
-- **History** shows kind, date, who recorded it, note, and the signed change. The newest 200 are shown.
-- **All stock / Low stock / Out of stock** filter the list.
+- **History** shows kind, date, who recorded it, note, and the signed change. The newest 200 are shown. A dated delivery or waste line also shows `· dated …`.
+- **All stock / Low stock / Out of stock / Expiring** filter the list. **Expiring** means a date inside the warning window, expired dates included.
 - Sales are written to the history automatically. You never record a sale by hand.
 
-### 3.5 Three rules to say out loud
+### 3.5 Pulling expired stock
+
+A perishable product is marked in Catalog → **Edit product** → **Expiry**. Every
+delivery then asks for the date on the pack, and a sale takes the oldest date
+first — that is why the row badge names the *soonest* date only.
+
+1. Look at the **Expiring stock** card on the Products page, or press **Expiring** under **Stock**.
+2. A red **Expired** or **Expires today** badge means the date has arrived. The count beside it is what is left *on that date*, not the whole shelf.
+3. Press **Pull to waste** on the card, or **Move stock** → **Waste** with that date. The dated waste movement takes only that batch.
+4. Anything with a later date, or no date, stays on the shelf. Check the product's **History**: the waste line shows the date it removed.
+5. Never "adjust" expired stock away by typing a count: adjustment has no date and would hide which delivery left.
+
+**Mixed dates:** if a trip brought two dates of the same product, it is two rows with the same product and two dates. The same product on the same date twice is refused.
+
+### 3.6 Three rules to say out loud
 
 1. **Never type a stock number to "make it right"** unless you have physically counted the shelf. Use **Adjustment** with the counted number.
 2. **Negative stock is allowed.** If the till says −1, the shop can still sell. The negative is your reminder to receive stock or fix the count.
 3. **Deleting a product deletes its stock history.** The stock record is operational, not a financial archive.
 
-### 3.6 Practice
+### 3.7 Practice
 
 1. Track all six products with the opening counts and warning levels in the table.
 2. Receive a delivery: 24 tea, note `INV-104`.
@@ -314,6 +329,7 @@ The product now shows its on-hand count beside its name in Catalog. Every future
 5. Record **Waste** of 2 toothpaste.
 6. Record a **Customer return** of 1 soap.
 7. Open tea's **History** and read the last three lines.
+8. Make one product perishable (Catalog → **Edit product** → **Expiry**). Receive 6 dated a week from today, add 6 more dated a month from today as a second line, then sell 7 and check the soonest date is now used up and the badge moved to the later one.
 
 ---
 
@@ -340,9 +356,10 @@ The list now reads **Planned**. Nothing has moved in stock — a plan is intent,
 1. **Restock** → open the list → the page opens ready to count in.
 2. Each row starts at the planned quantity. Type what actually arrived.
 3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
-4. Set a line you did not find to **0**. It stays on the record as not bought.
-5. Bought something extra? Add it from the search at the bottom of the page with its quantity and cost.
-6. Press **Received** twice: the first press turns the button into **Confirm received**, the second records the trip. Receiving cannot be undone.
+4. For a perishable product, type the **Expiry** date printed on the pack. It cannot be left blank on a delivery. Two different dates on the same delivery are two rows — add the product twice.
+5. Set a line you did not find to **0**. It stays on the record as not bought.
+6. Bought something extra? Add it from the search at the bottom of the page with its quantity and cost.
+7. Press **Received** twice: the first press turns the button into **Confirm received**, the second records the trip. Receiving cannot be undone.
 
 Every received line writes exactly one stock movement, so the product's History shows the trip once. The shelf count goes up by what you received.
 
@@ -873,6 +890,10 @@ IF STUCK     Read the caption under the button.
 | **Unit cost** | What one item cost you; used for profit on later sales |
 | **Profit** | Revenue minus cost, for the sale lines whose cost is known |
 | **Adjustment** | A correction after counting the shelf by hand |
+| **Perishable** | A product that goes off; every delivery must carry its date |
+| **Expiry date** | The date printed on the pack, typed when the goods arrive |
+| **Expiring** | A filter: dated stock inside the warning window, expired included |
+| **Pull to waste** | Remove only what is left of one expired batch |
 | **Rounding** | The small cash difference caused by coins no longer circulating |
 | **Approval** | A manager allowing one action for one minute |
 | **Receipt** | The record of one sale; it can be copied, not printed |

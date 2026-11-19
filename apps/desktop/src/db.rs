@@ -336,6 +336,11 @@ pub struct StockItem {
     /// units. Suggestions subtract this so a trip in progress cannot be ordered
     /// twice.
     pub incoming: i64,
+    /// Whether the product goes off, so every delivery must be dated.
+    pub perishable: bool,
+    /// The shop's usual life for a delivery, in days. Only a prefill for a
+    /// repacked or undated delivery: a date printed on the pack always wins.
+    pub shelf_life_days: Option<i64>,
 }
 
 impl StockItem {
@@ -393,6 +398,9 @@ pub struct StockMovement {
     pub created_at: String,
     /// Who recorded it, when the movement names a staff account.
     pub user: Option<String>,
+    /// The date on the pack this movement carried, when it was a delivery or a
+    /// return. `None` for sales, adjustments and undated stock.
+    pub expires_on: Option<String>,
 }
 
 /// Where a purchase is in the only lifecycle it has: a shopping list, then a
@@ -486,6 +494,9 @@ pub struct PurchaseLine {
     /// How many base units one ordered unit holds. The shop may buy a sealed
     /// box one week and loose tablets the next; the line remembers which.
     pub pack_size: i64,
+    /// The date printed on the pack, when the delivery carried one. A plan may
+    /// hold the same product twice with two dates.
+    pub expires_on: Option<String>,
 }
 
 /// A purchase and its lines, for the editor and the receiving screen.
@@ -504,6 +515,9 @@ pub struct PurchaseLineInput {
     pub unit_cost_minor: Option<i64>,
     /// How many base units one ordered unit holds.
     pub pack_size: i64,
+    /// The date printed on the pack, when one is known while planning. Optional
+    /// here; required at receiving time for a perishable product.
+    pub expires_on: Option<String>,
 }
 
 /// One line counted at receiving time.
@@ -520,6 +534,9 @@ pub struct ReceiveLine {
     /// How many base units one ordered unit holds. Snapshotted onto the line so
     /// a later change to the product's pack does not rewrite what was bought.
     pub pack_size: i64,
+    /// The date printed on the pack. Required for a perishable product, even
+    /// when it is in the past: the shop may be counting stock it already has.
+    pub expires_on: Option<String>,
 }
 
 /// Revenue, cost and coverage for a range.
@@ -1187,6 +1204,23 @@ pub const MIGRATIONS: &[Migration] = &[
 
             ALTER TABLE purchase_lines ADD COLUMN pack_size INTEGER NOT NULL DEFAULT 1
                 CHECK (pack_size >= 1);
+        "#,
+    },
+    Migration {
+        version: 17,
+        name: "product_expiry",
+        sql: r#"
+            ALTER TABLE products ADD COLUMN perishable INTEGER NOT NULL DEFAULT 0
+                CHECK (perishable IN (0, 1));
+            ALTER TABLE products ADD COLUMN shelf_life_days INTEGER
+                CHECK (shelf_life_days IS NULL OR shelf_life_days > 0);
+
+            ALTER TABLE purchase_lines ADD COLUMN expires_on TEXT;
+            ALTER TABLE stock_movements ADD COLUMN expires_on TEXT;
+
+            CREATE INDEX IF NOT EXISTS stock_movements_expiry
+                ON stock_movements (product_id, expires_on)
+                WHERE expires_on IS NOT NULL;
         "#,
     },
 ];
@@ -2765,7 +2799,7 @@ pub fn stock(store: &storage::Store) -> Vec<StockItem> {
                     JOIN purchases pu ON pu.id = pl.purchase_id
                     WHERE pl.product_id = p.id AND pu.status = 'planned'
                 ), 0),
-                p.pack_size, p.unit_label
+                p.pack_size, p.unit_label, p.perishable, p.shelf_life_days
          FROM products p
          LEFT JOIN stock_movements m ON m.product_id = p.id
          WHERE p.tracked = 1 AND p.archived = 0
@@ -2791,6 +2825,8 @@ pub fn stock(store: &storage::Store) -> Vec<StockItem> {
             incoming: row.get(7)?,
             pack_size: row.get(8)?,
             unit_label: row.get(9)?,
+            perishable: row.get(10)?,
+            shelf_life_days: row.get(11)?,
         })
     });
 
@@ -2861,6 +2897,396 @@ pub fn track_product(
     Ok(())
 }
 
+/// Mark a tracked product as perishable, or clear that.
+///
+/// Perishability is not part of [`ProductFields`]: like tracking, it is a
+/// statement about how the shop keeps the product, not something the catalog
+/// form rewrites on every save. A product that is not tracked has no ledger, so
+/// there is nothing for a date to sit on: perishable is refused rather than
+/// stored and silently ignored.
+pub fn set_perishability(
+    store: &storage::Store,
+    product_id: i64,
+    perishable: bool,
+    shelf_life_days: Option<i64>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        shelf_life_days.is_none_or(|days| days > 0),
+        "a shelf life must be a whole number of days"
+    );
+
+    if perishable {
+        let (tracked, archived): (bool, bool) = store
+            .conn()
+            .query_row(
+                "SELECT tracked, archived FROM products WHERE id = ?1",
+                [product_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .context("that product is no longer in the catalog")?;
+        anyhow::ensure!(!archived, "that product is archived");
+        anyhow::ensure!(
+            tracked,
+            "only a tracked product can be marked perishable; start tracking it first"
+        );
+    }
+
+    let changed = store.conn().execute(
+        "UPDATE products
+            SET perishable = ?2, shelf_life_days = ?3
+          WHERE id = ?1 AND archived = 0",
+        (
+            product_id,
+            perishable,
+            if perishable { shelf_life_days } else { None },
+        ),
+    )?;
+    anyhow::ensure!(changed == 1, "that product is no longer in the catalog");
+    Ok(())
+}
+
+/// Read a typed expiry date and write it as `YYYY-MM-DD`.
+///
+/// The pack prints a day, a month and a year in one of two orders, and a shop
+/// types what it sees. Both `31/12/2026` and `2026-12-31` are accepted, a
+/// single-digit day or month is fine, and anything that is not a real calendar
+/// date is refused. SQLite's own `date()` would quietly turn `2026-02-30` into
+/// March, which would hide a typing mistake until a report was wrong.
+pub fn parse_expiry_date(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let (year, month, day) = if let Some((year, rest)) = text.split_once('-') {
+        let (month, day) = rest.split_once('-')?;
+        (
+            year.parse::<i64>().ok()?,
+            month.parse::<i64>().ok()?,
+            day.parse::<i64>().ok()?,
+        )
+    } else {
+        let mut parts = text.split('/');
+        let day = parts.next()?.parse::<i64>().ok()?;
+        let month = parts.next()?.parse::<i64>().ok()?;
+        let year = parts.next()?.parse::<i64>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        (year, month, day)
+    };
+
+    if !(1900..=2999).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    if day < 1 || day > i64::from(days_in_month(year, month)) {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+/// Normalise an optional typed date, refusing a value that is not a date.
+///
+/// A blank field means "no date", not an error: returns and stock pulled off a
+/// dated bucket are the only movements where the date is optional.
+fn normalize_expiry(expires_on: Option<&str>) -> anyhow::Result<Option<String>> {
+    match expires_on {
+        None => Ok(None),
+        Some(text) if text.trim().is_empty() => Ok(None),
+        Some(text) => parse_expiry_date(text)
+            .map(Some)
+            .context("a date must be written like 31/12/2026"),
+    }
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: i64) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Days since 1970-01-01 for a civil date, after Howard Hinnant's algorithm.
+///
+/// The FEFO report needs "how many days until this date" without asking SQLite
+/// once per bucket, and without a calendar library for one subtraction.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = (month + 9) % 12;
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Days since 1970-01-01 for a canonical `YYYY-MM-DD`, or `None` if malformed.
+fn date_days(date: &str) -> Option<i64> {
+    let mut parts = date.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
+/// Today's local date in days since the epoch, for the same arithmetic.
+fn today_days(store: &storage::Store) -> Option<i64> {
+    let today: String = store
+        .conn()
+        .query_row("SELECT date('now','localtime')", [], |row| row.get(0))
+        .ok()?;
+    date_days(&today)
+}
+
+/// One dated slice of a product's shelf, after FEFO has consumed what was sold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiryBucket {
+    pub product_id: i64,
+    pub name: String,
+    pub unit_label: String,
+    /// `None` for stock received without a date, which is consumed last.
+    pub expires_on: Option<String>,
+    pub on_hand: i64,
+    /// Days from today; negative is already past. `None` for undated stock.
+    pub days_left: Option<i64>,
+}
+
+impl ExpiryBucket {
+    pub fn is_expired(&self) -> bool {
+        matches!(self.days_left, Some(days) if days < 0)
+    }
+
+    pub fn expires_within(&self, days: i64) -> bool {
+        matches!(self.days_left, Some(left) if left <= days)
+    }
+}
+
+/// What is left on each dated slice of a product's stock.
+///
+/// Sales and untagged corrections are not allocated to a date when they are
+/// written; they consume the earliest expiry first, which is what FEFO means.
+/// Tagged waste comes off its own date, so pulling expired stock does not
+/// silently eat a fresher delivery. Undated arrivals (an opening count, an
+/// adjustment up, a delivery nobody dated) sit at the end of the queue.
+fn derive_buckets(movements: &[(StockKind, Option<String>, i64)]) -> Vec<(Option<String>, i64)> {
+    let mut dated: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    let mut undated_in = 0_i64;
+    let mut untagged_out = 0_i64;
+
+    for (kind, expires_on, delta) in movements {
+        match kind {
+            StockKind::Receive | StockKind::Return => match expires_on {
+                Some(date) => *dated.entry(date.clone()).or_default() += delta,
+                None => undated_in += delta,
+            },
+            StockKind::Waste => match expires_on {
+                Some(date) => *dated.entry(date.clone()).or_default() += delta,
+                None => untagged_out += -delta,
+            },
+            StockKind::Sale => untagged_out += -delta,
+            StockKind::Adjust if *delta > 0 => undated_in += delta,
+            StockKind::Adjust => untagged_out += -delta,
+            StockKind::Opening => undated_in += delta,
+        }
+    }
+
+    // A date cannot hold less than nothing. A dated waste that asked for more
+    // than that batch still had — a typo, or a sale between counting the shelf
+    // and tapping the button — took the excess off the rest of the shelf, so
+    // the deficit joins the untagged pool instead of vanishing with the date.
+    for balance in dated.values_mut() {
+        if *balance < 0 {
+            untagged_out += -*balance;
+            *balance = 0;
+        }
+    }
+
+    let mut leftover = untagged_out;
+    for balance in dated.values_mut() {
+        if *balance <= 0 || leftover <= 0 {
+            continue;
+        }
+        let taken = (*balance).min(leftover);
+        *balance -= taken;
+        leftover -= taken;
+    }
+
+    let mut undated = undated_in;
+    if leftover > 0 {
+        let taken = undated.max(0).min(leftover);
+        undated -= taken;
+        leftover -= taken;
+    }
+    // More was sold than the ledger ever held: the shop is negative on hand.
+    // Report it against the undated pool rather than inventing a date for it,
+    // so the sum of the buckets still matches `SUM(delta)`.
+    if leftover > 0 {
+        undated -= leftover;
+    }
+
+    let mut buckets: Vec<(Option<String>, i64)> = dated
+        .into_iter()
+        .filter(|(_, balance)| *balance > 0)
+        .map(|(date, balance)| (Some(date), balance))
+        .collect();
+    if undated != 0 {
+        buckets.push((None, undated));
+    }
+    buckets
+}
+
+/// One tracked product's movements, oldest first, as FEFO reads them.
+fn product_movements(
+    store: &storage::Store,
+    product_id: i64,
+) -> Vec<(StockKind, Option<String>, i64)> {
+    let mut statement = match store.conn().prepare(
+        "SELECT kind, expires_on, delta
+         FROM stock_movements
+         WHERE product_id = ?1
+         ORDER BY id",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "expiry movements prepare failed");
+            return Vec::new();
+        }
+    };
+
+    let rows = statement.query_map([product_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+
+    let Ok(rows) = rows else {
+        tracing::warn!("expiry movements query failed");
+        return Vec::new();
+    };
+
+    rows.filter_map(Result::ok)
+        .filter_map(|(kind, expires_on, delta)| {
+            Some((StockKind::from_key(&kind)?, expires_on, delta))
+        })
+        .collect()
+}
+
+/// The dated stock across every perishable product, earliest date first.
+///
+/// Only what is still on the shelf appears: a bucket a sale has already taken
+/// is no longer expiring stock, and showing it would send the shop looking for
+/// something it does not have.
+pub fn expiring(store: &storage::Store) -> Vec<ExpiryBucket> {
+    let today = today_days(store);
+
+    let products: Vec<(i64, String, String)> = {
+        let mut statement = match store.conn().prepare(
+            "SELECT p.id, p.name, p.unit_label
+             FROM products p
+             WHERE p.tracked = 1 AND p.archived = 0
+               AND (p.perishable = 1 OR EXISTS (
+                   SELECT 1 FROM stock_movements m
+                   WHERE m.product_id = p.id AND m.expires_on IS NOT NULL
+               ))
+             ORDER BY p.name COLLATE NOCASE",
+        ) {
+            Ok(statement) => statement,
+            Err(err) => {
+                tracing::warn!(error = %err, "expiry prepare failed");
+                return Vec::new();
+            }
+        };
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "expiry query failed");
+                return Vec::new();
+            }
+        }
+    };
+
+    let mut buckets = Vec::new();
+    for (product_id, name, unit_label) in products {
+        for (expires_on, on_hand) in derive_buckets(&product_movements(store, product_id)) {
+            let Some(date) = expires_on else {
+                // Undated stock is not what this report is about.
+                continue;
+            };
+            let days_left = match (date_days(&date), today) {
+                (Some(expiry), Some(today)) => Some(expiry - today),
+                _ => None,
+            };
+            buckets.push(ExpiryBucket {
+                product_id,
+                name: name.clone(),
+                unit_label: unit_label.clone(),
+                expires_on: Some(date),
+                on_hand,
+                days_left,
+            });
+        }
+    }
+
+    buckets.sort_by(|a, b| {
+        a.expires_on
+            .cmp(&b.expires_on)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    buckets
+}
+
+/// Pull everything left on one expired date into waste, and say how much moved.
+///
+/// The bucket is recomputed here rather than trusted from the screen: the list
+/// on screen is a cache, and a sale between the paint and the click would
+/// otherwise pull stock the shop no longer has. The waste movement carries the
+/// date, so FEFO takes it off that slice and leaves a fresher delivery alone.
+pub fn pull_expired(
+    store: &storage::Store,
+    product_id: i64,
+    expires_on: &str,
+    user_id: Option<&str>,
+) -> anyhow::Result<i64> {
+    let date = parse_expiry_date(expires_on).context("a date must be written like 31/12/2026")?;
+    let remaining = derive_buckets(&product_movements(store, product_id))
+        .into_iter()
+        .find(|(bucket_date, _)| bucket_date.as_deref() == Some(date.as_str()))
+        .map(|(_, on_hand)| on_hand)
+        .unwrap_or(0);
+    anyhow::ensure!(remaining > 0, "that date has no stock left to pull");
+
+    record_stock_movement(
+        store,
+        product_id,
+        -remaining,
+        StockKind::Waste,
+        "Expired",
+        Some(&date),
+        user_id,
+    )?;
+    Ok(remaining)
+}
+
 /// Append a manual movement to a tracked product's ledger.
 ///
 /// Signs are fixed by the kind, not left to the caller: `Receive` and `Return`
@@ -2872,6 +3298,7 @@ pub fn record_stock_movement(
     delta: i64,
     kind: StockKind,
     note: &str,
+    expires_on: Option<&str>,
     user_id: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(delta != 0, "a stock movement must change the count");
@@ -2886,19 +3313,50 @@ pub fn record_stock_movement(
         }
     }
 
-    let tracked: bool = store.conn().query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM products WHERE id = ?1 AND tracked = 1 AND archived = 0
-         )",
-        [product_id],
-        |row| row.get(0),
-    )?;
+    let expires_on = normalize_expiry(expires_on)?;
+    // A date says which slice of the shelf moved. Only an arrival, a return or
+    // stock pulled off a dated bucket has one; a correction or a sale is a
+    // change to the count as a whole.
+    anyhow::ensure!(
+        expires_on.is_none()
+            || matches!(
+                kind,
+                StockKind::Receive | StockKind::Return | StockKind::Waste
+            ),
+        "{} cannot carry an expiry date",
+        kind.label()
+    );
+
+    let (name, tracked, perishable): (String, bool, bool) = store
+        .conn()
+        .query_row(
+            "SELECT name, tracked, perishable
+             FROM products WHERE id = ?1 AND archived = 0",
+            [product_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .context("that product is no longer in the catalog")?;
     anyhow::ensure!(tracked, "that product's stock is not tracked");
+    if kind == StockKind::Receive && perishable {
+        anyhow::ensure!(
+            expires_on.is_some(),
+            "{name} is perishable; date the delivery from the pack"
+        );
+    }
 
     store.conn().execute(
-        "INSERT INTO stock_movements (product_id, delta, kind, note, user_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        (product_id, delta, kind.key(), optional_text(note), user_id),
+        "INSERT INTO stock_movements
+             (product_id, delta, kind, note, expires_on, user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (
+            product_id,
+            delta,
+            kind.key(),
+            optional_text(note),
+            expires_on,
+            user_id,
+        ),
     )?;
     Ok(())
 }
@@ -2913,7 +3371,8 @@ pub const MOVEMENT_HISTORY: i64 = 200;
 pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMovement> {
     let mut statement = match store.conn().prepare(
         "SELECT m.id, m.delta, m.kind, m.note,
-                strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name
+                strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name,
+                m.expires_on
          FROM stock_movements m
          LEFT JOIN users u ON u.id = m.user_id
          WHERE m.product_id = ?1
@@ -2936,6 +3395,7 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
             row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     });
 
@@ -2945,7 +3405,7 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
     };
 
     rows.filter_map(Result::ok)
-        .filter_map(|(id, delta, kind, note, created_at, user)| {
+        .filter_map(|(id, delta, kind, note, created_at, user, expires_on)| {
             Some(StockMovement {
                 id,
                 delta,
@@ -2953,6 +3413,7 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
                 note,
                 created_at,
                 user,
+                expires_on,
             })
         })
         .collect()
@@ -3025,7 +3486,7 @@ pub fn purchase_detail(store: &storage::Store, id: i64) -> Option<PurchaseDetail
 
     let mut statement = match store.conn().prepare(
         "SELECT id, product_id, name_snapshot, qty_ordered, qty_received,
-                unit_cost_minor, pack_size
+                unit_cost_minor, pack_size, expires_on
          FROM purchase_lines WHERE purchase_id = ?1 ORDER BY position, id",
     ) {
         Ok(statement) => statement,
@@ -3044,6 +3505,7 @@ pub fn purchase_detail(store: &storage::Store, id: i64) -> Option<PurchaseDetail
             qty_received: row.get(4)?,
             unit_cost_minor: row.get(5)?,
             pack_size: row.get(6)?,
+            expires_on: row.get(7)?,
         })
     });
 
@@ -3248,6 +3710,7 @@ pub fn receive_purchase(
             "a cost cannot be negative"
         );
         anyhow::ensure!(line.pack_size >= 1, "a pack holds at least one unit");
+        let expires_on = normalize_expiry(line.expires_on.as_deref())?;
         if line.qty == 0 {
             continue;
         }
@@ -3302,9 +3765,16 @@ pub fn receive_purchase(
                      SET qty_ordered = MAX(qty_ordered, ?2),
                          qty_received = qty_received + ?2,
                          unit_cost_minor = COALESCE(?3, unit_cost_minor),
-                         pack_size = ?4
+                         pack_size = ?4,
+                         expires_on = CASE WHEN ?5 IS NULL THEN expires_on ELSE ?5 END
                      WHERE id = ?1",
-                    (line_id, line.qty, line.unit_cost_minor, line.pack_size),
+                    (
+                        line_id,
+                        line.qty,
+                        line.unit_cost_minor,
+                        line.pack_size,
+                        expires_on,
+                    ),
                 )?;
                 line_id
             }
@@ -3322,8 +3792,9 @@ pub fn receive_purchase(
                 transaction.execute(
                     "INSERT INTO purchase_lines
                          (uid, purchase_id, product_id, name_snapshot, qty_ordered,
-                          qty_received, unit_cost_minor, position, pack_size)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
+                          qty_received, unit_cost_minor, position, pack_size,
+                          expires_on)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9)",
                     (
                         uuid::Uuid::now_v7().to_string(),
                         id,
@@ -3333,6 +3804,7 @@ pub fn receive_purchase(
                         line.unit_cost_minor,
                         position,
                         line.pack_size,
+                        expires_on,
                     ),
                 )?;
                 transaction.last_insert_rowid()
@@ -3443,6 +3915,7 @@ pub fn create_and_receive(
             qty: line.qty,
             unit_cost_minor: line.unit_cost_minor,
             pack_size: line.pack_size,
+            expires_on: line.expires_on.clone(),
         };
         record_receive(&transaction, line_id, &received, note, user_id)?;
     }
@@ -3463,16 +3936,31 @@ fn record_receive(
     note: &str,
     user_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    let (name, perishable): (String, bool) = transaction.query_row(
+        "SELECT name, perishable FROM products WHERE id = ?1",
+        [line.product_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expires_on = normalize_expiry(line.expires_on.as_deref())?;
+    if perishable {
+        anyhow::ensure!(
+            expires_on.is_some(),
+            "{name} is perishable; date the delivery from the pack"
+        );
+    }
+
     transaction.execute(
         "INSERT INTO stock_movements
-             (product_id, delta, kind, note, user_id, purchase_line_id, uid)
-         VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6)",
+             (product_id, delta, kind, note, user_id, purchase_line_id,
+              expires_on, uid)
+         VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6, ?7)",
         (
             line.product_id,
             line.qty * line.pack_size,
             optional_text(note),
             user_id,
             line_id,
+            expires_on,
             uuid::Uuid::now_v7().to_string(),
         ),
     )?;
@@ -3512,9 +4000,10 @@ fn insert_purchase_lines(
             "a cost cannot be negative"
         );
         anyhow::ensure!(line.pack_size >= 1, "a pack holds at least one unit");
+        let expires_on = normalize_expiry(line.expires_on.as_deref())?;
         anyhow::ensure!(
-            seen.insert(line.product_id),
-            "the same product is on the list twice"
+            seen.insert((line.product_id, expires_on.clone())),
+            "the same product is on the list twice with the same date"
         );
 
         let (name, tracked, archived): (String, bool, bool) = transaction
@@ -3534,8 +4023,8 @@ fn insert_purchase_lines(
         transaction.execute(
             "INSERT INTO purchase_lines
                  (uid, purchase_id, product_id, name_snapshot, qty_ordered,
-                  unit_cost_minor, position, pack_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  unit_cost_minor, position, pack_size, expires_on)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 uuid::Uuid::now_v7().to_string(),
                 purchase_id,
@@ -3545,6 +4034,7 @@ fn insert_purchase_lines(
                 line.unit_cost_minor,
                 position as i64,
                 line.pack_size,
+                expires_on,
             ),
         )?;
         ids.push(transaction.last_insert_rowid());
@@ -5870,11 +6360,12 @@ mod tests {
         assert!(!tracked[0].is_out());
         assert!(!tracked[0].is_low());
 
-        record_stock_movement(&store, soap, 5, StockKind::Receive, "Delivery", None)
+        record_stock_movement(&store, soap, 5, StockKind::Receive, "Delivery", None, None)
             .expect("receive");
-        record_stock_movement(&store, soap, 2, StockKind::Return, "", None).expect("return");
-        record_stock_movement(&store, soap, -4, StockKind::Waste, "Broken", None).expect("waste");
-        record_stock_movement(&store, soap, -2, StockKind::Adjust, "Counted", None)
+        record_stock_movement(&store, soap, 2, StockKind::Return, "", None, None).expect("return");
+        record_stock_movement(&store, soap, -4, StockKind::Waste, "Broken", None, None)
+            .expect("waste");
+        record_stock_movement(&store, soap, -2, StockKind::Adjust, "Counted", None, None)
             .expect("adjust");
 
         assert_eq!(stock(&store)[0].on_hand, 13);
@@ -6005,7 +6496,7 @@ mod tests {
             (0, StockKind::Adjust),
         ] {
             assert!(
-                record_stock_movement(&store, soap, delta, kind, "", None).is_err(),
+                record_stock_movement(&store, soap, delta, kind, "", None, None).is_err(),
                 "{kind:?} with a delta of {delta} should be refused"
             );
         }
@@ -6013,7 +6504,8 @@ mod tests {
 
         let untracked = insert_product(&store, "Bun", 500, "Bakery", None, None).expect("bun");
         assert!(
-            record_stock_movement(&store, untracked, 1, StockKind::Receive, "", None).is_err(),
+            record_stock_movement(&store, untracked, 1, StockKind::Receive, "", None, None)
+                .is_err(),
             "an untracked product has no ledger to append to"
         );
 
@@ -6050,7 +6542,8 @@ mod tests {
 
         // Receiving does not hide the debt: the count stays negative until the
         // shelf has caught up with what was sold.
-        record_stock_movement(&store, soap, 2, StockKind::Receive, "", None).expect("receive");
+        record_stock_movement(&store, soap, 2, StockKind::Receive, "", None, None)
+            .expect("receive");
         assert_eq!(stock(&store)[0].on_hand, -1);
         assert!(stock(&store)[0].is_out());
 
@@ -6064,7 +6557,8 @@ mod tests {
         track_product(&store, soap, 0, 5, None, None).expect("track");
 
         for _ in 0..(MOVEMENT_HISTORY + 5) {
-            record_stock_movement(&store, soap, 1, StockKind::Receive, "", None).expect("receive");
+            record_stock_movement(&store, soap, 1, StockKind::Receive, "", None, None)
+                .expect("receive");
         }
 
         let history = stock_movements(&store, soap);
@@ -6864,6 +7358,7 @@ mod tests {
                 qty: 5,
                 unit_cost_minor: Some(100),
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -6904,6 +7399,7 @@ mod tests {
                 qty: 3,
                 unit_cost_minor: Some(120),
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -6949,6 +7445,7 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }],
                 &[],
                 "",
@@ -6978,6 +7475,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: Some(100),
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -6994,6 +7492,7 @@ mod tests {
                 qty: 7,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7022,6 +7521,7 @@ mod tests {
                 qty: 4,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7037,6 +7537,7 @@ mod tests {
                     qty: 9,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }]
             )
             .is_ok(),
@@ -7053,6 +7554,7 @@ mod tests {
                 qty: 4,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7068,6 +7570,7 @@ mod tests {
                 qty: 1,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7086,6 +7589,7 @@ mod tests {
                     qty: 4,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }]
             )
             .is_err(),
@@ -7197,6 +7701,7 @@ mod tests {
                     qty: 3,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }],
                 &[],
                 "",
@@ -7226,12 +7731,14 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
                 PurchaseLineInput {
                     product_id: rice,
                     qty: 5,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
             ],
             None,
@@ -7260,6 +7767,7 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: Some(50),
                     pack_size: 1,
+                    expires_on: None,
                 },
                 ReceiveLine {
                     line_id: None,
@@ -7267,6 +7775,7 @@ mod tests {
                     qty: 3,
                     unit_cost_minor: Some(80),
                     pack_size: 1,
+                    expires_on: None,
                 },
             ],
             &[rice_line],
@@ -7305,6 +7814,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7353,6 +7863,7 @@ mod tests {
                 qty: 3,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7377,6 +7888,7 @@ mod tests {
                 qty: 3,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7406,6 +7918,7 @@ mod tests {
                 qty: 1,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7421,6 +7934,7 @@ mod tests {
                 qty: 1,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7462,12 +7976,14 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
                 PurchaseLineInput {
                     product_id: tea,
                     qty: 1,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
             ],
             None,
@@ -7491,6 +8007,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7535,12 +8052,14 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: Some(250),
                     pack_size: 1,
+                    expires_on: None,
                 },
                 PurchaseLineInput {
                     product_id: tea,
                     qty: 1,
                     unit_cost_minor: Some(900),
                     pack_size: 3,
+                    expires_on: None,
                 },
             ],
             None,
@@ -7611,12 +8130,14 @@ mod tests {
                     qty: 2,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
                 PurchaseLineInput {
                     product_id: retired,
                     qty: 1,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 },
             ],
             None,
@@ -7655,6 +8176,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: Some(70),
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7670,6 +8192,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             &[],
             "",
@@ -7701,6 +8224,7 @@ mod tests {
                     qty: 1,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }]
             )
             .is_err(),
@@ -7726,6 +8250,7 @@ mod tests {
                     qty: 5,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }],
                 None
             )
@@ -7743,6 +8268,7 @@ mod tests {
                 qty: 5,
                 unit_cost_minor: None,
                 pack_size: 1,
+                expires_on: None,
             }],
             None,
         )
@@ -7763,6 +8289,7 @@ mod tests {
                     qty: 1,
                     unit_cost_minor: None,
                     pack_size: 1,
+                    expires_on: None,
                 }],
                 &[],
                 "",
@@ -7919,6 +8446,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: Some(1_850),
                 pack_size: 100,
+                expires_on: None,
             }],
             None,
         )
@@ -7934,6 +8462,7 @@ mod tests {
                 qty: 2,
                 unit_cost_minor: Some(1_850),
                 pack_size: 100,
+                expires_on: None,
             }],
             &[],
             "",
@@ -8002,6 +8531,242 @@ mod tests {
         assert_eq!(reported.cost_minor, 1_850, "100 tablets, not one");
         assert_eq!(reported.profit_minor(), 950);
         assert!(reported.is_complete());
+
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn a_printed_date_is_read_in_the_orders_a_pack_uses() {
+        assert_eq!(
+            parse_expiry_date("2026-12-31").as_deref(),
+            Some("2026-12-31")
+        );
+        assert_eq!(
+            parse_expiry_date("31/12/2026").as_deref(),
+            Some("2026-12-31")
+        );
+        assert_eq!(
+            parse_expiry_date("  1/2/2027 ").as_deref(),
+            Some("2027-02-01")
+        );
+        assert_eq!(
+            parse_expiry_date("29/02/2028").as_deref(),
+            Some("2028-02-29"),
+            "2028 is a leap year"
+        );
+        assert_eq!(parse_expiry_date("29/02/2026"), None, "2026 is not");
+        assert_eq!(
+            parse_expiry_date("2026-02-30"),
+            None,
+            "a date SQLite would quietly move to March is a typo"
+        );
+        assert_eq!(
+            parse_expiry_date("2026-13-01"),
+            None,
+            "there is no month 13"
+        );
+        assert_eq!(parse_expiry_date("31/12"), None, "a date needs a year");
+        assert_eq!(parse_expiry_date(""), None, "blank is no date");
+    }
+
+    #[test]
+    fn sales_take_the_earliest_date_first_and_undated_stock_last() {
+        let movements = vec![
+            (StockKind::Receive, Some("2026-03-01".to_owned()), 5),
+            (StockKind::Receive, Some("2026-01-01".to_owned()), 4),
+            (StockKind::Receive, None, 6),
+            (StockKind::Sale, None, -6),
+        ];
+        assert_eq!(
+            derive_buckets(&movements),
+            vec![
+                // January is gone, March lost the other two, undated untouched.
+                (Some("2026-03-01".to_owned()), 3),
+                (None, 6),
+            ]
+        );
+
+        // A tagged waste movement comes off its own date: pulling expired stock
+        // must not eat a fresher delivery.
+        let movements = vec![
+            (StockKind::Receive, Some("2026-01-01".to_owned()), 5),
+            (StockKind::Receive, Some("2026-06-01".to_owned()), 5),
+            (StockKind::Waste, Some("2026-06-01".to_owned()), -2),
+        ];
+        assert_eq!(
+            derive_buckets(&movements),
+            vec![
+                (Some("2026-01-01".to_owned()), 5),
+                (Some("2026-06-01".to_owned()), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shortfall_is_reported_against_undated_stock_not_invented_for_a_date() {
+        let movements = vec![
+            (StockKind::Receive, Some("2026-01-01".to_owned()), 2),
+            (StockKind::Sale, None, -5),
+        ];
+        let buckets = derive_buckets(&movements);
+        assert_eq!(buckets, vec![(None, -3)], "the shop is three short");
+
+        let total: i64 = buckets.iter().map(|(_, on_hand)| *on_hand).sum();
+        assert_eq!(total, -3, "buckets still add up to the ledger");
+    }
+
+    #[test]
+    fn a_dated_waste_cannot_make_a_date_hold_less_than_nothing() {
+        let movements = vec![
+            (StockKind::Receive, Some("2026-06-01".to_owned()), 3),
+            (StockKind::Waste, Some("2026-06-01".to_owned()), -5),
+        ];
+        let buckets = derive_buckets(&movements);
+        assert_eq!(
+            buckets,
+            vec![(None, -2)],
+            "the two that date never held came off the rest of the shelf"
+        );
+        let total: i64 = buckets.iter().map(|(_, on_hand)| *on_hand).sum();
+        assert_eq!(total, -2, "buckets still add up to the ledger");
+    }
+
+    #[test]
+    fn only_a_tracked_product_can_be_perishable_and_a_delivery_needs_its_date() {
+        let (store, path) = store("expiry-receive");
+        let milk = insert_product(&store, "Milk", 2_000, "Dairy", None, None).expect("product");
+
+        assert!(
+            set_perishability(&store, milk, true, Some(7)).is_err(),
+            "an untracked product has no stock for a date to sit on"
+        );
+
+        track_product(&store, milk, 0, 0, None, None).expect("track");
+        set_perishability(&store, milk, true, Some(7)).expect("perishable");
+        assert!(stock(&store)[0].perishable);
+        assert_eq!(stock(&store)[0].shelf_life_days, Some(7));
+
+        assert!(
+            record_stock_movement(&store, milk, 6, StockKind::Receive, "Delivery", None, None)
+                .is_err(),
+            "a perishable delivery has to carry the printed date"
+        );
+        assert!(
+            record_stock_movement(
+                &store,
+                milk,
+                6,
+                StockKind::Receive,
+                "Delivery",
+                Some("next Tuesday"),
+                None,
+            )
+            .is_err(),
+            "a date that is not a date is refused"
+        );
+
+        record_stock_movement(
+            &store,
+            milk,
+            6,
+            StockKind::Receive,
+            "Delivery",
+            Some("31/07/2026"),
+            None,
+        )
+        .expect("dated delivery");
+        assert_eq!(
+            stock_movements(&store, milk)[0].expires_on.as_deref(),
+            Some("2026-07-31"),
+            "stored the way dates are compared"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn expiring_stock_is_what_is_left_on_each_date_and_pulling_it_leaves_the_rest() {
+        let (store, path) = store("expiry-pull");
+        let milk = insert_product(&store, "Milk", 2_000, "Dairy", None, None).expect("product");
+        track_product(&store, milk, 0, 0, None, None).expect("track");
+        set_perishability(&store, milk, true, None).expect("perishable");
+
+        let delivery = |date: &str, qty: i64| PurchaseLineInput {
+            product_id: milk,
+            qty,
+            unit_cost_minor: Some(1_000),
+            pack_size: 1,
+            expires_on: Some(date.to_owned()),
+        };
+        create_and_receive(&store, None, "", &[delivery("2020-01-01", 2)], None)
+            .expect("past delivery");
+        create_and_receive(&store, None, "", &[delivery("2099-01-01", 3)], None)
+            .expect("later delivery");
+
+        let buckets = expiring(&store);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].expires_on.as_deref(), Some("2020-01-01"));
+        assert!(buckets[0].is_expired(), "the date has been and gone");
+        assert_eq!(buckets[0].on_hand, 2);
+        assert!(!buckets[1].is_expired());
+
+        assert_eq!(
+            pull_expired(&store, milk, "2020-01-01", None).expect("pull"),
+            2
+        );
+        assert_eq!(stock(&store)[0].on_hand, 3, "the later delivery stays");
+        assert!(
+            pull_expired(&store, milk, "2020-01-01", None).is_err(),
+            "that date has nothing left"
+        );
+
+        let left = expiring(&store);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].expires_on.as_deref(), Some("2099-01-01"));
+
+        let waste = &stock_movements(&store, milk)[0];
+        assert_eq!(waste.kind, StockKind::Waste);
+        assert_eq!(waste.delta, -2);
+        assert_eq!(waste.expires_on.as_deref(), Some("2020-01-01"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn one_product_can_arrive_on_two_dates_but_not_the_same_date_twice() {
+        let (store, path) = store("expiry-lines");
+        let milk = insert_product(&store, "Milk", 2_000, "Dairy", None, None).expect("product");
+        track_product(&store, milk, 0, 0, None, None).expect("track");
+        set_perishability(&store, milk, true, None).expect("perishable");
+
+        let line = |date: &str| PurchaseLineInput {
+            product_id: milk,
+            qty: 1,
+            unit_cost_minor: None,
+            pack_size: 1,
+            expires_on: Some(date.to_owned()),
+        };
+        create_and_receive(
+            &store,
+            None,
+            "",
+            &[line("2026-06-01"), line("2026-07-01")],
+            None,
+        )
+        .expect("two printed dates on one trip");
+        assert_eq!(stock(&store)[0].on_hand, 2);
+        assert_eq!(expiring(&store).len(), 2);
+
+        assert!(
+            create_and_receive(
+                &store,
+                None,
+                "",
+                &[line("2026-08-01"), line("2026-08-01")],
+                None
+            )
+            .is_err(),
+            "the same product on the same date is one line"
+        );
 
         let _ = std::fs::remove_file(path);
     }

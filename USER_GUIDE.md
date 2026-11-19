@@ -325,7 +325,42 @@ stock**), because a purchase line needs a shelf count to move. Counting it at th
 same time as the trip is fine — enter what is on the shelf now, then receive the
 new goods.
 
-### 5.5 Money doesn't add up at close, end to end
+### 5.5 Dating a delivery
+
+Fresh milk, bread and medicine are counted like anything else, but the date on
+the pack matters: the shop has to sell the oldest first and know what must come
+off the shelf.
+
+**Mark a product as perishable.** Catalog (`F3`) → **Edit product** → the
+**Expiry** section → tick **Goes off — date every delivery**. Only a tracked
+product can be perishable; if the box is greyed out, press **Track stock**
+first. *Shelf life (days)* is optional and only a reminder on the receive form —
+it never invents a date. The printed date always wins.
+
+**Date the delivery from the pack.** Every delivery of a perishable product
+asks for **Expiry**. Type the date printed on the pack, as `2026-12-31` or
+`31/12/2026`. The date is required when you **receive**, not while you plan: you
+may not know it until the goods are in your hand. A date in the past is
+accepted and flagged, never blocked — the shop still has to record what came
+in.
+
+**Two dates on one delivery are two lines.** Milk that keeps until Friday and
+milk that keeps until Sunday are two rows on the same trip, each with its own
+date and quantity. Add the product twice; the picker marks the second as
+"another line". Receiving both rows still records one purchase.
+
+**What the till does with the dates.** A sale takes the earliest date first.
+**Expiring** under **Stock** lists the products with a date inside the warning
+window, and a product row shows its soonest date when it needs attention. The
+Products page carries an **Expiring stock** card with the nearest dates first
+and a **Pull to waste** button on anything already expired. Pulling writes one
+dated waste movement, so the rest of that delivery — and every later date —
+stays on the shelf.
+
+Dates are advisory at the counter in this build: no sale is refused because a
+pack is out of date. The cashier sees the badge and decides.
+
+### 5.6 Money doesn't add up at close, end to end
 
 1. **Trends** (`F2`) (shop view) → **Payments taken** card lists takings by method.
 2. Compare with the physical cash in the drawer.
@@ -463,10 +498,10 @@ this — it is how the drawer physically balances.
 ### 6.13 Stock tracking, adjustments and history
 
 Stock lives on the catalogue, not on a screen of its own: a tracked product's
-count sits beside its name, and **All stock / Low stock / Out of stock** under **Stock** in the
-sidebar narrows the list. The summary above it reads how many products are
-tracked and how many need attention. **Move stock** and **History** sit on each
-tracked row.
+count sits beside its name, and **All stock / Low stock / Out of stock /
+Expiring** under **Stock** in the sidebar narrows the list. The summary above it
+reads how many products are tracked and how many need attention. **Move stock**
+and **History** sit on each tracked row.
 
 - Stock is the **sum of movements** — it is not edited directly.
 - A sale subtracts its quantities automatically.
@@ -485,6 +520,17 @@ tracked row.
 - **Keep in stock** is the level a restock aims for. Leave it empty to use twice
   the warning line; the suggested quantity subtracts both what is on the shelf
   and what is already planned on a purchase.
+- **Expiring** is not a separate report: it narrows the same list to tracked
+  products with a dated batch inside the warning window (30 days by default).
+  Expired dates count as inside it. The row badge names the soonest date only.
+- A dated delivery shows the date in the row and in **History** (`· dated
+  2026-12-31`). A return or a waste movement can carry a date too; a sale, an
+  adjustment and an opening count do not.
+- **Pull to waste** on the Expiring card (or a Waste movement with that date)
+  removes only what is left on that one date. Any later delivery stays put.
+- Sales take the oldest date first, so the badge moves on by itself as the
+  fridge empties. Nothing is stored "per date": the remaining count is derived
+  from the ledger each time the screen is drawn.
 
 ### 6.14 Changing the shop name / currency / theme
 
@@ -816,6 +862,8 @@ internet, ever — do not port-forward it.
 - No held/parked carts; abandoning a sale means emptying the cart
 - No multi-terminal sync; one till per database
 - The companion phone app scans into the till only — it is not a second till
+- Expiry dates are a guide: a sale is not refused for out-of-date stock, and
+  there is no batch or lot code on a delivery
 - The recovery code is the only credential reset path for the owner
 
 *Questions not answered here: the in-app screen is always the authority — it says

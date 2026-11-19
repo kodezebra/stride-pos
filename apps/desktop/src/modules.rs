@@ -26,7 +26,7 @@ use ui_shell::regions;
 
 use crate::actions;
 use crate::category_seeds;
-use crate::db::{Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplier};
+use crate::db::{ExpiryBucket, Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
 use crate::state::{self, SellView, State};
 
@@ -2197,7 +2197,7 @@ impl Module for Products {
         // categories are unbounded: below them a shop with sixty categories
         // would bury the filter a manager reaches for every morning.
         components::section_title(ui, "Stock");
-        for (index, label) in ["All stock", "Low stock", "Out of stock"]
+        for (index, label) in ["All stock", "Low stock", "Out of stock", "Expiring"]
             .into_iter()
             .enumerate()
         {
@@ -2206,7 +2206,7 @@ impl Module for Products {
             }
         }
         ui.add_space(SPACING.sm);
-        components::caption(ui, "Low and out count tracked products only.");
+        components::caption(ui, "Low, out and expiring count tracked products only.");
 
         // Categories are facets: they narrow the list without being the list's
         // question. The question — "which product?" — is the bar's search field,
@@ -2232,6 +2232,8 @@ impl Module for Products {
             let visible = visible_catalog(
                 &state.products,
                 &state.stock,
+                &state.expiring,
+                state.expiry_warning_days(),
                 state.category.as_deref(),
                 &needle,
                 state.stock_filter,
@@ -2354,6 +2356,8 @@ impl Module for Products {
         let visible = visible_catalog(
             &state.products,
             &state.stock,
+            &state.expiring,
+            state.expiry_warning_days(),
             state.category.as_deref(),
             &needle,
             state.stock_filter,
@@ -2389,6 +2393,76 @@ impl Module for Products {
             );
         }
 
+        // Dates worth acting on now, whatever the catalog filter says. Expired
+        // stock is not a report line: it is on the shelf, and the shop has to
+        // take it off. The card only lists the warning window, so it is quiet
+        // until a date gets close.
+        let warn = state.expiry_warning_days();
+        let due: Vec<ExpiryBucket> = state
+            .expiring
+            .iter()
+            .filter(|bucket| bucket.expires_within(warn))
+            .cloned()
+            .collect();
+        let mut pull = None;
+        if !due.is_empty() {
+            ui.add_space(SPACING.sm);
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let palette = theme::current(ui.ctx());
+                components::section_title(ui, "Expiring stock");
+                components::caption(
+                    ui,
+                    &format!(
+                        "Dates inside {warn} days, earliest first. Pull what is past \
+                         into waste so it leaves the shelf."
+                    ),
+                );
+                for bucket in due.iter().take(8) {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(40.0);
+                        let (label, color) = match bucket.days_left {
+                            Some(days) if days < 0 => ("Expired".to_owned(), palette.danger),
+                            Some(0) => ("Today".to_owned(), palette.danger),
+                            Some(days) => (format!("{days}d"), palette.warning),
+                            None => (String::new(), palette.text_muted),
+                        };
+                        components::badge(ui, &label, color);
+                        ui.label(components::semibold(&bucket.name).size(TYPE.body));
+                        components::caption(ui, bucket.expires_on.as_deref().unwrap_or(""));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if bucket.is_expired()
+                                && can_manage
+                                && actions::secondary_compact(ui, "Pull to waste").clicked()
+                            {
+                                pull = Some((
+                                    bucket.product_id,
+                                    bucket.expires_on.clone().unwrap_or_default(),
+                                    bucket.name.clone(),
+                                ));
+                            }
+                            components::caption(
+                                ui,
+                                &count_label(bucket.on_hand, &bucket.unit_label),
+                            );
+                        });
+                    });
+                }
+                if due.len() > 8 {
+                    components::caption(
+                        ui,
+                        &format!(
+                            "{} more — choose Expiring in the sidebar to see them all.",
+                            due.len() - 8
+                        ),
+                    );
+                }
+            });
+        }
+        if let Some((product_id, expires_on, name)) = pull {
+            state.pull_expired(product_id, &expires_on, &name);
+        }
+
         if visible.is_empty() {
             let narrowed = !needle.is_empty() || state.category.is_some();
             let (title, body) = if narrowed {
@@ -2413,6 +2487,14 @@ impl Module for Products {
                     2 => (
                         "Nothing is out",
                         "Every tracked product has stock on the shelf.",
+                    ),
+                    3 if state.stock.is_empty() => (
+                        "No stock tracked yet",
+                        "Track a product to start counting it.",
+                    ),
+                    3 => (
+                        "Nothing is expiring",
+                        "No dated stock is inside the warning window.",
                     ),
                     _ => (
                         "Nothing matches",
@@ -2502,6 +2584,8 @@ pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
             let visible = visible_catalog(
                 &state.products,
                 &state.stock,
+                &state.expiring,
+                state.expiry_warning_days(),
                 state.category.as_deref(),
                 &needle,
                 state.stock_filter,
@@ -2668,6 +2752,14 @@ fn stock_item(stock: &[StockItem], product_id: i64) -> Option<&StockItem> {
     stock.iter().find(|item| item.product_id == product_id)
 }
 
+/// The soonest date this product still has stock on, if any.
+fn earliest_expiry(expiring: &[ExpiryBucket], product_id: i64) -> Option<&ExpiryBucket> {
+    expiring
+        .iter()
+        .filter(|bucket| bucket.product_id == product_id && bucket.on_hand > 0)
+        .min_by(|a, b| a.expires_on.cmp(&b.expires_on))
+}
+
 /// Indices of the products the catalog shows: the category and search filters,
 /// then the stock facet.
 ///
@@ -2677,6 +2769,8 @@ fn stock_item(stock: &[StockItem], product_id: i64) -> Option<&StockItem> {
 fn visible_catalog(
     products: &[Product],
     stock: &[StockItem],
+    expiring: &[ExpiryBucket],
+    warn_days: i64,
     category: Option<&str>,
     needle: &str,
     filter: usize,
@@ -2689,6 +2783,12 @@ fn visible_catalog(
                 && match filter {
                     1 => stock_item(stock, product.id).is_some_and(StockItem::is_low),
                     2 => stock_item(stock, product.id).is_some_and(StockItem::is_out),
+                    // "Expiring" means something is on the shelf with a date
+                    // inside the warning window, including already past it.
+                    // A date with nothing left is not stock to sell first.
+                    3 => expiring.iter().any(|bucket| {
+                        bucket.product_id == product.id && bucket.expires_within(warn_days)
+                    }),
                     _ => true,
                 }
         })
@@ -2835,7 +2935,15 @@ fn product_row(
         ui.allocate_ui_with_layout(
             egui::vec2(text_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| product_identity(ui, product, stock),
+            |ui| {
+                product_identity(
+                    ui,
+                    product,
+                    stock,
+                    &state.expiring,
+                    state.expiry_warning_days(),
+                )
+            },
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2914,7 +3022,13 @@ fn product_row(
 }
 
 /// The product's identity: name and stock pill, then category and barcode.
-fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockItem>) {
+fn product_identity(
+    ui: &mut egui::Ui,
+    product: &Product,
+    stock: Option<&StockItem>,
+    expiring: &[ExpiryBucket],
+    warn_days: i64,
+) {
     ui.horizontal_wrapped(|ui| {
         ui.label(components::semibold(&product.name).size(TYPE.body));
         let (text, color, hint) = match stock {
@@ -2953,6 +3067,44 @@ fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockIt
             )
             .response;
         badge.on_hover_text(hint);
+
+        // Only the soonest date gets a badge: a perishable with four dates on
+        // the shelf needs one warning, not four. The Stock screen lists them
+        // all.
+        if let Some(bucket) = earliest_expiry(expiring, product.id)
+            && let Some(days) = bucket.days_left
+            && days <= warn_days
+        {
+            let palette = theme::current(ui.ctx());
+            let count = if bucket.unit_label == "unit" {
+                bucket.on_hand.to_string()
+            } else {
+                format!("{} {}", bucket.on_hand, bucket.unit_label)
+            };
+            let date = bucket.expires_on.as_deref().unwrap_or("?");
+            let (text, color, hint) = if days < 0 {
+                (
+                    "Expired".to_owned(),
+                    palette.danger,
+                    format!("{count} dated {date} has expired. Pull it into waste."),
+                )
+            } else if days == 0 {
+                (
+                    "Expires today".to_owned(),
+                    palette.danger,
+                    format!("{count} dated {date} expires today."),
+                )
+            } else {
+                (
+                    format!("{days}d left"),
+                    palette.warning,
+                    format!("{count} dated {date} expires in {days} days."),
+                )
+            };
+            ui.scope(|ui| components::badge(ui, &text, color))
+                .response
+                .on_hover_text(hint);
+        }
     });
 
     let mut detail = if product.category.is_empty() {
@@ -2974,16 +3126,19 @@ fn product_identity(ui: &mut egui::Ui, product: &Product, stock: Option<&StockIt
     components::caption(ui, &detail);
 }
 
+/// "12" for units, "12 boxes" when the product names what it is counted in.
+fn count_label(count: i64, unit_label: &str) -> String {
+    if unit_label == "unit" {
+        count.to_string()
+    } else {
+        format!("{count} {unit_label}")
+    }
+}
+
 /// The stock pill's colour and the sentence behind it.
 fn stock_badge(ui: &egui::Ui, item: &StockItem) -> (Rgb, String) {
     let palette = theme::current(ui.ctx());
-    let unit = |count: i64| {
-        if item.unit_label == "unit" {
-            count.to_string()
-        } else {
-            format!("{count} {}", item.unit_label)
-        }
-    };
+    let unit = |count: i64| count_label(count, &item.unit_label);
     if item.is_out() {
         (
             palette.danger,
@@ -3179,6 +3334,36 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         components::field_label(ui, "Barcode (optional)");
         ui.add_space(SPACING.xs);
         text_field(ui, &mut draft.barcode, "Scanned or typed", 350.0);
+
+        // Expiry lives beside tracking, not on the catalog fields. Tracking is
+        // started from Inventory, so this form shows the flag and explains why
+        // it is off rather than offering a switch the ledger cannot honour.
+        ui.add_space(SPACING.md);
+        components::field_label(ui, "Expiry");
+        ui.add_space(SPACING.xs);
+        ui.add_enabled_ui(draft.tracked, |ui| {
+            ui.checkbox(&mut draft.perishable, "Goes off — date every delivery");
+            ui.add_space(SPACING.xs);
+            ui.add_enabled_ui(draft.perishable, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACING.md;
+                    ui.vertical(|ui| {
+                        components::field_label(ui, "Usual shelf life (days, optional)");
+                        ui.add_space(SPACING.xs);
+                        text_field(ui, &mut draft.shelf_life_days, "e.g. 30", 130.0);
+                    });
+                });
+            });
+        });
+        components::caption(
+            ui,
+            if draft.tracked {
+                "The date printed on the pack always wins. The shelf life is a reminder \
+                 for repacked or undated goods."
+            } else {
+                "Track this product from Inventory before dating its stock."
+            },
+        );
 
         if let Some(error) = &draft.error {
             ui.add_space(SPACING.sm);
@@ -4045,6 +4230,14 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
         .iter()
         .map(|item| (item.product_id, item.name.clone(), item.category.clone()))
         .collect();
+    // Which lines ask for a date. A product that keeps is not dated; a
+    // perishable delivery must be, and the field says so.
+    let perishable: Vec<i64> = state
+        .stock
+        .iter()
+        .filter(|item| item.perishable)
+        .map(|item| item.product_id)
+        .collect();
 
     let Some(draft) = state.purchase_editor.as_mut() else {
         return;
@@ -4111,7 +4304,7 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                 );
             } else {
                 components::divider(ui);
-                for line in &mut draft.lines {
+                for (index, line) in draft.lines.iter_mut().enumerate() {
                     // The numbers are a quantity and a unit cost, so the row
                     // says so with the one symbol that reads as arithmetic:
                     // 12 x 2,000. The name keeps whatever is left.
@@ -4142,8 +4335,22 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                                 removed
                             },
                         );
+                    // The date is optional on a plan: the shop may not know it
+                    // until the goods are in hand. Receiving asks again for a
+                    // perishable product, and a date typed there wins. Two
+                    // printed dates on one delivery are two lines.
+                    if perishable.contains(&line.product_id) {
+                        ui.horizontal(|ui| {
+                            components::caption(ui, "Expiry");
+                            text_field(ui, &mut line.expires_on, "YYYY-MM-DD", 130.0)
+                                .on_hover_text(
+                                    "The date printed on the pack — required when you receive it. \
+                                 Mixed dates: add the product twice.",
+                                );
+                        });
+                    }
                     if removed {
-                        remove_line = Some(line.product_id);
+                        remove_line = Some(index);
                     }
                     components::divider(ui);
                 }
@@ -4188,14 +4395,16 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
             components::search_field(ui, &mut draft.search, "Name or category");
 
             let needle = draft.search.trim().to_lowercase();
+            // A product already on the list stays findable: a delivery that
+            // arrives with two printed dates is two lines, and the plan needs
+            // a way to add the second one.
             let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
             let matches: Vec<(i64, String, String)> = candidates
                 .iter()
-                .filter(|(id, name, category)| {
-                    !already.contains(id)
-                        && (needle.is_empty()
-                            || name.to_lowercase().contains(&needle)
-                            || category.to_lowercase().contains(&needle))
+                .filter(|(_, name, category)| {
+                    needle.is_empty()
+                        || name.to_lowercase().contains(&needle)
+                        || category.to_lowercase().contains(&needle)
                 })
                 .cloned()
                 .collect();
@@ -4219,6 +4428,11 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         name.clone()
                     } else {
                         format!("{name} — {category}")
+                    };
+                    let label = if already.contains(id) {
+                        format!("{label} · another line")
+                    } else {
+                        label
                     };
                     if ui.selectable_label(false, label).clicked() {
                         add_product = Some(*id);
@@ -4248,8 +4462,8 @@ fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
     if let Some(product_id) = add_product {
         state.purchase_add_product(product_id);
     }
-    if let Some(product_id) = remove_line {
-        state.purchase_remove_line(product_id);
+    if let Some(index) = remove_line {
+        state.purchase_remove_line(index);
     }
     if delete {
         state.delete_purchase();
@@ -4318,6 +4532,9 @@ fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
                                 ui.vertical(|ui| {
                                     ui.label(components::semibold(&line.name).size(TYPE.body));
                                     components::caption(ui, &bought_label(line));
+                                    if let Some(date) = line.expires_on.as_deref() {
+                                        components::caption(ui, &format!("Expires {date}"));
+                                    }
                                 });
                             },
                             |ui| {
@@ -4843,6 +5060,38 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
             160.0,
         );
 
+        // A date only exists on stock that arrived or left on a specific
+        // batch. An adjustment is a correction to a count, not a delivery.
+        if draft.kind != StockKind::Adjust {
+            let required = draft.kind == StockKind::Receive && draft.perishable;
+            ui.add_space(SPACING.md);
+            components::field_label(
+                ui,
+                if required {
+                    "Expiry date (required)"
+                } else {
+                    "Expiry date (optional)"
+                },
+            );
+            ui.add_space(SPACING.xs);
+            text_field(ui, &mut draft.expires_on, "YYYY-MM-DD", 170.0);
+            if draft.kind == StockKind::Receive
+                && let Some(days) = draft.shelf_life_days
+            {
+                components::caption(
+                    ui,
+                    &format!("Usually keeps {days} days. The date printed on the pack wins."),
+                );
+            }
+            if draft.kind == StockKind::Waste {
+                components::caption(
+                    ui,
+                    "Date it when pulling one dated batch. Leave it blank to take the \
+                     quantity off the oldest date first.",
+                );
+            }
+        }
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Note (optional)");
         ui.add_space(SPACING.xs);
@@ -4995,6 +5244,10 @@ fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovement) {
             if let Some(note) = &movement.note {
                 detail.push_str(" · ");
                 detail.push_str(note);
+            }
+            if let Some(date) = movement.expires_on.as_deref() {
+                detail.push_str(" · dated ");
+                detail.push_str(date);
             }
             components::caption(ui, &detail);
         });
