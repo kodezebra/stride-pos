@@ -446,7 +446,7 @@ fn a_catalog_snapshot_upserts_and_archives_without_losing_history() {
         "UGX"
     );
 
-    db::record_stock_movement(b.db(), 20, 10, StockKind::Receive, "delivery", None)
+    db::record_stock_movement(b.db(), 20, 10, StockKind::Receive, "delivery", None, None)
         .expect("receive coffee");
 
     db::delete_product(a.db(), 20).expect("archive coffee");

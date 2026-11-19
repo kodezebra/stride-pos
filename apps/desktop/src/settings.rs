@@ -49,7 +49,15 @@ pub struct Settings {
     /// `None` when not yet chosen. It selects which category seed list the
     /// product form offers as suggestions; it never auto-inserts anything.
     pub business_type: Option<String>,
+    /// How many days before an expiry date the stock screen starts calling the
+    /// stock "expiring". `None` means "never chosen" and resolves to
+    /// [`DEFAULT_EXPIRY_WARNING_DAYS`], so an upgraded settings file gets the
+    /// same warning a fresh till does.
+    pub expiry_warning_days: Option<i64>,
 }
+
+/// The warning window a shop gets without choosing one.
+pub const DEFAULT_EXPIRY_WARNING_DAYS: i64 = 30;
 
 /// The receipt's optional content, kept apart from the shop name because these
 /// are the fields a shop fills in once and then forgets.
@@ -113,6 +121,14 @@ impl ReceiptDetails {
 }
 
 impl Settings {
+    /// The warning window, treating an absent or nonsensical value as the
+    /// default rather than "warn on every product".
+    pub fn warn_within_days(&self) -> i64 {
+        self.expiry_warning_days
+            .filter(|days| *days > 0)
+            .unwrap_or(DEFAULT_EXPIRY_WARNING_DAYS)
+    }
+
     /// The theme to draw with. An unknown value falls back to the default; a
     /// hand-edited file must not stop a till from opening.
     pub fn theme(&self) -> Theme {
