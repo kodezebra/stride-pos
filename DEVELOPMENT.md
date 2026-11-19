@@ -174,10 +174,12 @@ The split that keeps it coherent:
 | `purchase_lines` | ordered and received quantity, optional unit cost, name snapshot |
 | `stock_movements` | the ledger; `purchase_line_id` points back when a line was received |
 
-A purchase is intent; a movement is physical truth. `receive_purchase()` is the
-only writer that turns one into the other: it updates `qty_received`, inserts one
-`receive` movement per counted line, updates `products.cost_minor` when a cost was
-given, and closes the purchase. Receiving is one act — there is no half-received
+A purchase is intent; a movement is physical truth. `receive_purchase()` closes
+a saved list: it updates `qty_received`, inserts one `receive` movement per
+counted line, updates `products.cost_minor` when a cost was given, and closes the
+purchase. `create_and_receive()` does the same for a list made at the market that
+was never saved, writing the trip and its movements in one transaction so a
+failure cannot leave a plan behind. Receiving is one act — there is no half-received
 status, so the goods cannot be counted in twice. A line counted at zero stays on
 the record as not bought; the shortfall reads as "3 of 5 bought". It runs in one
 transaction, so a half-written trip cannot exist.

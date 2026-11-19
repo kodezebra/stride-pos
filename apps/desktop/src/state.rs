@@ -2854,8 +2854,9 @@ impl State {
     /// returns; there is no half-received state to come back to.
     ///
     /// A saved list is not rewritten first: its quantities are the plan, and the
-    /// numbers on screen are what arrived. Only a list that was never saved is
-    /// written here, so a trip planned at the market can be received in one go.
+    /// numbers on screen are what arrived. A list that was never saved is
+    /// written and closed in one write, so a failure at the counter cannot
+    /// leave a saved plan behind.
     pub fn receive_purchase(&mut self) {
         let lines = match self.draft_lines(true) {
             Ok(lines) => lines,
@@ -2884,35 +2885,45 @@ impl State {
             return;
         }
 
-        let unsaved = self
-            .purchase_editor
-            .as_ref()
-            .is_some_and(|draft| draft.id.is_none());
-        let id = if unsaved {
-            // A count sheet may carry a line that brought nothing home, but a
-            // plan may not: "buy zero of this" is not something the list can say.
-            // Writing only the bought lines keeps the new purchase honest and
-            // leaves the zero behind without an error at the counter.
-            let bought: Vec<_> = lines.iter().filter(|line| line.qty > 0).cloned().collect();
-            match self.write_list(&bought) {
-                Ok(id) => id,
-                Err(error) => {
-                    tracing::error!(error = %error, "saving a purchase before receiving it failed");
-                    return self.purchase_error(format!("Could not save the list: {error}"));
-                }
-            }
-        } else {
-            match self.purchase_editor.as_ref().and_then(|draft| draft.id) {
-                Some(id) => id,
-                None => return,
-            }
-        };
-
         let (note, supplier_id) = self
             .purchase_editor
             .as_ref()
             .map(|draft| (draft.note.clone(), draft.supplier_id.clone()))
             .unwrap_or_default();
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+
+        let unsaved = self
+            .purchase_editor
+            .as_ref()
+            .is_some_and(|draft| draft.id.is_none());
+        if unsaved {
+            // A count sheet may carry a line that brought nothing home, but a
+            // plan may not: "buy zero of this" is not something the list can
+            // say. Only the bought lines are written, and they are written with
+            // the trip itself so a failure cannot leave a saved plan behind.
+            let bought: Vec<_> = lines.into_iter().filter(|line| line.qty > 0).collect();
+            match crate::db::create_and_receive(
+                &self.store,
+                supplier_id.as_deref(),
+                &note,
+                &bought,
+                user_id.as_deref(),
+            ) {
+                Ok(_) => {
+                    let units: i64 = bought.iter().map(|line| line.qty * line.pack_size).sum();
+                    self.purchase_received(units);
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "receiving a new purchase failed");
+                    self.purchase_error(format!("Could not receive it: {error}"));
+                }
+            }
+            return;
+        }
+
+        let Some(id) = self.purchase_editor.as_ref().and_then(|draft| draft.id) else {
+            return;
+        };
         let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
             return self.purchase_error("That purchase is no longer there.");
         };
@@ -2943,7 +2954,6 @@ impl State {
         // go, because nothing was ever received against it.
         let remove: Vec<i64> = existing.into_iter().map(|(_, line_id)| line_id).collect();
 
-        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
         match crate::db::receive_purchase(
             &self.store,
             id,
@@ -2955,21 +2965,28 @@ impl State {
         ) {
             Ok(()) => {
                 let units: i64 = received.iter().map(|line| line.qty * line.pack_size).sum();
-                self.purchase_editor = None;
-                self.purchase_view = None;
-                self.reload_purchases();
-                self.reload_stock();
-                self.reload_products();
-                self.notice = Some(format!(
-                    "Received {units} unit{}.",
-                    if units == 1 { "" } else { "s" }
-                ));
+                self.purchase_received(units);
             }
             Err(error) => {
                 tracing::error!(error = %error, "receiving a purchase failed");
                 self.purchase_error(format!("Could not receive it: {error}"));
             }
         }
+    }
+
+    /// Close the Restock page after a trip was recorded, and say what went on
+    /// the shelf. Shared by a saved list and one created at the counter: both
+    /// end in the same place.
+    fn purchase_received(&mut self, units: i64) {
+        self.purchase_editor = None;
+        self.purchase_view = None;
+        self.reload_purchases();
+        self.reload_stock();
+        self.reload_products();
+        self.notice = Some(format!(
+            "Received {units} unit{}.",
+            if units == 1 { "" } else { "s" }
+        ));
     }
 
     /// An empty cost is a missing fact, not zero. Anything else must parse as
