@@ -432,7 +432,7 @@ impl ProductFields<'_> {
 /// pays more is a typo, not a price. A rung at the same price as the one below
 /// is allowed — a shop sometimes wants the till to say "10+ price" without
 /// changing the amount — and so is the same price on every rung.
-pub(super) fn clean_tiers(base_minor: i64, tiers: &[PriceTier]) -> anyhow::Result<Vec<PriceTier>> {
+pub(crate) fn clean_tiers(base_minor: i64, tiers: &[PriceTier]) -> anyhow::Result<Vec<PriceTier>> {
     let mut sorted = tiers.to_vec();
     sorted.sort_by_key(|tier| tier.min_qty);
 

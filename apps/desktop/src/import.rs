@@ -15,8 +15,16 @@
 //! The price column stays the price of one base unit, so a pack row says how
 //! many units the box holds and what the sealed box costs, without turning the
 //! row into a second product.
+//!
+//! `tiers` is the loose-unit price ladder, written `10:475|50:450`: the count a
+//! rung starts at, a colon, and the price of one unit from there up. The export
+//! writes the same shape, so a ladder makes the round trip through a
+//! spreadsheet unchanged. A ladder that climbs is refused on its line, the way
+//! the form refuses it, rather than saved and charged at the counter.
 
 use money::{Currency, Money};
+
+use crate::db::PriceTier;
 
 /// One product row ready for the catalog.
 pub struct Row {
@@ -36,6 +44,8 @@ pub struct Row {
     /// The sealed pack's price. Only meaningful when `pack_size` is above one.
     pub pack_price_minor: Option<i64>,
     pub pack_barcode: Option<String>,
+    /// Loose-unit price breaks, ascending. Empty when the file has none.
+    pub tiers: Vec<PriceTier>,
 }
 
 /// Parse CSV text into importable rows plus per-line errors.
@@ -173,6 +183,32 @@ pub fn parse(text: &str, currency: Currency) -> (Vec<Row>, Vec<String>) {
             continue;
         }
 
+        let tiers_text = columns
+            .tiers
+            .map(|column| cell(&fields, column))
+            .unwrap_or_default();
+        let tiers = if tiers_text.is_empty() {
+            Vec::new()
+        } else {
+            match parse_tiers(&tiers_text, currency) {
+                Ok(tiers) => tiers,
+                Err(message) => {
+                    errors.push(format!("line {number}: {message}"));
+                    continue;
+                }
+            }
+        };
+        // The ladder is checked here, against the row's own price, so a file
+        // and the product form refuse the same ladders. A rung that climbs is
+        // a wrong price, and skipping the row says so where it happened.
+        let tiers = match crate::db::clean_tiers(price_minor, &tiers) {
+            Ok(tiers) => tiers,
+            Err(error) => {
+                errors.push(format!("line {number}: {error}."));
+                continue;
+            }
+        };
+
         rows.push(Row {
             name: name.to_owned(),
             category,
@@ -182,6 +218,7 @@ pub fn parse(text: &str, currency: Currency) -> (Vec<Row>, Vec<String>) {
             pack_size,
             pack_price_minor,
             pack_barcode,
+            tiers,
         });
     }
 
@@ -204,6 +241,8 @@ struct Columns {
     pack_price: Option<usize>,
     /// The barcode printed on the box, when the file has packs.
     pack_barcode: Option<usize>,
+    /// The loose-unit price ladder, when the file prices in breaks.
+    tiers: Option<usize>,
 }
 
 impl Columns {
@@ -220,6 +259,7 @@ impl Columns {
             pack_size: None,
             pack_price: None,
             pack_barcode: None,
+            tiers: None,
         }
     }
 }
@@ -240,6 +280,8 @@ fn is_heading(field: &str) -> bool {
         "pack_size",
         "pack_price",
         "pack_barcode",
+        "tiers",
+        "price_breaks",
     ];
     HEADINGS
         .iter()
@@ -265,7 +307,46 @@ fn columns_from_headings(headings: &[String]) -> Columns {
         pack_size: position(&["pack_size"]),
         pack_price: position(&["pack_price", "pack_retail_price"]),
         pack_barcode: position(&["pack_barcode", "box_barcode"]),
+        tiers: position(&["tiers", "price_breaks"]),
     }
+}
+
+/// One `tiers` cell: `10:475|50:450`.
+///
+/// Only the spelling is read here; whether the rungs make a ladder is
+/// [`crate::db::clean_tiers`]'s question, so a file and the product form
+/// refuse the same thing for the same reason.
+fn parse_tiers(text: &str, currency: Currency) -> Result<Vec<PriceTier>, String> {
+    let mut tiers = Vec::new();
+    for part in text.split('|') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err("a price break is missing a quantity or a price.".to_owned());
+        }
+        let Some((qty_text, price_text)) = part.split_once(':') else {
+            return Err(format!(
+                "the price break `{part}` needs a quantity and a price, as 10:475."
+            ));
+        };
+        let min_qty = match qty_text.trim().parse::<i64>() {
+            Ok(qty) if qty >= 2 => qty,
+            _ => {
+                return Err(format!(
+                    "the price break `{part}` must start at two units or more."
+                ));
+            }
+        };
+        let price_minor = match Money::parse(price_text.trim(), currency) {
+            Ok(price) if price.minor() >= 0 => price.minor(),
+            Ok(_) => return Err(format!("the price break `{part}` cannot be negative.")),
+            Err(error) => return Err(format!("the price break `{part}`: {error}")),
+        };
+        tiers.push(PriceTier {
+            min_qty,
+            price_minor,
+        });
+    }
+    Ok(tiers)
 }
 
 /// The text of cell `index`, trimmed; a short line reads as an empty cell.
@@ -379,6 +460,58 @@ cost_price_ugx,retail_price_ugx,is_weighted,barcode";
         assert!(rows.is_empty());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("pack size above one"), "{errors:?}");
+    }
+
+    /// The ladder cell is `count:price` rungs joined by `|` — the shape the
+    /// export writes, so a file the till wrote comes back unchanged.
+    #[test]
+    fn a_tiers_cell_becomes_a_price_ladder() {
+        let text = "name,category,price,tiers\n\
+                    Panadol,Cold,500,50:450|10:475";
+        let (rows, errors) = parse(text, ugx());
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            rows[0].tiers,
+            vec![
+                PriceTier {
+                    min_qty: 10,
+                    price_minor: 475,
+                },
+                PriceTier {
+                    min_qty: 50,
+                    price_minor: 450,
+                },
+            ],
+            "the ladder is stored in count order however the cell lists it"
+        );
+    }
+
+    /// A ladder that climbs is a wrong price, not a spelling mistake, and the
+    /// row is skipped where it happened rather than saved for the counter to
+    /// honour.
+    #[test]
+    fn a_ladder_that_climbs_is_refused_on_its_line() {
+        let text = "name,category,price,tiers\n\
+                    Panadol,Cold,500,10:600\n\
+                    Brufen,Cold,500,10:475";
+        let (rows, errors) = parse(text, ugx());
+
+        assert_eq!(rows.len(), 1, "the good row still imports");
+        assert_eq!(rows[0].name, "Brufen");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("line 2:"), "{errors:?}");
+        assert!(errors[0].contains("cannot be above"), "{errors:?}");
+    }
+
+    #[test]
+    fn a_malformed_tiers_cell_names_its_line_and_what_is_wrong() {
+        let text = "name,category,price,tiers\nSoap,Household,1200,10-1100";
+        let (rows, errors) = parse(text, ugx());
+
+        assert!(rows.is_empty());
+        assert!(errors[0].starts_with("line 2:"), "{errors:?}");
+        assert!(errors[0].contains("quantity and a price"), "{errors:?}");
     }
 
     #[test]

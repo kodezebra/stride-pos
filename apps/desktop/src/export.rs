@@ -6,6 +6,12 @@
 //! packs included. Sales are for the owner's accountant, not for re-import, and
 //! name their columns the way the ledger does.
 //!
+//! The catalog file ends with `tiers`, the loose-unit price ladder, written
+//! `10:475|50:450`: the count a rung starts at, a colon, and the price of one
+//! unit from there up. Rungs are separated by `|`, which no product name or
+//! price uses, so a spreadsheet leaves the cell alone and the importer reads
+//! back exactly what it wrote.
+//!
 //! Amounts are plain decimals with no symbol and no grouping: `1200` for UGX,
 //! `12.50` for KES. That is the only spelling both a spreadsheet and
 //! [`crate::import::parse`] read back as the same number. It duplicates a few
@@ -18,7 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use money::{Currency, Money};
 
-use crate::db::{ExportSale, Product};
+use crate::db::{ExportSale, PriceTier, Product};
 
 /// An amount as a plain decimal the importer can read back.
 ///
@@ -62,6 +68,19 @@ fn csv_row(fields: impl IntoIterator<Item = String>) -> String {
     row
 }
 
+/// A product's price ladder as one CSV cell: `10:475|50:450`.
+///
+/// An empty ladder is an empty cell, which is also what a product written by
+/// hand in a spreadsheet has. Rungs are written in order, because that is how
+/// the file reads to the person checking it.
+fn tiers_cell(tiers: &[PriceTier], currency: Currency) -> String {
+    tiers
+        .iter()
+        .map(|tier| format!("{}:{}", tier.min_qty, decimal(tier.price_minor, currency)))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// The catalog, in the column order [`crate::import::parse`] assumes.
 ///
 /// Empty input still writes the header: a file that says what it would have
@@ -77,6 +96,7 @@ pub fn products_csv(products: &[Product], currency: Currency) -> String {
             "pack_size",
             "pack_price",
             "pack_barcode",
+            "tiers",
         ]
         .map(str::to_owned),
     );
@@ -93,6 +113,7 @@ pub fn products_csv(products: &[Product], currency: Currency) -> String {
                 .map(|price| decimal(price, currency))
                 .unwrap_or_default(),
             product.pack_barcode.clone().unwrap_or_default(),
+            tiers_cell(&product.tiers, currency),
         ]));
     }
     text
@@ -119,7 +140,18 @@ pub fn template_csv(currency: Currency) -> String {
                 pack_price_minor: None,
                 pack_barcode: None,
                 cost_milli: None,
-                tiers: Vec::new(),
+                // One worked ladder in the template: a blank `tiers` cell
+                // teaches nothing about how a break is spelled.
+                tiers: vec![
+                    PriceTier {
+                        min_qty: 10,
+                        price_minor: 4_200,
+                    },
+                    PriceTier {
+                        min_qty: 50,
+                        price_minor: 4_000,
+                    },
+                ],
             },
             Product {
                 id: 0,
@@ -237,9 +269,9 @@ mod tests {
         let text = products_csv(&products, ugx());
         assert_eq!(
             text,
-            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n\
-             \"Bread, white\",Bakery,3400,0123,unit,1,,\n\
-             Milk,Dairy,5000,,unit,1,,\n"
+            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n\
+             \"Bread, white\",Bakery,3400,0123,unit,1,,,\n\
+             Milk,Dairy,5000,,unit,1,,,\n"
         );
     }
 
@@ -247,7 +279,7 @@ mod tests {
     fn an_empty_catalog_still_names_its_columns() {
         assert_eq!(
             products_csv(&[], ugx()),
-            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n"
+            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n"
         );
     }
 
@@ -285,13 +317,13 @@ mod tests {
 
         assert!(
             text.starts_with(
-                "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode\n"
+                "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n"
             ),
             "the template must lead with the columns the import expects: {text}"
         );
         assert!(
-            text.contains("Sugar 1 kg,Groceries,45.00,,unit,1,,\n"),
-            "the example price must be the export's own spelling: {text}"
+            text.contains("Sugar 1 kg,Groceries,45.00,,unit,1,,,10:42.00|50:40.00\n"),
+            "the example price and ladder must be the export's own spelling: {text}"
         );
 
         let (rows, errors) = crate::import::parse(&text, kes());
@@ -302,6 +334,20 @@ mod tests {
         assert_eq!(rows[1].category, "Bakery");
         assert_eq!(rows[1].price_minor, 3_400);
         assert_eq!(rows[1].barcode, None);
+        assert_eq!(
+            rows[0].tiers,
+            vec![
+                PriceTier {
+                    min_qty: 10,
+                    price_minor: 4_200
+                },
+                PriceTier {
+                    min_qty: 50,
+                    price_minor: 4_000
+                },
+            ],
+            "the template's worked ladder reads back as the amounts it shows"
+        );
     }
 
     #[test]
@@ -322,6 +368,33 @@ mod tests {
         assert_eq!(rows[2].category, "General");
         assert_eq!(rows[2].price_minor, 12_500);
         assert_eq!(rows[2].barcode.as_deref(), Some("4001"));
+    }
+
+    /// The ladder is part of the price list, so it makes the round trip with
+    /// the rows: a wholesale break must not vanish because the file was edited
+    /// in a spreadsheet in between.
+    #[test]
+    fn a_price_ladder_survives_the_export_and_import_round_trip() {
+        let mut panadol = product("Panadol", "Cold", 500, None);
+        panadol.tiers = vec![
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475,
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450,
+            },
+        ];
+
+        let text = products_csv(&[panadol], ugx());
+        assert!(text.ends_with("10:475|50:450\n"), "{text}");
+
+        let (rows, errors) = crate::import::parse(&text, ugx());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rows[0].tiers.len(), 2);
+        assert_eq!(rows[0].tiers[1].min_qty, 50);
+        assert_eq!(rows[0].tiers[1].price_minor, 450);
     }
 
     /// A catalog with a pack must not lose the box on the way out: the columns
