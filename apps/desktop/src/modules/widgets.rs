@@ -455,3 +455,19 @@ pub(super) fn move_icon() -> Icon {
 pub(super) fn history_icon() -> Icon {
     Icon::named("history").unwrap_or(Icon::RECEIPT)
 }
+/// What a module shows when the person cannot open it.
+///
+/// The module stays on the rail so the cashier can see it exists and ask for it,
+/// rather than finding out from a colleague that the screen is missing.
+pub(super) fn locked_card(ui: &mut egui::Ui, permission: crate::auth::Permission) {
+    components::section_title(ui, "Not allowed");
+    components::empty_state_card(
+        ui,
+        "Ask a manager",
+        &format!(
+            "Your account cannot {}. A manager or the owner can approve it for one minute.",
+            permission.action()
+        ),
+        220.0,
+    );
+}
