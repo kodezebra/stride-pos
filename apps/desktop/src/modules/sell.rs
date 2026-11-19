@@ -572,11 +572,16 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                     // tapping `+` ten times.
                     ui.horizontal(|ui| {
                         let each = format!(
-                            "{} × {}{}",
+                            "{} × {}{}{}",
                             line.qty,
                             state.money(line.unit_minor),
                             line.unit_label
                                 .as_deref()
+                                .map(|label| format!(" · {label}"))
+                                .unwrap_or_default(),
+                            // The rung is not optional: without it the cashier
+                            // and the customer read the same amount differently.
+                            line.tier_label()
                                 .map(|label| format!(" · {label}"))
                                 .unwrap_or_default()
                         );
@@ -646,10 +651,14 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                 for (index, step) in steps {
                     let line = &mut state.cart[index];
                     match step {
-                        components::Step::Up => line.qty += 1,
+                        components::Step::Up => {
+                            let qty = line.qty + 1;
+                            line.set_qty(qty);
+                        }
                         components::Step::Down => {
-                            line.qty -= 1;
-                            if line.qty <= 0 {
+                            let qty = line.qty - 1;
+                            line.set_qty(qty);
+                            if qty <= 0 {
                                 remove = Some(index);
                             }
                         }

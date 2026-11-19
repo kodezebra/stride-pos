@@ -44,7 +44,7 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
-use crate::db::{Product, SaleLine, StockItem, Supplier};
+use crate::db::{PriceTier, Product, SaleLine, StockItem, Supplier};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
 

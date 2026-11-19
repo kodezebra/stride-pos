@@ -53,6 +53,11 @@ fn line(name: &str, qty: i64, unit_minor: i64) -> CartLine {
         unit_minor,
         unit_factor: 1,
         unit_label: None,
+        tiers: vec![PriceTier {
+            min_qty: 1,
+            price_minor: unit_minor,
+        }],
+        tier_qty: None,
     }
 }
 
@@ -100,6 +105,26 @@ fn seed_pack(
         },
     )
     .expect("seed pack")
+}
+
+/// Seed a loose product with a price ladder, bypassing the form draft.
+fn seed_ladder(store: &storage::Store, name: &str, price: i64, tiers: &[PriceTier]) -> i64 {
+    crate::db::insert_product(
+        store,
+        &crate::db::ProductFields {
+            name,
+            price_minor: price,
+            category: "Test",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            tiers,
+        },
+    )
+    .expect("seed ladder")
 }
 
 /// A trip that was never saved is still a trip: planning at the market and
@@ -965,6 +990,143 @@ fn a_pack_and_a_loose_unit_are_two_cart_lines() {
     state.set_cart_quantity(id, 100, 3);
     assert_eq!(state.cart[1].qty, 3, "the box count changed");
     assert_eq!(state.cart[0].qty, 1, "the loose count did not");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A break is a rule about the count, not a choice at the counter: the line
+/// takes the deepest rung it reaches, and takes the price back when the count
+/// falls below it.
+#[test]
+fn a_quantity_break_prices_the_whole_line_at_the_rung_it_reaches() {
+    let (mut state, path) = state("cart-break", Currency::UGX);
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475,
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450,
+            },
+        ],
+    );
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+
+    state.add_to_cart(&product, 1);
+    assert_eq!(state.cart[0].unit_minor, 500, "one is the shelf price");
+    assert_eq!(state.cart[0].tier_qty, None);
+    assert_eq!(state.cart[0].tier_label(), None);
+
+    // Nine are still the shelf price: the break starts at ten, and the whole
+    // line moves at once rather than the tenth unit alone.
+    state.set_cart_quantity(id, 1, 9);
+    assert_eq!(state.cart[0].unit_minor, 500);
+    assert_eq!(state.cart[0].total_minor(), 4_500);
+
+    state.set_cart_quantity(id, 1, 10);
+    assert_eq!(state.cart[0].unit_minor, 475);
+    assert_eq!(state.cart[0].total_minor(), 4_750);
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("10+ price"));
+
+    state.set_cart_quantity(id, 1, 60);
+    assert_eq!(state.cart[0].unit_minor, 450);
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("50+ price"));
+
+    // Changed their mind: the shelf price comes back with the count.
+    state.set_cart_quantity(id, 1, 3);
+    assert_eq!(state.cart[0].unit_minor, 500);
+    assert_eq!(state.cart[0].tier_qty, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Scanning is the same path as typing: the tenth scan crosses the break and
+/// the line drops without the cashier doing anything else.
+#[test]
+fn scanning_up_to_a_break_moves_the_whole_line_to_it() {
+    let (mut state, path) = state("cart-break-scan", Currency::UGX);
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[PriceTier {
+            min_qty: 10,
+            price_minor: 475,
+        }],
+    );
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+
+    for _ in 0..9 {
+        state.add_to_cart(&product, 1);
+    }
+    assert_eq!(state.cart[0].qty, 9);
+    assert_eq!(state.cart[0].unit_minor, 500);
+
+    state.add_to_cart(&product, 1);
+    assert_eq!(state.cart[0].qty, 10);
+    assert_eq!(state.cart[0].unit_minor, 475);
+    assert_eq!(state.cart[0].total_minor(), 4_750);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The box is already the bulk deal. A loose ladder must never reprice it, or
+/// the two discounts would stack and the box price would mean nothing.
+#[test]
+fn a_pack_line_ignores_the_loose_ladder() {
+    let (mut state, path) = state("cart-pack-break", Currency::UGX);
+    let id = crate::db::insert_product(
+        &state.store,
+        &crate::db::ProductFields {
+            name: "Amoxicillin",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 100,
+            pack_price_minor: Some(40_000),
+            pack_barcode: None,
+            tiers: &[PriceTier {
+                min_qty: 10,
+                price_minor: 450,
+            }],
+        },
+    )
+    .expect("seed pack with a ladder");
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the pack product")
+        .clone();
+
+    state.add_to_cart(&product, 1);
+    state.set_cart_quantity(id, 1, 20);
+    assert_eq!(state.cart[0].unit_minor, 450, "loose follows the ladder");
+
+    state.add_to_cart(&product, 100);
+    state.set_cart_quantity(id, 100, 5);
+    assert_eq!(state.cart[1].unit_minor, 40_000, "the box keeps its price");
+    assert_eq!(state.cart[1].tier_qty, None);
 
     let _ = std::fs::remove_file(path);
 }

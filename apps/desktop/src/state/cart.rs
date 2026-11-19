@@ -23,11 +23,52 @@ pub struct CartLine {
     pub unit_factor: i64,
     /// What that unit was called at the time, when it was anything but `unit`.
     pub unit_label: Option<String>,
+    /// The ladder this line was added under, ascending: the shelf price at one
+    /// unit, then the shop's breaks. A pack line has a single rung — its price
+    /// is already the bulk deal and a break on top would stack two discounts.
+    ///
+    /// Kept on the line, not looked up on every frame, for the same reason the
+    /// name and price are: editing the catalog mid-sale cannot silently reprice
+    /// something already in the basket.
+    pub tiers: Vec<PriceTier>,
+    /// The break that set `unit_minor`, when one did. `None` on the shelf price.
+    pub tier_qty: Option<i64>,
 }
 
 impl CartLine {
     pub fn total_minor(&self) -> i64 {
         self.qty * self.unit_minor
+    }
+
+    /// Set the count and price the line again.
+    ///
+    /// Repricing is the whole point of a quantity break: the break is a
+    /// property of the count, so every path that changes the count goes through
+    /// here rather than assigning `qty`.
+    pub fn set_qty(&mut self, qty: i64) {
+        self.qty = qty;
+        self.reprice();
+    }
+
+    /// Take the deepest rung this line reaches. Below the first break the shelf
+    /// price stands, which is why the ladder carries a rung at one unit.
+    fn reprice(&mut self) {
+        let Some(tier) = self
+            .tiers
+            .iter()
+            .rev()
+            .find(|tier| tier.min_qty <= self.qty)
+        else {
+            return;
+        };
+        self.unit_minor = tier.price_minor;
+        self.tier_qty = (tier.min_qty > 1).then_some(tier.min_qty);
+    }
+
+    /// What to call the price on this line, when it is not the shelf price:
+    /// `10+ price`.
+    pub fn tier_label(&self) -> Option<String> {
+        self.tier_qty.map(|qty| format!("{qty}+ price"))
     }
 }
 
@@ -119,13 +160,13 @@ impl State {
     /// the same catalog row: the price and what leaves the shelf differ, and
     /// merging them would erase that. Scanning the same barcode twice still
     /// reads "2 × Espresso", not two lines: the cashier checks quantities, not
-    /// line counts. The line keeps the name and price it was added at, so
+    /// line counts. The line keeps the name and ladder it was added under, so
     /// editing the catalog mid-sale cannot silently reprice something already
     /// in the basket.
     pub fn add_to_cart(&mut self, product: &Product, unit_factor: i64) {
         self.notice = None;
         let unit_factor = unit_factor.max(1);
-        let (unit_minor, unit_label) = if unit_factor > 1 {
+        let (unit_minor, unit_label, tiers) = if unit_factor > 1 {
             let Some(pack_price) = product.pack_price_minor else {
                 self.notice = Some(format!(
                     "{} has no pack price yet; set one in the catalog.",
@@ -133,10 +174,25 @@ impl State {
                 ));
                 return;
             };
-            (pack_price, Some(format!("pack of {unit_factor}")))
+            (
+                pack_price,
+                Some(format!("pack of {unit_factor}")),
+                // A pack is the bulk deal. The ladder is one rung so the line
+                // reprices like every other line, without a break to reach.
+                vec![PriceTier {
+                    min_qty: 1,
+                    price_minor: pack_price,
+                }],
+            )
         } else {
             let label = (product.unit_label != "unit").then(|| product.unit_label.clone());
-            (product.price_minor, label)
+            let mut tiers = Vec::with_capacity(product.tiers.len() + 1);
+            tiers.push(PriceTier {
+                min_qty: 1,
+                price_minor: product.price_minor,
+            });
+            tiers.extend(product.tiers.iter().copied());
+            (product.price_minor, label, tiers)
         };
 
         match self
@@ -144,7 +200,10 @@ impl State {
             .iter_mut()
             .find(|line| line.product_id == product.id && line.unit_factor == unit_factor)
         {
-            Some(line) => line.qty += 1,
+            Some(line) => {
+                let qty = line.qty + 1;
+                line.set_qty(qty);
+            }
             None => self.cart.push(CartLine {
                 product_id: product.id,
                 name: product.name.clone(),
@@ -152,6 +211,8 @@ impl State {
                 unit_minor,
                 unit_factor,
                 unit_label,
+                tiers,
+                tier_qty: None,
             }),
         }
     }
@@ -192,7 +253,7 @@ impl State {
         else {
             return;
         };
-        line.qty = qty;
+        line.set_qty(qty);
         self.cart_quantity = None;
     }
 
