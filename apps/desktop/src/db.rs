@@ -3241,15 +3241,6 @@ pub fn receive_purchase(
         "some of this purchase has already arrived; it cannot be received twice"
     );
 
-    if let Some(supplier_id) = supplier_id {
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
-            [supplier_id],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(exists, "that supplier is no longer in the directory");
-    }
-
     for line in lines {
         anyhow::ensure!(line.qty >= 0, "a quantity cannot be negative");
         anyhow::ensure!(
@@ -3348,32 +3339,7 @@ pub fn receive_purchase(
             }
         };
 
-        transaction.execute(
-            "INSERT INTO stock_movements
-                 (product_id, delta, kind, note, user_id, purchase_line_id, uid)
-             VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6)",
-            (
-                line.product_id,
-                line.qty * line.pack_size,
-                optional_text(note),
-                user_id,
-                line_id,
-                uuid::Uuid::now_v7().to_string(),
-            ),
-        )?;
-
-        if let Some(cost) = line.unit_cost_minor {
-            // `unit_cost_minor` is the price of one ordered unit — a pack when
-            // `pack_size` is above one. The product cost that margin and the
-            // loose-price prefill read is per base unit, so it is divided down
-            // and kept in thousandths. Rounding to nearest keeps 1,850 per 100
-            // at 18.5 rather than truncating to 18.
-            let cost_milli = (cost * 1000 + line.pack_size / 2) / line.pack_size;
-            transaction.execute(
-                "UPDATE products SET cost_milli = ?2 WHERE id = ?1",
-                (line.product_id, cost_milli),
-            )?;
-        }
+        record_receive(&transaction, line_id, line, note, user_id)?;
     }
 
     for line_id in remove {
@@ -3421,13 +3387,123 @@ pub fn receive_purchase(
     Ok(())
 }
 
+/// Plan and receive a trip in one write.
+///
+/// A list made at the market may never be saved: it is a count sheet first and
+/// a purchase second. Writing it and closing it in the same transaction means a
+/// failure at the counter cannot leave a saved plan behind — either the goods
+/// are on the shelf and the trip is recorded, or nothing happened at all.
+///
+/// Only bought lines belong here: "buy zero of this" is not something a
+/// recorded purchase can say, and drops a line the shop never picked up.
+pub fn create_and_receive(
+    store: &storage::Store,
+    supplier_id: Option<&str>,
+    note: &str,
+    lines: &[PurchaseLineInput],
+    user_id: Option<&str>,
+) -> anyhow::Result<i64> {
+    anyhow::ensure!(!lines.is_empty(), "a purchase needs at least one line");
+
+    let transaction = store.conn().unchecked_transaction()?;
+
+    if let Some(supplier_id) = supplier_id {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
+            [supplier_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "that supplier is no longer in the directory");
+    }
+
+    transaction.execute(
+        "INSERT INTO purchases (uid, supplier_id, note, user_id, status, received_at)
+         VALUES (?1, ?2, ?3, ?4, 'received', datetime('now'))",
+        (
+            uuid::Uuid::now_v7().to_string(),
+            supplier_id,
+            optional_text(note),
+            user_id,
+        ),
+    )?;
+    let id = transaction.last_insert_rowid();
+
+    let ids = insert_purchase_lines(&transaction, id, lines)?;
+
+    // Nothing was planned ahead, so what was bought is what arrived.
+    transaction.execute(
+        "UPDATE purchase_lines SET qty_received = qty_ordered WHERE purchase_id = ?1",
+        [id],
+    )?;
+
+    for (line, line_id) in lines.iter().zip(ids) {
+        let received = ReceiveLine {
+            line_id: Some(line_id),
+            product_id: line.product_id,
+            qty: line.qty,
+            unit_cost_minor: line.unit_cost_minor,
+            pack_size: line.pack_size,
+        };
+        record_receive(&transaction, line_id, &received, note, user_id)?;
+    }
+
+    transaction.commit()?;
+    Ok(id)
+}
+
+/// Put one received line on the shelf: its movement and the product's last cost.
+///
+/// Shared by a planned line, an impulse buy written at the counter, and a trip
+/// created while receiving. The caller has already checked that the product
+/// belongs to the line and may be restocked.
+fn record_receive(
+    transaction: &rusqlite::Transaction<'_>,
+    line_id: i64,
+    line: &ReceiveLine,
+    note: &str,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        "INSERT INTO stock_movements
+             (product_id, delta, kind, note, user_id, purchase_line_id, uid)
+         VALUES (?1, ?2, 'receive', ?3, ?4, ?5, ?6)",
+        (
+            line.product_id,
+            line.qty * line.pack_size,
+            optional_text(note),
+            user_id,
+            line_id,
+            uuid::Uuid::now_v7().to_string(),
+        ),
+    )?;
+
+    if let Some(cost) = line.unit_cost_minor {
+        // `unit_cost_minor` is the price of one ordered unit — a pack when
+        // `pack_size` is above one. The product cost that margin and the
+        // loose-price prefill read is per base unit, so it is divided down
+        // and kept in thousandths. Rounding to nearest keeps 1,850 per 100
+        // at 18.5 rather than truncating to 18.
+        let cost_milli = (cost * 1000 + line.pack_size / 2) / line.pack_size;
+        transaction.execute(
+            "UPDATE products SET cost_milli = ?2 WHERE id = ?1",
+            (line.product_id, cost_milli),
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Insert a plan's lines, resolving each product's name at write time.
+///
+/// Returns their ids in the order given, which is what receiving a trip that
+/// was created in the same write needs to point its movements at.
 fn insert_purchase_lines(
     transaction: &rusqlite::Transaction<'_>,
     purchase_id: i64,
     lines: &[PurchaseLineInput],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<i64>> {
     let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::with_capacity(lines.len());
 
     for (position, line) in lines.iter().enumerate() {
         anyhow::ensure!(line.qty > 0, "every line needs a quantity");
@@ -3471,9 +3547,10 @@ fn insert_purchase_lines(
                 line.pack_size,
             ),
         )?;
+        ids.push(transaction.last_insert_rowid());
     }
 
-    Ok(())
+    Ok(ids)
 }
 
 /// Record a sale and its payment in one transaction.
@@ -7434,6 +7511,132 @@ mod tests {
             purchase_detail(&store, id).expect("detail").purchase.status,
             PurchaseStatus::Planned,
             "the trip is still open"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A list made at the market is a count sheet and a purchase at once. The
+    /// trip is written and closed in one transaction, so the shelf and the
+    /// record cannot disagree about whether the shop went.
+    #[test]
+    fn a_trip_created_at_the_counter_arrives_in_one_write() {
+        let (store, path) = store("receive-created");
+        let soap = stocked(&store, "Soap", 0, 1, None);
+        let tea = stocked(&store, "Tea", 0, 1, None);
+
+        let id = create_and_receive(
+            &store,
+            None,
+            "Market run",
+            &[
+                PurchaseLineInput {
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: Some(250),
+                    pack_size: 1,
+                },
+                PurchaseLineInput {
+                    product_id: tea,
+                    qty: 1,
+                    unit_cost_minor: Some(900),
+                    pack_size: 3,
+                },
+            ],
+            None,
+        )
+        .expect("created and received");
+
+        let detail = purchase_detail(&store, id).expect("detail");
+        assert_eq!(detail.purchase.status, PurchaseStatus::Received);
+        assert_eq!(detail.purchase.note.as_deref(), Some("Market run"));
+        for line in &detail.lines {
+            assert_eq!(
+                line.qty_ordered, line.qty_received,
+                "what was bought is what arrived"
+            );
+        }
+
+        let shelf = |product_id: i64| {
+            stock(&store)
+                .into_iter()
+                .find(|item| item.product_id == product_id)
+                .expect("stock")
+        };
+        assert_eq!(shelf(soap).on_hand, 2);
+        assert_eq!(shelf(soap).incoming, 0, "a received trip is not on its way");
+        assert_eq!(shelf(tea).on_hand, 3, "one box of three moves three units");
+
+        let tea_line = detail
+            .lines
+            .iter()
+            .find(|line| line.product_id == Some(tea))
+            .expect("tea line");
+        let linked: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM stock_movements WHERE purchase_line_id = ?1",
+                [tea_line.id],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(linked, 1, "the movement points back at the trip");
+
+        // Cost is kept per base unit in thousandths: 900 for a box of three.
+        let product = products(&store)
+            .into_iter()
+            .find(|product| product.id == tea)
+            .expect("tea");
+        assert_eq!(product.cost_milli, Some(300_000));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The point of one write: if any line cannot be received, nothing is
+    /// written. A saved plan left behind would be a trip the shop never made.
+    #[test]
+    fn a_refused_trip_leaves_no_plan_behind() {
+        let (store, path) = store("receive-created-refused");
+        let soap = stocked(&store, "Soap", 0, 1, None);
+        let retired = stocked(&store, "Retired", 0, 1, None);
+        delete_product(&store, retired).expect("archive");
+
+        let error = create_and_receive(
+            &store,
+            None,
+            "",
+            &[
+                PurchaseLineInput {
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: None,
+                    pack_size: 1,
+                },
+                PurchaseLineInput {
+                    product_id: retired,
+                    qty: 1,
+                    unit_cost_minor: None,
+                    pack_size: 1,
+                },
+            ],
+            None,
+        )
+        .expect_err("an archived product cannot be received");
+        assert!(
+            error.to_string().contains("archived"),
+            "the operator is told why: {error}"
+        );
+
+        assert!(purchases(&store).is_empty(), "no plan is left behind");
+        assert!(stock_movements(&store, soap).is_empty(), "nothing moved");
+        assert_eq!(
+            stock(&store)
+                .into_iter()
+                .find(|item| item.product_id == soap)
+                .expect("stock")
+                .on_hand,
+            0,
+            "and the shelf did not change"
         );
 
         let _ = std::fs::remove_file(path);
