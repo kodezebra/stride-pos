@@ -777,3 +777,16 @@ pub(super) fn weekday_sentence(weekday: u8) -> &'static str {
 pub(super) fn transfer_icon() -> Icon {
     Icon::named("arrow-up-down").unwrap_or(Icon::DOCUMENT)
 }
+/// Height of the daily-revenue chart, axis labels and date strip included.
+pub(super) const CHART_HEIGHT: f32 = 232.0;
+
+/// Steps in the chart's value axis.
+pub(super) const AXIS_STEPS: usize = 4;
+
+/// `%w` names, Sunday first, because that is how SQLite numbers the week.
+pub(super) const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Months for the span over the plot — `strftime` hands back numbers only.
+pub(super) const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
