@@ -520,27 +520,6 @@ impl State {
     // -----------------------------------------------------------------------
     // Purchases
     // -----------------------------------------------------------------------
-
-    /// Apply a chosen path, from the system dialog or from the till's picker.
-    ///
-    /// One place, because both routes ask the same question: an import reads
-    /// the file it was given, an export writes into the folder it was given.
-    pub(crate) fn finish_ask(&mut self, purpose: crate::picker::Purpose, path: PathBuf) {
-        match purpose {
-            crate::picker::Purpose::Import => {
-                self.import_dir = path.parent().map(PathBuf::from);
-                self.import = Some(ImportDraft {
-                    path: path.display().to_string(),
-                    error: None,
-                });
-                self.import_products();
-            }
-            crate::picker::Purpose::Export(kind) => {
-                self.export_dir = Some(path.clone());
-                crate::modules::run_export(self, kind, &path);
-            }
-        }
-    }
 }
 
 /// The amount without its symbol, for putting in an edit field: `2800` in
