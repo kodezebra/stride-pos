@@ -25,10 +25,11 @@ module changes.
 | File | Holds | Lines |
 |---|---|---|
 | `modules/mod.rs` | constants, `View`, `Module`, `PageLeft`, `action_bar`, `all`/`views`/`tabs`/`open` | ~400 |
-| `modules/widgets.rs` | `modal`, `amount_row`, `text_field`, `secret_field`, `prefixed_field`, `run_export` | ~80 |
+| `modules/widgets.rs` | `modal`, `amount_row`, `text_field`, `secret_field`, `prefixed_field`, table rows, action icons, `locked_card` | ~470 |
 | `modules/sell.rs` | `Sell`, tiles, rows, cart, view toggle, quantity modal | ~1,000 |
 | `modules/day.rs` | `Dashboard`, KPI cards, chart, tables, date helpers | ~1,050 |
-| `modules/catalog.rs` | `Products`, stock, categories, export, product editor, import | ~1,500 |
+| `modules/catalog.rs` | `Products`, stock, categories, export, product editor, import | ~1,300 |
+| `modules/tests.rs` | the module-table, rail-order and permission tests | ~500 |
 | `modules/purchases.rs` | `Purchases`, the purchase pages | ~700 |
 | `modules/suppliers.rs` | `Suppliers`, supplier editor, track, stock move, history | ~550 |
 | `modules/sales.rs` | `Sales`, sale detail, the drawer card | ~800 |
@@ -36,17 +37,17 @@ module changes.
 
 - [x] **1.1** Baseline: 259 tests, clippy clean, on a branch
 - [x] **1.2** Add this plan
-- [ ] **1.3** `modules.rs` → `modules/mod.rs` (pure rename, no content change)
-- [ ] **1.4** Extract `widgets.rs`
-- [ ] **1.5** Extract `settings.rs`
-- [ ] **1.6** Extract `suppliers.rs`
-- [ ] **1.7** Extract `purchases.rs`
-- [ ] **1.8** Extract `sales.rs`
-- [ ] **1.9** Extract `catalog.rs`
-- [ ] **1.10** Extract `day.rs`
-- [ ] **1.11** Extract `sell.rs`
-- [ ] **1.12** Move the module tests to `modules/tests.rs`
-- [ ] **1.13** Final verification: 259 tests, clippy, release build
+- [x] **1.3** `modules.rs` → `modules/mod.rs` (pure rename, no content change)
+- [x] **1.4** Extract `widgets.rs`
+- [x] **1.5** Extract `settings.rs`
+- [x] **1.6** Extract `suppliers.rs`
+- [x] **1.7** Extract `purchases.rs`
+- [x] **1.8** Extract `sales.rs`
+- [x] **1.9** Extract `catalog.rs`
+- [x] **1.10** Extract `day.rs`
+- [x] **1.11** Extract `sell.rs`
+- [x] **1.12** Move the module tests to `modules/tests.rs`
+- [x] **1.13** Final verification: 259 tests, clippy, release build
 
 ## Step 2 — split `state.rs` (4,683 lines)
 
