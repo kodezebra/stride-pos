@@ -43,7 +43,34 @@ pub struct ProductDraft {
     /// The shop's usual life for a delivery, as typed. A prefill for repacked
     /// goods only; the date printed on the pack always wins.
     pub shelf_life_days: String,
+    /// The loose-unit price breaks, in the order the operator added them. Each
+    /// row is text for the same reason the price is: half-typed is not wrong
+    /// yet.
+    pub tiers: Vec<TierDraft>,
     pub error: Option<String>,
+}
+
+/// How many price breaks the form offers. Three is enough for the shops this
+/// till serves — a small break, a box-sized break, and a wholesale break — and
+/// a cap keeps the modal's height fixed. More rungs are a pricing policy, not a
+/// price list, and belong in a spreadsheet the shop already understands.
+pub const MAX_PRICE_BREAKS: usize = 3;
+
+/// One price-break row in the product form.
+pub struct TierDraft {
+    /// The first loose-unit count the break applies to, as typed.
+    pub qty: String,
+    /// The price of one loose unit from that count up, as typed.
+    pub price: String,
+}
+
+impl TierDraft {
+    fn new() -> Self {
+        Self {
+            qty: String::new(),
+            price: String::new(),
+        }
+    }
 }
 
 impl ProductDraft {
@@ -64,7 +91,22 @@ impl ProductDraft {
             tracked: false,
             perishable: false,
             shelf_life_days: String::new(),
+            tiers: Vec::new(),
             error: None,
+        }
+    }
+
+    /// Add an empty break row, if the form has room for it.
+    pub fn add_tier(&mut self) {
+        if self.tiers.len() < MAX_PRICE_BREAKS {
+            self.tiers.push(TierDraft::new());
+        }
+    }
+
+    /// Drop one break row. The rest keep their order.
+    pub fn remove_tier(&mut self, index: usize) {
+        if index < self.tiers.len() {
+            self.tiers.remove(index);
         }
     }
 
@@ -236,6 +278,14 @@ impl State {
                 .and_then(|item| item.shelf_life_days)
                 .map(|days| days.to_string())
                 .unwrap_or_default(),
+            tiers: product
+                .tiers
+                .iter()
+                .map(|tier| TierDraft {
+                    qty: tier.min_qty.to_string(),
+                    price: plain_amount(tier.price_minor, self.currency),
+                })
+                .collect(),
             error: None,
         });
         self.product_delete = None;
@@ -305,6 +355,36 @@ impl State {
             }
         };
 
+        // A break row is optional, and a row the operator left alone is not a
+        // row at all. Half a row is a mistake they can still see and fix.
+        let mut tiers = Vec::with_capacity(draft.tiers.len());
+        for row in &draft.tiers {
+            let qty_text = row.qty.trim();
+            let price_text = row.price.trim();
+            if qty_text.is_empty() && price_text.is_empty() {
+                continue;
+            }
+            if qty_text.is_empty() {
+                return self.editor_error("A price break needs the quantity it starts at.");
+            }
+            if price_text.is_empty() {
+                return self.editor_error("A price break needs a price.");
+            }
+            let min_qty = match qty_text.parse::<i64>() {
+                Ok(qty) if qty >= 2 => qty,
+                _ => return self.editor_error("A price break starts at two units or more."),
+            };
+            let price_minor = match Money::parse(price_text, self.currency) {
+                Ok(price) if price.minor() >= 0 => price.minor(),
+                Ok(_) => return self.editor_error("A price break cannot be negative."),
+                Err(error) => return self.editor_error(error.to_string()),
+            };
+            tiers.push(PriceTier {
+                min_qty,
+                price_minor,
+            });
+        }
+
         let barcode = (!barcode.is_empty()).then_some(barcode);
         let pack_barcode = (pack_size > 1 && !pack_barcode.is_empty()).then_some(pack_barcode);
         for code in [barcode.as_deref(), pack_barcode.as_deref()]
@@ -326,7 +406,7 @@ impl State {
             pack_size,
             pack_price_minor,
             pack_barcode: pack_barcode.as_deref(),
-            tiers: &[],
+            tiers: &tiers,
         };
 
         let perishable = draft.perishable;

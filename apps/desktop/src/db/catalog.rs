@@ -445,9 +445,14 @@ fn clean_tiers(base_minor: i64, tiers: &[PriceTier]) -> anyhow::Result<Vec<Price
             "two price breaks start at {previous_qty} units"
         );
         anyhow::ensure!(tier.price_minor >= 0, "a price break cannot be negative");
+        let floor = if previous_qty == 1 {
+            "shelf price".to_owned()
+        } else {
+            format!("{previous_qty}-unit price")
+        };
         anyhow::ensure!(
             tier.price_minor <= floor_minor,
-            "the {}-unit price cannot be above the {previous_qty}-unit price",
+            "the {}-unit price cannot be above the {floor}",
             tier.min_qty
         );
         previous_qty = tier.min_qty;

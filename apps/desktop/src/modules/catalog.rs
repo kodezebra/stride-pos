@@ -776,6 +776,46 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         // of their own the helper steps aside.
         draft.sync_price_from_pack(currency);
 
+        // Breaks sit under the price they modify: the shelf price is the first
+        // rung, and a ladder without its base is a list of numbers with no
+        // ground under it. Three rows is the cap, so the modal keeps its shape.
+        ui.add_space(SPACING.md);
+        components::field_label(
+            ui,
+            &format!("Quantity breaks (price per {each}, {})", currency.code()),
+        );
+        ui.add_space(SPACING.xs);
+        if draft.tiers.is_empty() {
+            components::caption(ui, "None. Every unit costs the price above.");
+        }
+        let mut remove = None;
+        for (index, row) in draft.tiers.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACING.sm;
+                components::caption(ui, "From");
+                text_field(ui, &mut row.qty, "10", 70.0);
+                components::caption(ui, "units, each");
+                text_field(ui, &mut row.price, "0", 110.0);
+                if actions::quiet_compact(ui, "Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+            ui.add_space(SPACING.xs);
+        }
+        if let Some(index) = remove {
+            draft.remove_tier(index);
+        }
+        if draft.tiers.len() < MAX_PRICE_BREAKS
+            && actions::quiet_compact(ui, "Add a break").clicked()
+        {
+            draft.add_tier();
+        }
+        components::caption(
+            ui,
+            "A break prices the whole line once the count reaches it, and cannot cost \
+             more than the price below it.",
+        );
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Barcode (optional)");
         ui.add_space(SPACING.xs);

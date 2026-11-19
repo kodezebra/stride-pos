@@ -625,6 +625,7 @@ fn an_unnamed_category_lands_in_general() {
         tracked: false,
         perishable: false,
         shelf_life_days: String::new(),
+        tiers: Vec::new(),
         error: None,
     });
     state.save_product();
@@ -636,6 +637,128 @@ fn an_unnamed_category_lands_in_general() {
         .find(|product| product.name == "Hot water")
         .expect("saved with its default category");
     assert_eq!(saved.category, "General");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The form is where a ladder is typed. It saves with the product, and reopens
+/// with the same rungs so changing one is an edit rather than a retype.
+#[test]
+fn a_quantity_break_typed_into_the_form_saves_with_the_product() {
+    let (mut state, path) = state("product-breaks", Currency::UGX);
+
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Panadol".to_owned();
+        draft.price = "500".to_owned();
+        draft.add_tier();
+        draft.add_tier();
+        draft.tiers[0].qty = "10".to_owned();
+        draft.tiers[0].price = "475".to_owned();
+        draft.tiers[1].qty = "50".to_owned();
+        draft.tiers[1].price = "450".to_owned();
+    }
+    state.save_product();
+    assert!(state.product_editor.is_none(), "the form closed");
+
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.name == "Panadol")
+        .expect("saved")
+        .clone();
+    assert_eq!(
+        product.tiers,
+        vec![
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450
+            },
+        ]
+    );
+
+    state.edit_product(&product);
+    let draft = state.product_editor.as_ref().expect("reopened");
+    assert_eq!(draft.tiers.len(), 2);
+    assert_eq!(draft.tiers[0].qty, "10");
+    assert_eq!(draft.tiers[1].qty, "50");
+    let first = Money::parse(draft.tiers[0].price.trim(), state.currency).expect("a price");
+    assert_eq!(first.minor(), 475);
+
+    // Saving the untouched form is not a change: the ladder is rewritten from
+    // the same numbers rather than doubled or dropped.
+    state.save_product();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.name == "Panadol")
+        .expect("still there");
+    assert_eq!(product.tiers.len(), 2);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A break the till cannot honour keeps the form open with the reason. Saving
+/// it would charge the shop's best customer more than a walk-in.
+#[test]
+fn a_break_above_the_shelf_price_keeps_the_form_open() {
+    let (mut state, path) = state("product-break-high", Currency::UGX);
+
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Panadol".to_owned();
+        draft.price = "500".to_owned();
+        draft.add_tier();
+        draft.tiers[0].qty = "10".to_owned();
+        draft.tiers[0].price = "600".to_owned();
+    }
+    state.save_product();
+
+    let draft = state.product_editor.as_ref().expect("the form stays open");
+    let error = draft.error.as_deref().expect("an error");
+    assert!(error.contains("cannot be above"), "{error}");
+    assert!(
+        !state
+            .products
+            .iter()
+            .any(|product| product.name == "Panadol"),
+        "nothing was written"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Half a row is a row the operator is still typing. It stops the save and
+/// names the missing half instead of guessing a price.
+#[test]
+fn a_break_row_without_a_price_is_refused() {
+    let (mut state, path) = state("product-break-half", Currency::UGX);
+
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Panadol".to_owned();
+        draft.price = "500".to_owned();
+        draft.add_tier();
+        draft.tiers[0].qty = "10".to_owned();
+    }
+    state.save_product();
+
+    let draft = state.product_editor.as_ref().expect("the form stays open");
+    assert_eq!(draft.error.as_deref(), Some("A price break needs a price."));
+    assert!(
+        !state
+            .products
+            .iter()
+            .any(|product| product.name == "Panadol"),
+        "nothing was written"
+    );
 
     let _ = std::fs::remove_file(path);
 }
