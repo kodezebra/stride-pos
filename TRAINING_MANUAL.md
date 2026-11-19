@@ -342,7 +342,7 @@ The list now reads **Planned**. Nothing has moved in stock — a plan is intent,
 3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
 4. Set a line you did not find to **0**. It stays on the record as not bought.
 5. Bought something extra? Add it from the search at the bottom of the page with its quantity and cost.
-6. Press **Received**.
+6. Press **Received** twice: the first press turns the button into **Confirm received**, the second records the trip. Receiving cannot be undone.
 
 Every received line writes exactly one stock movement, so the product's History shows the trip once. The shelf count goes up by what you received.
 

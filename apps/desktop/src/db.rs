@@ -3071,15 +3071,6 @@ pub fn create_purchase(
 
     let transaction = store.conn().unchecked_transaction()?;
 
-    if let Some(supplier_id) = supplier_id {
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
-            [supplier_id],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(exists, "that supplier is no longer in the directory");
-    }
-
     transaction.execute(
         "INSERT INTO purchases (uid, supplier_id, note, user_id)
          VALUES (?1, ?2, ?3, ?4)",
@@ -3197,10 +3188,13 @@ pub fn delete_planned_purchase(store: &storage::Store, id: i64) -> anyhow::Resul
 /// that were a planning mistake; they are deleted, and the ledger is untouched
 /// because nothing was ever received against them.
 ///
-/// `note` is the purchase's final note, editable at receiving time.
+/// `note` and `supplier_id` are the purchase's final header, editable at
+/// receiving time: the counter is where the operator learns the supplier was
+/// wrong, so a correction there is kept rather than silently dropped.
 pub fn receive_purchase(
     store: &storage::Store,
     id: i64,
+    supplier_id: Option<&str>,
     lines: &[ReceiveLine],
     remove: &[i64],
     note: &str,
@@ -3212,6 +3206,15 @@ pub fn receive_purchase(
     );
 
     let transaction = store.conn().unchecked_transaction()?;
+
+    if let Some(supplier_id) = supplier_id {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
+            [supplier_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "that supplier is no longer in the directory");
+    }
 
     let status: String = transaction
         .query_row("SELECT status FROM purchases WHERE id = ?1", [id], |row| {
@@ -3237,6 +3240,15 @@ pub fn receive_purchase(
         already == 0,
         "some of this purchase has already arrived; it cannot be received twice"
     );
+
+    if let Some(supplier_id) = supplier_id {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suppliers WHERE id = ?1)",
+            [supplier_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "that supplier is no longer in the directory");
+    }
 
     for line in lines {
         anyhow::ensure!(line.qty >= 0, "a quantity cannot be negative");
@@ -3272,15 +3284,23 @@ pub fn receive_purchase(
 
         let line_id = match line.line_id {
             Some(line_id) => {
-                let belongs: bool = transaction
+                // `IS` rather than `=`: a line whose product was deleted has a
+                // NULL product_id, and NULL = NULL is NULL, not true.
+                let (belongs, same_product): (bool, bool) = transaction
                     .query_row(
-                        "SELECT purchase_id = ?2 FROM purchase_lines WHERE id = ?1",
-                        (line_id, id),
-                        |row| row.get(0),
+                        "SELECT purchase_id = ?2, product_id IS ?3
+                         FROM purchase_lines WHERE id = ?1",
+                        (line_id, id, line.product_id),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?
                     .context("that purchase line no longer exists")?;
                 anyhow::ensure!(belongs, "that line belongs to another purchase");
+                // The movement is written against `line.product_id`, the line it
+                // points at is the one on the shelf. If the two disagree, stock
+                // and ledger would split: the shelf moves for one product while
+                // the purchase records another.
+                anyhow::ensure!(same_product, "that line was planned for another product");
 
                 // The count sheet is the truth about the trip. Buying more than
                 // planned means the plan understated it, so the ordered count is
@@ -3391,9 +3411,10 @@ pub fn receive_purchase(
 
     transaction.execute(
         "UPDATE purchases
-         SET note = ?2, status = 'received', received_at = datetime('now')
+         SET supplier_id = ?2, note = ?3, status = 'received',
+             received_at = datetime('now')
          WHERE id = ?1",
-        (id, optional_text(note)),
+        (id, supplier_id, optional_text(note)),
     )?;
 
     transaction.commit()?;
@@ -6799,6 +6820,7 @@ mod tests {
         receive_purchase(
             &store,
             id,
+            None,
             &[ReceiveLine {
                 line_id: Some(purchase_detail(&store, id).expect("detail").lines[0].id),
                 product_id: soap,
@@ -6843,6 +6865,7 @@ mod tests {
             receive_purchase(
                 &store,
                 id,
+                None,
                 &[ReceiveLine {
                     line_id: Some(line),
                     product_id: soap,
@@ -6887,6 +6910,7 @@ mod tests {
         receive_purchase(
             &store,
             id,
+            None,
             &[ReceiveLine {
                 line_id: Some(line),
                 product_id: soap,
@@ -6960,6 +6984,7 @@ mod tests {
         receive_purchase(
             &store,
             id,
+            None,
             &[ReceiveLine {
                 line_id: Some(line),
                 product_id: soap,
@@ -7088,6 +7113,7 @@ mod tests {
             receive_purchase(
                 &store,
                 id,
+                None,
                 &[ReceiveLine {
                     line_id: Some(line),
                     product_id: soap,
@@ -7149,6 +7175,7 @@ mod tests {
         receive_purchase(
             &store,
             id,
+            None,
             &[
                 ReceiveLine {
                     line_id: Some(soap_line),
@@ -7206,7 +7233,7 @@ mod tests {
         )
         .expect("second plan");
         let line = purchase_detail(&store, second).expect("detail").lines[0].id;
-        receive_purchase(&store, second, &[], &[line], "", None).expect("remove unbought");
+        receive_purchase(&store, second, None, &[], &[line], "", None).expect("remove unbought");
 
         assert!(
             purchase_detail(&store, second).is_none(),
@@ -7215,6 +7242,198 @@ mod tests {
         assert!(
             purchases(&store).iter().all(|p| p.id != second),
             "nothing to buy means no purchase to show"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The counter is where the operator learns the supplier was wrong. A
+    /// correction made while counting in must survive the receive, not be
+    /// silently dropped because the plan was written days earlier.
+    #[test]
+    fn receiving_keeps_the_supplier_chosen_at_the_counter() {
+        let (store, path) = store("receive-supplier");
+        let soap = stocked(&store, "Soap", 0, 2, None);
+        let supplier = insert_supplier(
+            &store,
+            &SupplierFields {
+                name: "Kampala Wholesale",
+                contact_name: "",
+                phone: "",
+                email: "",
+                address: "",
+                notes: "",
+            },
+        )
+        .expect("supplier");
+
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 3,
+                unit_cost_minor: None,
+                pack_size: 1,
+            }],
+            None,
+        )
+        .expect("plan");
+        assert!(
+            purchase_detail(&store, id)
+                .expect("detail")
+                .purchase
+                .supplier_id
+                .is_none(),
+            "the plan named no supplier"
+        );
+
+        let line = purchase_detail(&store, id).expect("detail").lines[0].id;
+        receive_purchase(
+            &store,
+            id,
+            Some(&supplier.id),
+            &[ReceiveLine {
+                line_id: Some(line),
+                product_id: soap,
+                qty: 3,
+                unit_cost_minor: None,
+                pack_size: 1,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect("receive");
+
+        let detail = purchase_detail(&store, id).expect("detail");
+        assert_eq!(
+            detail.purchase.supplier_id.as_deref(),
+            Some(supplier.id.as_str()),
+            "the supplier typed at receiving is the one recorded"
+        );
+        assert_eq!(
+            detail.purchase.supplier.as_deref(),
+            Some("Kampala Wholesale")
+        );
+
+        // A supplier id that is not in the directory is refused, and refusing
+        // must not close the trip.
+        let second = create_purchase(
+            &store,
+            None,
+            "",
+            &[PurchaseLineInput {
+                product_id: soap,
+                qty: 1,
+                unit_cost_minor: None,
+                pack_size: 1,
+            }],
+            None,
+        )
+        .expect("second plan");
+        let line = purchase_detail(&store, second).expect("detail").lines[0].id;
+        let error = receive_purchase(
+            &store,
+            second,
+            Some("no-such-supplier"),
+            &[ReceiveLine {
+                line_id: Some(line),
+                product_id: soap,
+                qty: 1,
+                unit_cost_minor: None,
+                pack_size: 1,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect_err("an unknown supplier is refused");
+        assert!(
+            error.to_string().contains("no longer in the directory"),
+            "the operator is told why: {error}"
+        );
+        assert_eq!(
+            purchase_detail(&store, second)
+                .expect("still there")
+                .purchase
+                .status,
+            PurchaseStatus::Planned,
+            "a refused receive leaves the trip open"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The movement is written for `product_id`, the line it points at is the
+    /// one on the shelf. If the two disagree, the shelf would move for one
+    /// product while the purchase recorded another, so the write is refused.
+    #[test]
+    fn a_line_cannot_be_received_as_a_different_product() {
+        let (store, path) = store("receive-mismatch");
+        let soap = stocked(&store, "Soap", 0, 1, None);
+        let tea = stocked(&store, "Tea", 0, 1, None);
+
+        let id = create_purchase(
+            &store,
+            None,
+            "",
+            &[
+                PurchaseLineInput {
+                    product_id: soap,
+                    qty: 2,
+                    unit_cost_minor: None,
+                    pack_size: 1,
+                },
+                PurchaseLineInput {
+                    product_id: tea,
+                    qty: 1,
+                    unit_cost_minor: None,
+                    pack_size: 1,
+                },
+            ],
+            None,
+        )
+        .expect("plan");
+        let soap_line = purchase_detail(&store, id)
+            .expect("detail")
+            .lines
+            .iter()
+            .find(|line| line.product_id == Some(soap))
+            .expect("soap line")
+            .id;
+
+        let error = receive_purchase(
+            &store,
+            id,
+            None,
+            &[ReceiveLine {
+                line_id: Some(soap_line),
+                product_id: tea,
+                qty: 2,
+                unit_cost_minor: None,
+                pack_size: 1,
+            }],
+            &[],
+            "",
+            None,
+        )
+        .expect_err("a line is received as the product it was planned for");
+        assert!(
+            error.to_string().contains("another product"),
+            "the operator is told why: {error}"
+        );
+
+        assert!(
+            stock_movements(&store, soap).is_empty(),
+            "soap did not move"
+        );
+        assert!(stock_movements(&store, tea).is_empty(), "tea did not move");
+        assert_eq!(
+            purchase_detail(&store, id).expect("detail").purchase.status,
+            PurchaseStatus::Planned,
+            "the trip is still open"
         );
 
         let _ = std::fs::remove_file(path);
@@ -7241,6 +7460,7 @@ mod tests {
         receive_purchase(
             &store,
             id,
+            None,
             &[ReceiveLine {
                 line_id: Some(line),
                 product_id: soap,
@@ -7333,6 +7553,7 @@ mod tests {
             receive_purchase(
                 &store,
                 id,
+                None,
                 &[ReceiveLine {
                     line_id: Some(line),
                     product_id: soap,
@@ -7503,6 +7724,7 @@ mod tests {
         receive_purchase(
             &store,
             purchase,
+            None,
             &[ReceiveLine {
                 line_id: Some(line),
                 product_id: id,
