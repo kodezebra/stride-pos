@@ -3754,12 +3754,18 @@ impl Module for Purchases {
         if state.purchase_editor.is_some() || state.purchase_view.is_some() {
             let editing = state.purchase_editor.is_some();
             let title = purchase_title(state);
+            // Receiving writes stock and cannot be undone, so the button asks
+            // twice: the first press turns it into a confirmation.
+            let receive_label = match state.purchase_editor.as_ref() {
+                Some(draft) if draft.confirm_receive => "Confirm received",
+                _ => "Received",
+            };
             let mut back = false;
             let mut save = false;
             let mut receive = false;
             action_bar(ui, PageLeft::Title(&title), |ui| {
                 if editing && can_manage {
-                    if actions::primary_compact(ui, "Received").clicked() {
+                    if actions::primary_compact(ui, receive_label).clicked() {
                         receive = true;
                     }
                     if actions::secondary_compact(ui, "Save").clicked() {

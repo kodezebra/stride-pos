@@ -348,6 +348,10 @@ pub struct PurchaseDraft {
     /// First click arms deletion, second deletes; the row is where the mistake
     /// would be, so the confirmation lives in the form.
     pub confirm_delete: bool,
+    /// First press of Received arms it, the second records the trip. Stock is
+    /// written once and there is no undo, so the irreversible press asks twice
+    /// for the same reason deleting does.
+    pub confirm_receive: bool,
 }
 
 /// Category names offered in the product form even when the catalog is empty.
@@ -2546,6 +2550,7 @@ impl State {
             search: String::new(),
             error: None,
             confirm_delete: false,
+            confirm_receive: false,
         });
         self.purchase_view = None;
         self.notice = None;
@@ -2591,6 +2596,7 @@ impl State {
             search: String::new(),
             error: None,
             confirm_delete: false,
+            confirm_receive: false,
         });
         self.purchase_view = None;
         self.notice = None;
@@ -2629,6 +2635,7 @@ impl State {
                 .unwrap_or_default(),
             pack_size: pack_size.to_string(),
         });
+        draft.confirm_receive = false;
         draft.error = None;
     }
 
@@ -2690,6 +2697,7 @@ impl State {
                 pack_size: pack_size.to_string(),
             });
         }
+        draft.confirm_receive = false;
         draft.error = None;
     }
 
@@ -2697,6 +2705,7 @@ impl State {
         if let Some(draft) = self.purchase_editor.as_mut() {
             draft.lines.retain(|line| line.product_id != product_id);
             draft.confirm_delete = false;
+            draft.confirm_receive = false;
         }
     }
 
@@ -2860,6 +2869,21 @@ impl State {
                 .purchase_error("Type what came home on at least one line, or delete the list.");
         }
 
+        // Stock is written once and there is no undo, so the first press only
+        // arms the button and the second records the trip — the same rule as
+        // deleting a list. The validation above runs first: a typo in a count
+        // should be reported, not hidden behind a confirmation.
+        let armed = self
+            .purchase_editor
+            .as_ref()
+            .is_some_and(|draft| draft.confirm_receive);
+        if !armed {
+            if let Some(draft) = self.purchase_editor.as_mut() {
+                draft.confirm_receive = true;
+            }
+            return;
+        }
+
         let unsaved = self
             .purchase_editor
             .as_ref()
@@ -2884,10 +2908,10 @@ impl State {
             }
         };
 
-        let note = self
+        let (note, supplier_id) = self
             .purchase_editor
             .as_ref()
-            .map(|draft| draft.note.clone())
+            .map(|draft| (draft.note.clone(), draft.supplier_id.clone()))
             .unwrap_or_default();
         let Some(detail) = crate::db::purchase_detail(&self.store, id) else {
             return self.purchase_error("That purchase is no longer there.");
@@ -2923,6 +2947,7 @@ impl State {
         match crate::db::receive_purchase(
             &self.store,
             id,
+            supplier_id.as_deref(),
             &received,
             &remove,
             &note,
@@ -3549,6 +3574,7 @@ mod tests {
 
         assert_eq!(state.stock[0].on_hand, 0, "a plan moves no stock");
         state.receive_purchase();
+        state.receive_purchase();
 
         assert!(state.purchase_editor.is_none(), "the trip is closed");
         let trip = state.purchases.first().expect("one trip");
@@ -3556,6 +3582,58 @@ mod tests {
         assert_eq!(trip.count_label(), "3 items");
         assert_eq!(trip.cost_minor, Some(1_500), "three at five hundred");
         assert_eq!(state.stock[0].on_hand, 3, "the shelf moved on receiving");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Stock is written once and there is no undo, so the Received button asks
+    /// twice: the first press arms it, the second records the trip.
+    #[test]
+    fn receiving_asks_for_a_second_press() {
+        let (mut state, path) = state("receive-confirm", Currency::UGX);
+        state
+            .store
+            .conn()
+            .execute("UPDATE products SET tracked = 1 WHERE id = 1", [])
+            .expect("track the seeded item");
+        state.reload_stock();
+
+        state.start_purchase();
+        state
+            .purchase_editor
+            .as_mut()
+            .expect("open")
+            .lines
+            .push(PurchaseLineDraft {
+                product_id: 1,
+                name: "Test item".to_owned(),
+                qty: "2".to_owned(),
+                cost: String::new(),
+                pack_size: "1".to_owned(),
+            });
+
+        state.receive_purchase();
+        let draft = state
+            .purchase_editor
+            .as_ref()
+            .expect("the trip is still open");
+        assert!(
+            draft.confirm_receive,
+            "the first press only arms the button"
+        );
+        assert_eq!(state.stock[0].on_hand, 0, "nothing reached the shelf");
+        assert!(state.purchases.is_empty(), "and no trip was written");
+
+        state.receive_purchase();
+        assert!(
+            state.purchase_editor.is_none(),
+            "the second press records it"
+        );
+        assert_eq!(state.stock[0].on_hand, 2, "the shelf moved once");
+        assert_eq!(
+            state.purchases[0].status,
+            crate::db::PurchaseStatus::Received
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -3590,6 +3668,7 @@ mod tests {
                     pack_size: "1".to_owned(),
                 });
         }
+        state.receive_purchase();
         state.receive_purchase();
 
         assert!(
@@ -3657,6 +3736,7 @@ mod tests {
         draft.lines[1].qty = "0".to_owned(); // not bought
         let tea = draft.lines[2].product_id;
         state.purchase_remove_line(tea); // never bought
+        state.receive_purchase();
         state.receive_purchase();
 
         let trip = state.purchases.first().expect("the trip");

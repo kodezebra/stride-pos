@@ -306,9 +306,12 @@ zero when you receive.
    Enter the unit cost if you know it — this becomes the product's last known
    cost, and profit on future sales uses it.
 3. If you bought something not on the list, add it from the search at the bottom
-   of the page with its quantity and cost.
-4. Press **Received**. Each line writes one stock movement, and the shelf count
-   goes up.
+   of the page with its quantity and cost. This is also the moment to correct the
+   supplier if the list named the wrong one.
+4. Press **Received** twice — the first press turns the button into **Confirm
+   received**, the second records the trip. Each line writes one stock movement,
+   and the shelf count goes up. Receiving cannot be undone, which is why the
+   button asks again.
 
 Receiving is one act. A list reads **Planned** until the trip comes home, then
 **Received**; there is no half-received state to come back to, so the same goods
