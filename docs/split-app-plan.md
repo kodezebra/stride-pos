@@ -68,11 +68,28 @@ Fields do **not** move — `state.cart` keeps working, so no call site changes.
 
 ## Step 3 — split `db.rs` (8,773 lines)
 
-Schema and migrations stay; queries move behind a service layer.
+A pure move, like step 2: `db.rs` becomes a directory and every file is
+re-exported from `db/mod.rs`, so all 154 `db::foo(...)` call sites stay as they
+are. The rows types move to `db/types.rs`; everything else goes beside the
+queries that read it, one table group per file.
 
-- [ ] **3.1** `db.rs` → `db/mod.rs` (schema + migrations + row mappers)
-- [ ] **3.2** Extract `service/catalog.rs`
-- [ ] **3.3** Extract `service/sales.rs`
-- [ ] **3.4** Extract `service/stock.rs`
-- [ ] **3.5** Extract `service/staff.rs`
-- [ ] **3.6** Extract `service/sync.rs`
+No service layer. The seam that matters is already the module boundary: each
+screen talks to `db` and nothing else does. Wrapping that in structs would add a
+second name for every function without removing a dependency.
+
+- [x] **3.0** `db.rs` → `db/mod.rs` (pure rename, no content change)
+- [x] **3.1** Extract `db/types.rs` (the row types and their impls)
+- [x] **3.2** Extract `db/schema.rs` (`APPLICATION_ID`, `MIGRATIONS`)
+- [x] **3.3** Extract `db/staff.rs` (`users`, credentials, attempt log)
+- [x] **3.4** Extract `db/sync.rs` (device id, counters, peers, snapshots)
+- [x] **3.5** Extract `db/catalog.rs` (products, categories, `ProductFields`)
+- [x] **3.6** Extract `db/suppliers.rs`
+- [x] **3.7** Extract `db/stock.rs` (movements, expiry buckets, date math)
+- [x] **3.8** Extract `db/purchasing.rs` (orders, receiving)
+- [x] **3.9** Extract `db/sales.rs` (a sale, shifts, drawers, reports)
+- [x] **3.10** Extract `db/backup.rs`
+- [x] **3.11** Move the db tests to `db/tests.rs`
+- [x] **3.12** Final verification: 259 tests, clippy, release build
+
+`db/mod.rs` ends at 53 lines: the module doc, one `mod` per file, and the
+re-exports that keep the call sites honest.
