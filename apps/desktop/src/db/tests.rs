@@ -28,6 +28,7 @@ fn insert_product(
             pack_size: 1,
             pack_price_minor: None,
             pack_barcode: None,
+            tiers: &[],
         },
     )
 }
@@ -54,6 +55,7 @@ fn update_product(
             pack_size: 1,
             pack_price_minor: None,
             pack_barcode: None,
+            tiers: &[],
         },
     )
 }
@@ -2960,6 +2962,7 @@ fn a_pack_lives_on_the_same_row_as_its_loose_units() {
             pack_size: 100,
             pack_price_minor: Some(2_800),
             pack_barcode: Some("100200"),
+            tiers: &[],
         },
     )
     .expect("insert");
@@ -2989,6 +2992,7 @@ fn a_pack_lives_on_the_same_row_as_its_loose_units() {
             pack_size: 1,
             pack_price_minor: None,
             pack_barcode: None,
+            tiers: &[],
         },
     )
     .expect_err("a code belongs to one product");
@@ -3014,6 +3018,7 @@ fn a_pack_of_one_keeps_no_pack_price_or_code() {
             pack_size: 1,
             pack_price_minor: Some(9_000),
             pack_barcode: Some("999"),
+            tiers: &[],
         },
     )
     .expect("insert");
@@ -3023,6 +3028,185 @@ fn a_pack_of_one_keeps_no_pack_price_or_code() {
     assert_eq!(product.pack_price_minor, None);
     assert_eq!(product.pack_barcode, None);
     assert!(!barcode_taken(&store, "999", None), "the code was dropped");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A price break is a rung on a ladder that starts at the shelf price. It is
+/// stored against the product, read back in quantity order, and absent when the
+/// shop prices one way.
+#[test]
+fn price_breaks_read_back_with_the_product_in_quantity_order() {
+    let (store, path) = store("price-breaks");
+    let id = super::insert_product(
+        &store,
+        &ProductFields {
+            name: "Panadol",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 100,
+            pack_price_minor: Some(40_000),
+            pack_barcode: None,
+            // Deliberately out of order: the form can hold them any way and
+            // the ladder is the same ladder.
+            tiers: &[
+                PriceTier {
+                    min_qty: 50,
+                    price_minor: 450,
+                },
+                PriceTier {
+                    min_qty: 10,
+                    price_minor: 475,
+                },
+            ],
+        },
+    )
+    .expect("insert");
+
+    let product = products(&store).into_iter().next().expect("product");
+    assert_eq!(product.id, id);
+    assert_eq!(product.price_minor, 500, "the shelf price is not a rung");
+    assert_eq!(
+        product.tiers,
+        vec![
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450
+            },
+        ]
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Buying more cannot cost more. A rung above the rung below it is a typing
+/// error, not a price, and saving it would overcharge the shop's best customer.
+#[test]
+fn a_price_break_above_the_shelf_price_is_refused() {
+    let (store, path) = store("price-break-too-high");
+    fn fields(tiers: &[PriceTier]) -> ProductFields<'_> {
+        ProductFields {
+            name: "Panadol",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            tiers,
+        }
+    }
+
+    let error = super::insert_product(
+        &store,
+        &fields(&[PriceTier {
+            min_qty: 10,
+            price_minor: 600,
+        }]),
+    )
+    .expect_err("a break cannot cost more than the shelf");
+    assert!(error.to_string().contains("cannot be above"), "{error}");
+
+    // A rung at the shelf price is allowed: a shop sometimes wants the till to
+    // say "10+ price" without changing the amount. A ladder that climbs from
+    // there is not.
+    super::insert_product(
+        &store,
+        &fields(&[PriceTier {
+            min_qty: 10,
+            price_minor: 500,
+        }]),
+    )
+    .expect("a rung at the shelf price is allowed");
+
+    let error = super::insert_product(
+        &store,
+        &fields(&[
+            PriceTier {
+                min_qty: 10,
+                price_minor: 400,
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450,
+            },
+        ]),
+    )
+    .expect_err("the ladder has to keep going down");
+    assert!(error.to_string().contains("cannot be above"), "{error}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The form saves the whole ladder every time. Appending would leave the old
+/// rungs behind and quietly keep a price the shop removed.
+#[test]
+fn saving_a_product_replaces_its_breaks() {
+    let (store, path) = store("price-break-update");
+    let id = super::insert_product(
+        &store,
+        &ProductFields {
+            name: "Panadol",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            tiers: &[
+                PriceTier {
+                    min_qty: 10,
+                    price_minor: 475,
+                },
+                PriceTier {
+                    min_qty: 50,
+                    price_minor: 450,
+                },
+            ],
+        },
+    )
+    .expect("insert");
+
+    super::update_product(
+        &store,
+        id,
+        &ProductFields {
+            name: "Panadol",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            tiers: &[PriceTier {
+                min_qty: 20,
+                price_minor: 460,
+            }],
+        },
+    )
+    .expect("update");
+
+    let product = products(&store).into_iter().next().expect("product");
+    assert_eq!(
+        product.tiers,
+        vec![PriceTier {
+            min_qty: 20,
+            price_minor: 460
+        }]
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -3044,6 +3228,7 @@ fn receiving_a_pack_stores_the_cost_per_tablet() {
             pack_size: 100,
             pack_price_minor: Some(2_800),
             pack_barcode: None,
+            tiers: &[],
         },
     )
     .expect("insert");
@@ -3108,6 +3293,7 @@ fn a_pack_sale_moves_a_pack_of_stock_and_costs_a_pack() {
             pack_size: 100,
             pack_price_minor: Some(2_800),
             pack_barcode: None,
+            tiers: &[],
         },
     )
     .expect("insert");

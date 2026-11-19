@@ -43,16 +43,65 @@ pub fn products(store: &storage::Store) -> Vec<Product> {
             pack_price_minor: row.get(8)?,
             pack_barcode: row.get(9)?,
             cost_milli: row.get(10)?,
+            tiers: Vec::new(),
         })
     });
 
-    match rows {
+    let mut products: Vec<Product> = match rows {
         Ok(rows) => rows.filter_map(Result::ok).collect(),
         Err(err) => {
             tracing::warn!(error = %err, "products query failed");
             Vec::new()
         }
+    };
+
+    let mut breaks = breaks_by_product(store);
+    for product in &mut products {
+        product.tiers = breaks.remove(&product.id).unwrap_or_default();
     }
+    products
+}
+
+/// Every product's price breaks, grouped by product.
+///
+/// One statement for the whole catalog rather than one per product: the list is
+/// reloaded whenever the catalog changes, and a query per row would be the only
+/// thing on that screen costing a statement per product.
+fn breaks_by_product(store: &storage::Store) -> std::collections::HashMap<i64, Vec<PriceTier>> {
+    let mut grouped: std::collections::HashMap<i64, Vec<PriceTier>> =
+        std::collections::HashMap::new();
+
+    let mut statement = match store.conn().prepare(
+        "SELECT product_id, min_qty, price_minor FROM price_breaks
+         ORDER BY product_id, min_qty",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "price breaks prepare failed");
+            return grouped;
+        }
+    };
+
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            PriceTier {
+                min_qty: row.get(1)?,
+                price_minor: row.get(2)?,
+            },
+        ))
+    });
+
+    match rows {
+        Ok(rows) => {
+            for (product_id, tier) in rows.filter_map(Result::ok) {
+                grouped.entry(product_id).or_default().push(tier);
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "price breaks query failed"),
+    }
+
+    grouped
 }
 
 /// The categories in use, so the sidebar lists the shop's groups rather than a
@@ -148,7 +197,8 @@ pub fn insert_product(store: &storage::Store, fields: &ProductFields<'_>) -> any
     let product = fields.clean()?;
     product.ensure_barcodes_free(store, None)?;
 
-    store.conn().execute(
+    let transaction = store.conn().unchecked_transaction()?;
+    transaction.execute(
         "INSERT INTO products
              (name, price_minor, category, category_id, barcode,
               unit_label, pack_size, pack_price_minor, pack_barcode)
@@ -165,7 +215,10 @@ pub fn insert_product(store: &storage::Store, fields: &ProductFields<'_>) -> any
             product.pack_barcode,
         ],
     )?;
-    Ok(store.conn().last_insert_rowid())
+    let id = transaction.last_insert_rowid();
+    write_tiers(&transaction, id, &product.tiers)?;
+    transaction.commit()?;
+    Ok(id)
 }
 
 /// Replace a product's editable fields.
@@ -212,7 +265,8 @@ pub fn update_product(
         );
     }
 
-    let changed = store.conn().execute(
+    let transaction = store.conn().unchecked_transaction()?;
+    let changed = transaction.execute(
         "UPDATE products
          SET name = ?2, price_minor = ?3, category = ?4, category_id = ?5,
              barcode = ?6, unit_label = ?7, pack_size = ?8,
@@ -232,6 +286,8 @@ pub fn update_product(
         ],
     )?;
     anyhow::ensure!(changed == 1, "product {id} is no longer in the catalog");
+    write_tiers(&transaction, id, &product.tiers)?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -286,6 +342,9 @@ pub struct ProductFields<'a> {
     pub pack_size: i64,
     pub pack_price_minor: Option<i64>,
     pub pack_barcode: Option<&'a str>,
+    /// The product's loose-unit price breaks. Empty when the shop prices one
+    /// way, and never used for a pack, whose price is already the bulk deal.
+    pub tiers: &'a [PriceTier],
 }
 
 /// A product after trimming, defaulting and the pack-of-one rule.
@@ -297,6 +356,7 @@ pub(super) struct CleanProduct {
     pack_price_minor: Option<i64>,
     barcode: Option<String>,
     pack_barcode: Option<String>,
+    tiers: Vec<PriceTier>,
 }
 
 impl ProductFields<'_> {
@@ -350,6 +410,8 @@ impl ProductFields<'_> {
             "the loose and pack barcodes cannot be the same"
         );
 
+        let tiers = clean_tiers(self.price_minor, self.tiers)?;
+
         Ok(CleanProduct {
             name: name.to_owned(),
             category: category.to_owned(),
@@ -358,8 +420,62 @@ impl ProductFields<'_> {
             pack_price_minor,
             barcode,
             pack_barcode,
+            tiers,
         })
     }
+}
+
+/// Sort and check a product's price breaks.
+///
+/// The ladder starts at the shelf price, so a break cannot start at one unit
+/// and cannot cost more than the rung below it: a customer who buys more and
+/// pays more is a typo, not a price. A rung at the same price as the one below
+/// is allowed — a shop sometimes wants the till to say "10+ price" without
+/// changing the amount — and so is the same price on every rung.
+fn clean_tiers(base_minor: i64, tiers: &[PriceTier]) -> anyhow::Result<Vec<PriceTier>> {
+    let mut sorted = tiers.to_vec();
+    sorted.sort_by_key(|tier| tier.min_qty);
+
+    let mut floor_minor = base_minor;
+    let mut previous_qty = 1;
+    for tier in &sorted {
+        anyhow::ensure!(tier.min_qty >= 2, "a price break starts at two units");
+        anyhow::ensure!(
+            tier.min_qty > previous_qty,
+            "two price breaks start at {previous_qty} units"
+        );
+        anyhow::ensure!(tier.price_minor >= 0, "a price break cannot be negative");
+        anyhow::ensure!(
+            tier.price_minor <= floor_minor,
+            "the {}-unit price cannot be above the {previous_qty}-unit price",
+            tier.min_qty
+        );
+        previous_qty = tier.min_qty;
+        floor_minor = tier.price_minor;
+    }
+
+    Ok(sorted)
+}
+
+/// Replace a product's price breaks. Callers pass rungs that came through
+/// [`clean_tiers`], so this only writes them.
+fn write_tiers(
+    conn: &rusqlite::Connection,
+    product_id: i64,
+    tiers: &[PriceTier],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM price_breaks WHERE product_id = ?1",
+        [product_id],
+    )?;
+    for tier in tiers {
+        conn.execute(
+            "INSERT INTO price_breaks (product_id, min_qty, price_minor)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![product_id, tier.min_qty, tier.price_minor],
+        )?;
+    }
+    Ok(())
 }
 
 impl CleanProduct {

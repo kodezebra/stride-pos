@@ -326,6 +326,7 @@ impl State {
             pack_size,
             pack_price_minor,
             pack_barcode: pack_barcode.as_deref(),
+            tiers: &[],
         };
 
         let perishable = draft.perishable;
@@ -458,6 +459,7 @@ impl State {
                 pack_size: row.pack_size,
                 pack_price_minor: row.pack_price_minor,
                 pack_barcode: row.pack_barcode.as_deref(),
+                tiers: &[],
             };
             if let Err(error) = crate::db::insert_product(&self.store, &fields) {
                 // The catalog's own rejects count like the file's: a row the

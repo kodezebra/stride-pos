@@ -119,6 +119,7 @@ pub fn template_csv(currency: Currency) -> String {
                 pack_price_minor: None,
                 pack_barcode: None,
                 cost_milli: None,
+                tiers: Vec::new(),
             },
             Product {
                 id: 0,
@@ -132,6 +133,7 @@ pub fn template_csv(currency: Currency) -> String {
                 pack_price_minor: None,
                 pack_barcode: None,
                 cost_milli: None,
+                tiers: Vec::new(),
             },
         ],
         currency,
@@ -198,6 +200,7 @@ mod tests {
             pack_price_minor: None,
             pack_barcode: None,
             cost_milli: None,
+            tiers: Vec::new(),
         }
     }
 

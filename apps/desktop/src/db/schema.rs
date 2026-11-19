@@ -661,4 +661,27 @@ pub const MIGRATIONS: &[Migration] = &[
                 WHERE expires_on IS NOT NULL;
         "#,
     },
+    // Quantity breaks: the price of one loose unit once the line is long.
+    //
+    // A break belongs to the product and starts at the quantity it names. The
+    // shelf price stays `products.price_minor` and is the rung below the first
+    // break, which is why a break cannot start at one unit: a rung at one would
+    // be a second name for the shelf price.
+    //
+    // Packs are left out on purpose and have no rows here. `pack_price_minor`
+    // is already the bulk deal, priced for the whole carton; a break on a pack
+    // line would stack a second discount on the first until the box price
+    // meant nothing. The till only consults these rows for loose lines.
+    Migration {
+        version: 18,
+        name: "price_breaks",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS price_breaks (
+                product_id  INTEGER NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+                min_qty     INTEGER NOT NULL CHECK (min_qty >= 2),
+                price_minor INTEGER NOT NULL CHECK (price_minor >= 0),
+                PRIMARY KEY (product_id, min_qty)
+            );
+        "#,
+    },
 ];

@@ -157,6 +157,17 @@ impl Drawer {
     }
 }
 
+/// One rung of a product's price ladder: from `min_qty` loose units upward, one
+/// costs `price_minor`.
+///
+/// The shelf price is not a rung. It is the price of one, and it is the rung
+/// below the first break, so [`min_qty`](Self::min_qty) is always two or more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PriceTier {
+    pub min_qty: i64,
+    pub price_minor: i64,
+}
+
 /// One thing the shop sells, as the catalog stores it.
 ///
 /// `price_minor` is in the till's currency, like every other amount: there is no
@@ -195,6 +206,10 @@ pub struct Product {
     /// of 100 is 18.5 a tablet — and rounding the stored cost would make every
     /// profit figure drift. `None` until the shop records a purchase.
     pub cost_milli: Option<i64>,
+    /// Loose-unit price breaks, ascending by quantity. Empty when the shop has
+    /// none, and always empty for a pack: the box price is already the bulk
+    /// deal.
+    pub tiers: Vec<PriceTier>,
 }
 
 /// One of the shops or people the shop buys from.

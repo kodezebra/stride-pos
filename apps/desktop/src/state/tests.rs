@@ -70,6 +70,7 @@ fn seed_product(store: &storage::Store, name: &str, price: i64, barcode: Option<
             pack_size: 1,
             pack_price_minor: None,
             pack_barcode: None,
+            tiers: &[],
         },
     )
     .expect("seed product");
@@ -95,6 +96,7 @@ fn seed_pack(
             pack_size,
             pack_price_minor: pack_price,
             pack_barcode: None,
+            tiers: &[],
         },
     )
     .expect("seed pack")

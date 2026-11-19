@@ -191,6 +191,7 @@ fn product(id: i64, name: &str, barcode: Option<&str>) -> Product {
         pack_price_minor: None,
         pack_barcode: None,
         cost_milli: None,
+        tiers: Vec::new(),
     }
 }
 
