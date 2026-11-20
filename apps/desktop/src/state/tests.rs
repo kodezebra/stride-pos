@@ -58,6 +58,7 @@ fn line(name: &str, qty: i64, unit_minor: i64) -> CartLine {
             price_minor: unit_minor,
         }],
         tier_qty: None,
+        wholesale: false,
     }
 }
 
@@ -1206,6 +1207,229 @@ fn scanning_up_to_a_break_moves_the_whole_line_to_it() {
     assert_eq!(state.cart[0].qty, 10);
     assert_eq!(state.cart[0].unit_minor, 475);
     assert_eq!(state.cart[0].total_minor(), 4_750);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A wholesale buyer takes the deepest break on the ladder from the first unit:
+/// the price is the shop's floor, not a reward for buying ten.
+#[test]
+fn wholesale_takes_the_deepest_break_from_one_unit() {
+    let (mut state, path) = state("cart-wholesale-floor", Currency::UGX);
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475,
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450,
+            },
+        ],
+    );
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    state.add_to_cart(&product, 1);
+
+    assert_eq!(state.cart[0].qty, 1);
+    assert_eq!(
+        state.cart[0].unit_minor, 450,
+        "one unit still pays the floor"
+    );
+    assert_eq!(
+        state.cart[0].tier_qty, None,
+        "the mode explains the price, not a rung"
+    );
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("Wholesale"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The switch reprices what is already in the basket, not only the next scan:
+/// a customer who says "actually, wholesale" halfway through must not keep the
+/// retail price on the lines already picked.
+#[test]
+fn switching_mode_reprices_the_lines_already_in_the_cart() {
+    let (mut state, path) = state("cart-wholesale-reprice", Currency::UGX);
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[PriceTier {
+            min_qty: 50,
+            price_minor: 450,
+        }],
+    );
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+
+    state.add_to_cart(&product, 1);
+    assert_eq!(state.cart[0].unit_minor, 500);
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    assert_eq!(state.cart[0].unit_minor, 450);
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("Wholesale"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Back to retail, the count decides again: wholesale was a mode, not a change
+/// to the ladder the line was added under.
+#[test]
+fn switching_back_to_retail_restores_the_count_break() {
+    let (mut state, path) = state("cart-wholesale-back", Currency::UGX);
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[
+            PriceTier {
+                min_qty: 10,
+                price_minor: 475,
+            },
+            PriceTier {
+                min_qty: 50,
+                price_minor: 450,
+            },
+        ],
+    );
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    state.add_to_cart(&product, 1);
+    state.set_cart_quantity(id, 1, 10);
+    assert_eq!(state.cart[0].unit_minor, 450, "wholesale ignores the count");
+
+    state.set_customer_mode(CustomerMode::Retail);
+    assert_eq!(state.cart[0].unit_minor, 475, "ten earns the ten break");
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("10+ price"));
+
+    state.set_cart_quantity(id, 1, 50);
+    assert_eq!(state.cart[0].unit_minor, 450);
+    assert_eq!(state.cart[0].tier_label().as_deref(), Some("50+ price"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A pack's ladder is one rung at the pack price, so wholesale leaves it alone
+/// and does not label it: the pack is already the bulk deal.
+#[test]
+fn wholesale_leaves_a_pack_at_its_pack_price() {
+    let (mut state, path) = state("cart-wholesale-pack", Currency::UGX);
+    let id = crate::db::insert_product(
+        &state.store,
+        &crate::db::ProductFields {
+            name: "Amoxicillin",
+            price_minor: 500,
+            category: "Medicine",
+            category_id: None,
+            barcode: None,
+            unit_label: "tablet",
+            pack_size: 100,
+            pack_price_minor: Some(40_000),
+            pack_barcode: None,
+            tiers: &[PriceTier {
+                min_qty: 10,
+                price_minor: 450,
+            }],
+        },
+    )
+    .expect("seed pack with a ladder");
+    state.reload_products();
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the pack product")
+        .clone();
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    state.add_to_cart(&product, 100);
+
+    assert_eq!(
+        state.cart[0].unit_minor, 40_000,
+        "the pack price is already the bulk deal"
+    );
+    assert_eq!(
+        state.cart[0].tier_label(),
+        None,
+        "a pack is not labelled wholesale"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A product with no breaks charges the same either way, so the line says
+/// nothing: a "Wholesale" label would promise a saving that is not there.
+#[test]
+fn wholesale_without_a_break_is_not_labelled() {
+    let (mut state, path) = state("cart-wholesale-plain", Currency::UGX);
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.name == "Test item")
+        .expect("the seeded product")
+        .clone();
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    state.add_to_cart(&product, 1);
+
+    assert_eq!(state.cart[0].unit_minor, product.price_minor);
+    assert_eq!(state.cart[0].tier_label(), None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The next customer is a walk-in: a wholesale price must not survive the sale
+/// that used it.
+#[test]
+fn a_sale_returns_the_till_to_retail_prices() {
+    let (mut state, path) = state("cart-wholesale-reset-sale", Currency::UGX);
+    state.cart = vec![line("Sugar", 1, 340)];
+    state.set_customer_mode(CustomerMode::Wholesale);
+
+    state.start_payment();
+    state.payment.as_mut().expect("open").tendered = "400".to_owned();
+    state.confirm_payment();
+
+    assert_eq!(state.customer_mode, CustomerMode::Retail);
+    assert!(state.cart.is_empty());
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Clearing the basket is also the end of its terms.
+#[test]
+fn clearing_the_cart_returns_the_till_to_retail_prices() {
+    let (mut state, path) = state("cart-wholesale-reset-clear", Currency::UGX);
+    state.cart = vec![line("Sugar", 1, 340)];
+    state.set_customer_mode(CustomerMode::Wholesale);
+
+    state.clear_cart();
+
+    assert_eq!(state.customer_mode, CustomerMode::Retail);
 
     let _ = std::fs::remove_file(path);
 }

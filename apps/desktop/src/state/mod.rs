@@ -119,6 +119,9 @@ pub struct State {
     pub store: storage::Store,
 
     pub cart: Vec<CartLine>,
+    /// Which price ladder the cart is selling on. A session choice, not a sale
+    /// fact: the lines keep the unit price they were charged at.
+    pub customer_mode: CustomerMode,
     /// The cart line whose quantity is being set, if any. One editor at a time:
     /// the modal owns the screen while it is open.
     pub cart_quantity: Option<CartQuantity>,
@@ -418,6 +421,7 @@ impl State {
         Self {
             store,
             cart: Vec::new(),
+            customer_mode: CustomerMode::Retail,
             cart_quantity: None,
             module,
             sidebar_open,
