@@ -115,14 +115,13 @@ pub enum Permission {
     Sell,
     TakePayment,
     Lock,
-    // Voiding, refunding, discounting and opening the drawer have no screen yet.
-    // The four are here because the role matrix is written once: a check added
-    // later would be a check somebody has to remember to add.
+    // Voiding, refunding and opening the drawer have no screen yet. They are
+    // here because the role matrix is written once: a check added later would
+    // be a check somebody has to remember to add.
     #[allow(dead_code)]
     VoidSale,
     #[allow(dead_code)]
     Refund,
-    #[allow(dead_code)]
     Discount,
     ChangePrice,
     #[allow(dead_code)]

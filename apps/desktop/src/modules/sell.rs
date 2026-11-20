@@ -469,6 +469,8 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     });
     ui.add_space(SPACING.sm);
     components::divider(ui);
+    ui.add_space(SPACING.sm);
+    customer_mode_row(ui, state);
 
     // Reserve the footer first so the line list scrolls instead of pushing the
     // total off the pane. A till whose total can scroll away is broken.
@@ -717,6 +719,47 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
         .on_hover_text("F12 or Ctrl+Enter");
     if pay.clicked() {
         state.start_payment();
+    }
+}
+
+/// The retail/wholesale switch, above the lines it reprices.
+///
+/// A switch rather than a menu because there are two states and the cashier has
+/// to see which one is live before the first item is scanned. Wholesale is a
+/// pricing decision, so it asks for the same permission as a discount; the
+/// override leaves a minute-long approval and the cashier taps again.
+fn customer_mode_row(ui: &mut egui::Ui, state: &mut State) {
+    let palette = theme::current(ui.ctx());
+    let wholesale = state.customer_mode == CustomerMode::Wholesale;
+    let text = egui::RichText::new(state.customer_mode.label())
+        .size(TYPE.small)
+        .family(theme::semibold());
+    let text = if wholesale {
+        text.color(egui::Color32::from(palette.accent_ink()))
+    } else {
+        text.color(egui::Color32::from(palette.text_muted))
+    };
+    let button = egui::Button::new(text)
+        .min_size(egui::vec2(ui.available_width(), 36.0))
+        .fill(if wholesale {
+            egui::Color32::from(palette.accent_soft)
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
+    // While the tender panel owns the screen the basket is frozen, so the mode
+    // is too: repricing under a payment already on the counter is not a thing
+    // the cashier can mean.
+    let response = ui
+        .add_enabled(!state.is_tendering(), button)
+        .on_hover_text("Wholesale prices use each product's deepest quantity break");
+    if response.clicked() {
+        if state.permits(crate::auth::Permission::Discount) {
+            state.toggle_customer_mode();
+        } else {
+            state.ask_override(crate::auth::Permission::Discount, None);
+        }
     }
 }
 

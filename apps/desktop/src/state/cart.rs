@@ -5,6 +5,35 @@
 //! reads rather than with the sale once it is written.
 
 use super::*;
+
+/// Which price ladder the till is selling on.
+///
+/// Retail prices from the product's quantity breaks: the price is a property of
+/// the count, so ten units can cost less each than one. Wholesale pins every
+/// loose unit to the deepest rung the shop offers, whatever the count — a
+/// wholesale buyer negotiates for the floor price, not for one unit at a time.
+///
+/// The mode belongs to the sale in progress, not to the catalog: switching it
+/// reprices the lines already in the basket, and the next sale starts retail
+/// again so a wholesale price cannot leak to a walk-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CustomerMode {
+    #[default]
+    Retail,
+    Wholesale,
+}
+
+impl CustomerMode {
+    /// The words on the switch. A cashier has to read the mode from across the
+    /// counter, so it says what the customer is charged, not the internal name.
+    pub fn label(self) -> &'static str {
+        match self {
+            CustomerMode::Retail => "Retail prices",
+            CustomerMode::Wholesale => "Wholesale prices",
+        }
+    }
+}
+
 /// One line on the till. Money is integer minor units, always.
 ///
 /// The line keeps the product id and a copy of the name and price: a sale has to
@@ -33,6 +62,10 @@ pub struct CartLine {
     pub tiers: Vec<PriceTier>,
     /// The break that set `unit_minor`, when one did. `None` on the shelf price.
     pub tier_qty: Option<i64>,
+    /// Whether this line is priced wholesale: the deepest rung, whatever the
+    /// count. Kept on the line so the steppers and the quantity keypad keep the
+    /// customer's terms without threading a mode through every call.
+    pub wholesale: bool,
 }
 
 impl CartLine {
@@ -50,9 +83,32 @@ impl CartLine {
         self.reprice();
     }
 
-    /// Take the deepest rung this line reaches. Below the first break the shelf
-    /// price stands, which is why the ladder carries a rung at one unit.
+    /// Price this line wholesale, or put it back on the retail ladder.
+    ///
+    /// The flag lives on the line, so a later `set_qty` keeps the terms: the
+    /// cashier who bumps a wholesale line's count must not silently move it to
+    /// retail prices.
+    pub fn set_wholesale(&mut self, wholesale: bool) {
+        self.wholesale = wholesale;
+        self.reprice();
+    }
+
+    /// Price the line from its count, or from the wholesale flag.
+    ///
+    /// Retail takes the deepest rung this line reaches; below the first break
+    /// the shelf price stands, which is why the ladder carries a rung at one
+    /// unit. Wholesale takes the last rung outright: the ladder is ascending,
+    /// so the last is the floor.
     fn reprice(&mut self) {
+        if self.wholesale {
+            if let Some(tier) = self.tiers.last() {
+                self.unit_minor = tier.price_minor;
+                // No rung explains the price: the mode does. Printing "50+
+                // price" on a single unit would be a lie.
+                self.tier_qty = None;
+            }
+            return;
+        }
         let Some(tier) = self
             .tiers
             .iter()
@@ -66,8 +122,18 @@ impl CartLine {
     }
 
     /// What to call the price on this line, when it is not the shelf price:
-    /// `10+ price`.
+    /// `10+ price`, or `Wholesale`.
+    ///
+    /// A pack's ladder is one rung at its own price, so "Wholesale" on a pack
+    /// would explain nothing: the pack price is already the bulk deal. The same
+    /// goes for a product with no breaks — wholesale and retail charge the same,
+    /// and a label would promise a saving the line does not show.
     pub fn tier_label(&self) -> Option<String> {
+        if self.wholesale {
+            let floor = self.tiers.last()?.price_minor;
+            let shelf = self.tiers.first()?.price_minor;
+            return (self.unit_factor == 1 && floor < shelf).then(|| "Wholesale".to_owned());
+        }
         self.tier_qty.map(|qty| format!("{qty}+ price"))
     }
 }
@@ -204,16 +270,24 @@ impl State {
                 let qty = line.qty + 1;
                 line.set_qty(qty);
             }
-            None => self.cart.push(CartLine {
-                product_id: product.id,
-                name: product.name.clone(),
-                qty: 1,
-                unit_minor,
-                unit_factor,
-                unit_label,
-                tiers,
-                tier_qty: None,
-            }),
+            None => {
+                let mut line = CartLine {
+                    product_id: product.id,
+                    name: product.name.clone(),
+                    qty: 1,
+                    unit_minor,
+                    unit_factor,
+                    unit_label,
+                    tiers,
+                    tier_qty: None,
+                    wholesale: self.customer_mode == CustomerMode::Wholesale,
+                };
+                // A wholesale line is not priced by its count, and the line is
+                // born at one unit, so the shelf price it was built with is not
+                // the price it charges.
+                line.reprice();
+                self.cart.push(line);
+            }
         }
     }
 
@@ -279,6 +353,30 @@ impl State {
         self.payment = None;
         self.cart_quantity = None;
         self.notice = None;
+        // The next customer is a walk-in until the till is told otherwise.
+        self.customer_mode = CustomerMode::Retail;
+    }
+
+    /// Switch the whole cart between retail and wholesale pricing.
+    ///
+    /// Every line is repriced at once: a wholesale buyer who scans an item
+    /// after the switch must not be charged the retail price just because the
+    /// line is new. The mode is a property of the sale in progress, not a
+    /// per-line choice the cashier can leave half-applied.
+    pub fn set_customer_mode(&mut self, mode: CustomerMode) {
+        self.customer_mode = mode;
+        for line in &mut self.cart {
+            line.set_wholesale(mode == CustomerMode::Wholesale);
+        }
+    }
+
+    /// The other mode, for a switch that has only two states.
+    pub fn toggle_customer_mode(&mut self) {
+        let mode = match self.customer_mode {
+            CustomerMode::Retail => CustomerMode::Wholesale,
+            CustomerMode::Wholesale => CustomerMode::Retail,
+        };
+        self.set_customer_mode(mode);
     }
 
     pub fn cart_count(&self) -> i64 {
@@ -420,6 +518,9 @@ impl State {
         ) {
             Ok(_) => {
                 self.cart.clear();
+                // The sale is over, so its pricing terms are too: the next
+                // customer is a walk-in until the till is told otherwise.
+                self.customer_mode = CustomerMode::Retail;
                 // The sale is written, so the tender panel has done its job.
                 // Leaving a change readout behind would make an empty cart look
                 // like a cart that never cleared; the change is on the sale.
