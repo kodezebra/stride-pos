@@ -996,6 +996,29 @@ fn tracking_and_an_adjustment_go_through_the_state_as_the_screen_does() {
 }
 
 #[test]
+fn tracking_from_the_editor_preselects_the_product_and_uses_the_ledger() {
+    let (mut state, path) = state("stock-track-from-edit", Currency::UGX);
+
+    state.start_tracking_for(1);
+    {
+        let draft = state.stock_editor.as_ref().expect("open");
+        assert_eq!(draft.product_id, Some(1));
+        assert_eq!(draft.opening, "0");
+        assert_eq!(draft.low_stock, "5");
+        assert!(draft.error.is_none());
+    }
+    state.stock_editor.as_mut().expect("open").opening = "7".to_owned();
+    state.save_tracking();
+
+    assert!(state.stock_editor.is_none(), "a saved form closes");
+    assert_eq!(state.stock.len(), 1);
+    assert_eq!(state.stock[0].product_id, 1);
+    assert_eq!(state.stock[0].on_hand, 7);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn an_adjustment_that_changes_nothing_keeps_the_form_and_explains() {
     let (mut state, path) = state("stock-zero", Currency::UGX);
 

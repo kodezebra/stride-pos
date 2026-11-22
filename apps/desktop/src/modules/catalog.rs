@@ -696,6 +696,8 @@ pub(super) fn expiry_summary(tracked: bool, perishable: bool, shelf_life: &str) 
 /// backdrop covers the screen and the list behind it cannot be clicked.
 pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
+    let can_track = state.permits(crate::auth::Permission::ManageInventory);
+    let editing_id = state.product_editor.as_ref().and_then(|draft| draft.id);
     // Suggested category names: categories the shop has already created, then
     // the seed list for this till's business type. Case-insensitive
     // de-duplication keeps "Vitamins" and "vitamins" as one shelf.
@@ -724,6 +726,7 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     };
 
     let mut save = false;
+    let mut track = false;
     let mut cancel = false;
 
     modal(ctx, egui::Id::new("pos_product_editor")).show(ctx, |ui| {
@@ -795,6 +798,21 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                     }
                 });
         });
+
+        // An existing, untracked product can start tracking here without
+        // sending the operator back to Inventory. The button saves the edit
+        // first, so a count is never attached to stale details.
+        if editing_id.is_some() && !draft.tracked && can_track {
+            ui.add_space(SPACING.md);
+            components::field_label(ui, "Stock");
+            ui.add_space(SPACING.xs);
+            if actions::secondary_compact(ui, "Save & track stock")
+                .on_hover_text("Save these details, then count what is on the shelf.")
+                .clicked()
+            {
+                track = true;
+            }
+        }
 
         // Fill the loose price from the pack price on the first pass, and keep
         // it in step while the operator tunes the pack. Once they type a price
@@ -967,8 +985,17 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     }
 
     // Applied outside the borrow of `state.product_editor`: saving reads the
-    // catalog and writes the store, which needs the whole state.
-    if save {
+    // catalog and writes the store, which needs the whole state. Tracking the
+    // edited product saves first and only opens the count form if that save
+    // succeeded; a rejected edit keeps its error and stays on screen.
+    if track {
+        if let Some(id) = editing_id {
+            state.save_product();
+            if state.product_editor.is_none() {
+                state.start_tracking_for(id);
+            }
+        }
+    } else if save {
         state.save_product();
     }
     if cancel {

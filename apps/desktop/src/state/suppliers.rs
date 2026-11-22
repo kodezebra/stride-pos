@@ -286,6 +286,20 @@ impl State {
         self.notice = None;
     }
 
+    /// Open the same form with an existing product already selected.
+    ///
+    /// The editor calls this only for an untracked product. It still goes
+    /// through `save_tracking`, so the opening count is explicit and the ledger
+    /// keeps its one-row opening movement.
+    pub fn start_tracking_for(&mut self, product_id: i64) {
+        let mut draft = TrackDraft::new();
+        draft.product_id = Some(product_id);
+        self.stock_editor = Some(draft);
+        self.stock_move = None;
+        self.stock_history = None;
+        self.notice = None;
+    }
+
     /// Start tracking the chosen product, with the count on the shelf.
     ///
     /// The opening count is deliberately explicit, even for zero. An imported
