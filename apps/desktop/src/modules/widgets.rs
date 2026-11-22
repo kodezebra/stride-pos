@@ -12,7 +12,8 @@ use super::*;
 /// The whole row is the click target, with a small action at the edge for
 /// people who would rather tap a button than a name. Long names wear an
 /// ellipsis and offer the full name on hover instead of pushing the action off
-/// the row.
+/// the row. Rows sit flush, with the rule painted inside each one, so the
+/// picker reads as one white table instead of cards separated by canvas.
 pub(super) fn product_picker_row(
     ui: &mut egui::Ui,
     name: &str,
@@ -34,6 +35,14 @@ pub(super) fn product_picker_row(
         };
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::ZERO, egui::Color32::from(fill));
+        // The rule lives inside the row. `components::divider` would add eight
+        // pixels on each side, and that space shows the canvas as gray padding
+        // between what should read as one white table.
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            egui::Stroke::new(1.0, egui::Color32::from(palette.border)),
+        );
 
         let inner = rect.shrink2(egui::vec2(SPACING.sm, SPACING.xs));
         let mut row = ui.new_child(
@@ -61,7 +70,6 @@ pub(super) fn product_picker_row(
         });
     }
 
-    components::divider(ui);
     response.clicked() || action_clicked
 }
 

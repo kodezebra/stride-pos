@@ -461,7 +461,6 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         "Tracked products — type to find one by name or category.",
                     );
                 }
-                components::divider(ui);
                 for (id, name, category) in matches.iter().take(PICKER_LIMIT) {
                     let already = derived.already_on_list(*id);
                     let detail = if category.is_empty() {

@@ -357,7 +357,6 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .show(ui, |ui| {
-                    components::divider(ui);
                     for (id, name, category) in &matches {
                         let detail = if category.is_empty() {
                             "No category"
