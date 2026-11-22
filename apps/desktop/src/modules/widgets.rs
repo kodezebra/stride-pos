@@ -12,8 +12,8 @@ use super::*;
 /// The whole row is the click target, with a small action at the edge for
 /// people who would rather tap a button than a name. Long names wear an
 /// ellipsis and offer the full name on hover instead of pushing the action off
-/// the row. Rows sit flush, with the rule painted inside each one, so the
-/// picker reads as one white table instead of cards separated by canvas.
+/// the row. Rows sit flush as one white table; selection shows in the label,
+/// not as a gray wash over the row.
 pub(super) fn product_picker_row(
     ui: &mut egui::Ui,
     name: &str,
@@ -27,21 +27,12 @@ pub(super) fn product_picker_row(
     let mut action_clicked = false;
 
     if ui.is_rect_visible(rect) {
-        let hovered = ui.rect_contains_pointer(rect);
-        let fill = if selected || hovered {
-            palette.surface_alt
-        } else {
-            palette.surface
-        };
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, egui::Color32::from(fill));
-        // The rule lives inside the row. `components::divider` would add eight
-        // pixels on each side, and that space shows the canvas as gray padding
-        // between what should read as one white table.
-        ui.painter().hline(
-            rect.x_range(),
-            rect.bottom() - 0.5,
-            egui::Stroke::new(1.0, egui::Color32::from(palette.border)),
+        // Every row is the same white surface, with no rule and no gap between
+        // them. Hover keeps the pointer feedback; selection keeps its label.
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from(palette.surface),
         );
 
         let inner = rect.shrink2(egui::vec2(SPACING.sm, SPACING.xs));
