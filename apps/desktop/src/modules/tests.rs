@@ -657,8 +657,8 @@ fn purchase_derive_filters_candidates_from_one_snapshot() {
     assert_eq!(
         derived.matches("dai"),
         vec![
-            (1, "Milk".to_owned(), "Dairy".to_owned()),
-            (3, "Butter".to_owned(), "Dairy".to_owned()),
+            stock_item(1, "Milk", "Dairy", true),
+            stock_item(3, "Butter", "Dairy", false),
         ]
     );
     assert!(derived.already_on_list(1));
@@ -679,9 +679,9 @@ fn purchase_picker_offers_unadded_products_first() {
     assert_eq!(
         derived.matches(""),
         vec![
-            (2, "Bread".to_owned(), "Bakery".to_owned()),
-            (3, "Butter".to_owned(), "Dairy".to_owned()),
-            (1, "Milk".to_owned(), "Dairy".to_owned()),
+            stock_item(2, "Bread", "Bakery", false),
+            stock_item(3, "Butter", "Dairy", false),
+            stock_item(1, "Milk", "Dairy", true),
         ]
     );
 }

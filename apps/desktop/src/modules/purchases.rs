@@ -153,7 +153,7 @@ const PICKER_LIMIT: usize = 6;
 pub(super) struct PurchaseDerived {
     suppliers: Vec<(String, String)>,
     saved_supplier: Option<String>,
-    candidates: Vec<(i64, String, String)>,
+    candidates: Vec<StockItem>,
     perishable: Vec<i64>,
     already: Vec<i64>,
     low_to_add: Vec<i64>,
@@ -168,7 +168,7 @@ impl PurchaseDerived {
         self.saved_supplier.as_deref()
     }
 
-    pub(super) fn candidates(&self) -> &[(i64, String, String)] {
+    pub(super) fn candidates(&self) -> &[StockItem] {
         &self.candidates
     }
 
@@ -180,21 +180,21 @@ impl PurchaseDerived {
     /// the box is drawn rather than when the snapshot is taken. With an empty
     /// box, products not yet on the list come first; search keeps source order
     /// so a typed match reads the same way every time.
-    pub(super) fn matches(&self, search: &str) -> Vec<(i64, String, String)> {
+    pub(super) fn matches(&self, search: &str) -> Vec<StockItem> {
         let needle = search.trim().to_lowercase();
         let mut matches: Vec<_> = self
             .candidates
             .iter()
-            .filter(|(_, name, category)| {
+            .filter(|item| {
                 needle.is_empty()
-                    || name.to_lowercase().contains(&needle)
-                    || category.to_lowercase().contains(&needle)
+                    || item.name.to_lowercase().contains(&needle)
+                    || item.category.to_lowercase().contains(&needle)
             })
             .cloned()
             .collect();
         if needle.is_empty() {
             // Stable sort: alphabetical order survives inside each group.
-            matches.sort_by_key(|(id, _, _)| self.already.contains(id));
+            matches.sort_by_key(|item| self.already.contains(&item.product_id));
         }
         matches
     }
@@ -239,10 +239,9 @@ pub(super) fn derive_purchase_from(
         .and_then(|draft| draft.supplier_id.as_deref())
         .and_then(|id| suppliers.iter().find(|supplier| supplier.id == id))
         .map(|supplier| supplier.name.clone());
-    let candidates = stock
-        .iter()
-        .map(|item| (item.product_id, item.name.clone(), item.category.clone()))
-        .collect();
+    // Keep the whole stock item: the picker draws the same stock pill and
+    // tooltip the Catalog page draws for a product, not a name/category tuple.
+    let candidates = stock.to_vec();
     // Which lines ask for a date. A product that keeps is not dated; a
     // perishable delivery must be, and the field says so.
     let perishable = stock
@@ -461,40 +460,47 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         "Tracked products — type to find one by name or category.",
                     );
                 }
-                // Same row gap as the Sell product list, so the picker reads
-                // as the same kind of list rather than a stacked form.
-                ui.spacing_mut().item_spacing.y = SPACING.xs;
-                for (id, name, category) in matches.iter().take(PICKER_LIMIT) {
-                    let already = derived.already_on_list(*id);
-                    let detail = if category.is_empty() {
-                        "No category".to_owned()
-                    } else {
-                        category.clone()
-                    };
-                    let detail = if already {
-                        format!("{detail} · already on list")
-                    } else {
-                        detail
-                    };
-                    if product_picker_row(ui, name, &detail, product_picker_action(already), false)
-                    {
-                        add_product = Some(*id);
+                components::card(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    product_picker_header(ui, "Add");
+                    for item in matches.iter().take(PICKER_LIMIT) {
+                        let already = derived.already_on_list(item.product_id);
+                        let detail = if item.category.is_empty() {
+                            "No category".to_owned()
+                        } else {
+                            item.category.clone()
+                        };
+                        let detail = if already {
+                            format!("{detail} · already on list")
+                        } else {
+                            detail
+                        };
+                        if product_picker_row(
+                            ui,
+                            &item.name,
+                            &detail,
+                            Some(item),
+                            product_picker_action(already),
+                            false,
+                        ) {
+                            add_product = Some(item.product_id);
+                        }
                     }
-                }
-                if matches.len() > PICKER_LIMIT {
-                    let more_hint = if needle.is_empty() {
-                        format!(
-                            "{} more — type a name or category to see them.",
-                            matches.len() - PICKER_LIMIT
-                        )
-                    } else {
-                        format!(
-                            "{} more — keep typing to narrow it.",
-                            matches.len() - PICKER_LIMIT
-                        )
-                    };
-                    components::caption(ui, &more_hint);
-                }
+                    if matches.len() > PICKER_LIMIT {
+                        let more_hint = if needle.is_empty() {
+                            format!(
+                                "{} more — type a name or category to see them.",
+                                matches.len() - PICKER_LIMIT
+                            )
+                        } else {
+                            format!(
+                                "{} more — keep typing to narrow it.",
+                                matches.len() - PICKER_LIMIT
+                            )
+                        };
+                        components::caption(ui, &more_hint);
+                    }
+                });
             }
 
             if let Some(error) = &draft.error {

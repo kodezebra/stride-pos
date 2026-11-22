@@ -354,25 +354,34 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
                 .collect();
 
             ui.add_space(SPACING.xs);
-            egui::ScrollArea::vertical()
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    // Same row gap as the Sell product list.
-                    ui.spacing_mut().item_spacing.y = SPACING.xs;
-                    for (id, name, category) in &matches {
-                        let detail = if category.is_empty() {
-                            "No category"
-                        } else {
-                            category.as_str()
-                        };
-                        if product_picker_row(ui, name, detail, "", draft.product_id == Some(*id)) {
-                            draft.product_id = Some(*id);
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                product_picker_header(ui, "");
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for (id, name, category) in &matches {
+                            let detail = if category.is_empty() {
+                                "No category"
+                            } else {
+                                category.as_str()
+                            };
+                            if product_picker_row(
+                                ui,
+                                name,
+                                detail,
+                                None,
+                                "",
+                                draft.product_id == Some(*id),
+                            ) {
+                                draft.product_id = Some(*id);
+                            }
                         }
-                    }
-                });
-            if matches.is_empty() {
-                components::caption(ui, "No untracked product matches.");
-            }
+                    });
+                if matches.is_empty() {
+                    components::caption(ui, "No untracked product matches.");
+                }
+            });
         }
 
         ui.add_space(SPACING.md);
