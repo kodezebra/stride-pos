@@ -123,6 +123,8 @@ pub struct State {
     pub store: storage::Store,
 
     pub cart: Vec<CartLine>,
+    /// Parked baskets held at the counter while another customer is served.
+    pub parked_carts: Vec<ParkedCart>,
     /// Which price ladder the cart is selling on. A session choice, not a sale
     /// fact: the lines keep the unit price they were charged at.
     pub customer_mode: CustomerMode,
@@ -434,6 +436,7 @@ impl State {
         Self {
             store,
             cart: Vec::new(),
+            parked_carts: Vec::new(),
             customer_mode: CustomerMode::Retail,
             customer: None,
             customers,

@@ -150,6 +150,11 @@ const SEARCH_MAX: f32 = 320.0;
 const SEARCH_SHARE: f32 = 0.36;
 
 pub trait Module {
+    /// Whether this module has a sidebar. If false, no sidebar panel is drawn.
+    fn has_sidebar(&self) -> bool {
+        true
+    }
+
     /// A fixed sidebar width, or `None` to let the user drag it.
     fn fixed_sidebar(&self) -> Option<f32> {
         None
