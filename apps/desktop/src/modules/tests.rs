@@ -500,3 +500,30 @@ fn the_page_bar_fits_its_search_and_its_actions_on_one_row() {
         );
     }
 }
+
+#[test]
+fn product_form_summaries_show_only_what_is_set() {
+    assert_eq!(pack_summary("1", "", "", ""), "Loose only");
+    assert_eq!(break_summary(0), "None");
+    assert_eq!(expiry_summary(false, false, ""), "Needs Inventory tracking");
+}
+
+#[test]
+fn product_form_summaries_describe_hidden_details() {
+    assert_eq!(
+        pack_summary("20", "2,800", "box-1", ""),
+        "Pack of 20 · 2,800 · 1 barcode"
+    );
+    assert_eq!(
+        pack_summary("12", "", "box-1", "unit-1"),
+        "Pack of 12 · 2 barcodes"
+    );
+    assert_eq!(break_summary(1), "1 break");
+    assert_eq!(break_summary(3), "3 breaks");
+    assert_eq!(expiry_summary(true, false, ""), "Undated stock");
+    assert_eq!(expiry_summary(true, true, ""), "Dates every delivery");
+    assert_eq!(
+        expiry_summary(true, true, "30"),
+        "Dates every delivery · 30 days"
+    );
+}
