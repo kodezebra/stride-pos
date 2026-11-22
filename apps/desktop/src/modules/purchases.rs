@@ -141,6 +141,9 @@ pub(super) fn visible_purchases(purchases: &[Purchase], needle: &str, filter: us
         .collect()
 }
 
+/// How many products the picker shows before asking the user to search.
+const PICKER_LIMIT: usize = 6;
+
 /// The read-only lists a purchase form is built from, assembled once per frame.
 ///
 /// The supplier dropdown, the product picker and the expiry hints all ask the
@@ -173,11 +176,13 @@ impl PurchaseDerived {
     }
 
     /// The picker matches follow the live search box, so they are filtered when
-    /// the box is drawn rather than when the snapshot is taken. The candidate
-    /// list itself is already fixed for the frame.
+    /// the box is drawn rather than when the snapshot is taken. With an empty
+    /// box, products not yet on the list come first; search keeps source order
+    /// so a typed match reads the same way every time.
     pub(super) fn matches(&self, search: &str) -> Vec<(i64, String, String)> {
         let needle = search.trim().to_lowercase();
-        self.candidates
+        let mut matches: Vec<_> = self
+            .candidates
             .iter()
             .filter(|(_, name, category)| {
                 needle.is_empty()
@@ -185,7 +190,12 @@ impl PurchaseDerived {
                     || category.to_lowercase().contains(&needle)
             })
             .cloned()
-            .collect()
+            .collect();
+        if needle.is_empty() {
+            // Stable sort: alphabetical order survives inside each group.
+            matches.sort_by_key(|(id, _, _)| self.already.contains(id));
+        }
+        matches
     }
 
     pub(super) fn already_on_list(&self, product_id: i64) -> bool {
@@ -418,15 +428,16 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                     ui,
                     "No tracked products yet. Track stock first, then plan a purchase.",
                 );
-            } else if needle.is_empty() {
-                // The catalog is long and the page is short. A list that only
-                // appears once there is something to match keeps the whole
-                // list — and the delete route — on one screen.
-                components::caption(ui, "Type a name or category to add it.");
             } else if matches.is_empty() {
                 components::caption(ui, "No other tracked product matches.");
             } else {
-                for (id, name, category) in matches.iter().take(6) {
+                if needle.is_empty() {
+                    components::caption(
+                        ui,
+                        "Tracked products — type to find one by name or category.",
+                    );
+                }
+                for (id, name, category) in matches.iter().take(PICKER_LIMIT) {
                     let label = if category.is_empty() {
                         name.clone()
                     } else {
@@ -441,11 +452,19 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         add_product = Some(*id);
                     }
                 }
-                if matches.len() > 6 {
-                    components::caption(
-                        ui,
-                        &format!("{} more — keep typing to narrow it.", matches.len() - 6),
-                    );
+                if matches.len() > PICKER_LIMIT {
+                    let more_hint = if needle.is_empty() {
+                        format!(
+                            "{} more — type a name or category to see them.",
+                            matches.len() - PICKER_LIMIT
+                        )
+                    } else {
+                        format!(
+                            "{} more — keep typing to narrow it.",
+                            matches.len() - PICKER_LIMIT
+                        )
+                    };
+                    components::caption(ui, &more_hint);
                 }
             }
 

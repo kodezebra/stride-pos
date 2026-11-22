@@ -664,3 +664,24 @@ fn purchase_derive_filters_candidates_from_one_snapshot() {
     assert!(derived.already_on_list(1));
     assert!(!derived.already_on_list(3));
 }
+
+#[test]
+fn purchase_picker_offers_unadded_products_first() {
+    let stock = vec![
+        stock_item(1, "Milk", "Dairy", true),
+        stock_item(2, "Bread", "Bakery", false),
+        stock_item(3, "Butter", "Dairy", false),
+    ];
+    let draft = purchase_draft(None, vec![(1, "Milk")], "");
+
+    let derived = purchases::derive_purchase_from(&[], &stock, Some(&draft));
+
+    assert_eq!(
+        derived.matches(""),
+        vec![
+            (2, "Bread".to_owned(), "Bakery".to_owned()),
+            (3, "Butter".to_owned(), "Dairy".to_owned()),
+            (1, "Milk".to_owned(), "Dairy".to_owned()),
+        ]
+    );
+}
