@@ -6,6 +6,65 @@
 //! and a copy per screen is how the cart and the payment screen drift apart.
 
 use super::*;
+
+/// One product candidate in a picker, drawn like the list rows it feeds.
+///
+/// The whole row is the click target, with a small action at the edge for
+/// people who would rather tap a button than a name. Long names wear an
+/// ellipsis and offer the full name on hover instead of pushing the action off
+/// the row.
+pub(super) fn product_picker_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    detail: &str,
+    action: &str,
+    selected: bool,
+) -> bool {
+    let palette = theme::current(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+    let mut action_clicked = false;
+
+    if ui.is_rect_visible(rect) {
+        let hovered = ui.rect_contains_pointer(rect);
+        let fill = if selected || hovered {
+            palette.surface_alt
+        } else {
+            palette.surface
+        };
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::ZERO, egui::Color32::from(fill));
+
+        let inner = rect.shrink2(egui::vec2(SPACING.sm, SPACING.xs));
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if selected {
+                components::caption(ui, "Selected");
+            }
+            if !action.is_empty() {
+                action_clicked = actions::quiet_compact(ui, action).clicked();
+            }
+            let width = (ui.available_width() - ui.spacing().item_spacing.x).max(0.0);
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                let label =
+                    ui.add(egui::Label::new(components::semibold(name).size(TYPE.body)).truncate());
+                if is_cut(ui, name, width) {
+                    label.on_hover_text(name);
+                }
+                components::caption(ui, detail);
+            });
+        });
+    }
+
+    components::divider(ui);
+    response.clicked() || action_clicked
+}
+
 /// One label/amount row: the cart's totals and the payment screen's due.
 ///
 /// Shared with `checkout` on purpose — the amount the cashier reads on the cart

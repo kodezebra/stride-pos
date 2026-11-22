@@ -156,6 +156,7 @@ pub(super) struct PurchaseDerived {
     candidates: Vec<(i64, String, String)>,
     perishable: Vec<i64>,
     already: Vec<i64>,
+    low_to_add: Vec<i64>,
 }
 
 impl PurchaseDerived {
@@ -201,6 +202,17 @@ impl PurchaseDerived {
     pub(super) fn already_on_list(&self, product_id: i64) -> bool {
         self.already.contains(&product_id)
     }
+
+    /// Whether `Add low stock` would add anything to this list. A product that
+    /// is low but already here is not a reason to show the action.
+    pub(super) fn has_low_stock_to_add(&self) -> bool {
+        !self.low_to_add.is_empty()
+    }
+}
+
+/// The action on a picker row: a second line reads differently from a first.
+pub(super) fn product_picker_action(already_on_list: bool) -> &'static str {
+    if already_on_list { "Add again" } else { "Add" }
 }
 
 pub(super) fn derive_purchase(state: &State) -> PurchaseDerived {
@@ -238,9 +250,14 @@ pub(super) fn derive_purchase_from(
         .filter(|item| item.perishable)
         .map(|item| item.product_id)
         .collect();
-    let already = draft
+    let already: Vec<i64> = draft
         .map(|draft| draft.lines.iter().map(|line| line.product_id).collect())
         .unwrap_or_default();
+    let low_to_add = stock
+        .iter()
+        .filter(|item| item.needs_restock() && !already.contains(&item.product_id))
+        .map(|item| item.product_id)
+        .collect();
 
     PurchaseDerived {
         suppliers: active,
@@ -248,6 +265,7 @@ pub(super) fn derive_purchase_from(
         candidates,
         perishable,
         already,
+        low_to_add,
     }
 }
 
@@ -313,7 +331,9 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
             ui.horizontal(|ui| {
                 components::field_label(ui, "To buy");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if actions::secondary_compact(ui, "Add low stock").clicked() {
+                    if derived.has_low_stock_to_add()
+                        && actions::secondary_compact(ui, "Add low stock").clicked()
+                    {
                         add_low = true;
                     }
                 });
@@ -323,7 +343,11 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
             if draft.lines.is_empty() {
                 components::caption(
                     ui,
-                    "Nothing on the list yet. Add a product below, or fill it from low stock.",
+                    if derived.has_low_stock_to_add() {
+                        "Nothing on the list yet. Add a product below, or fill it from low stock."
+                    } else {
+                        "Nothing on the list yet. Add a product below."
+                    },
                 );
             } else {
                 components::divider(ui);
@@ -437,18 +461,21 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         "Tracked products — type to find one by name or category.",
                     );
                 }
+                components::divider(ui);
                 for (id, name, category) in matches.iter().take(PICKER_LIMIT) {
-                    let label = if category.is_empty() {
-                        name.clone()
+                    let already = derived.already_on_list(*id);
+                    let detail = if category.is_empty() {
+                        "No category".to_owned()
                     } else {
-                        format!("{name} — {category}")
+                        category.clone()
                     };
-                    let label = if derived.already_on_list(*id) {
-                        format!("{label} · another line")
+                    let detail = if already {
+                        format!("{detail} · already on list")
                     } else {
-                        label
+                        detail
                     };
-                    if ui.selectable_label(false, label).clicked() {
+                    if product_picker_row(ui, name, &detail, product_picker_action(already), false)
+                    {
                         add_product = Some(*id);
                     }
                 }

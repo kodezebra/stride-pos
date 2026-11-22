@@ -357,16 +357,14 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .show(ui, |ui| {
+                    components::divider(ui);
                     for (id, name, category) in &matches {
-                        let label = if category.is_empty() {
-                            name.clone()
+                        let detail = if category.is_empty() {
+                            "No category"
                         } else {
-                            format!("{name} — {category}")
+                            category.as_str()
                         };
-                        if ui
-                            .selectable_label(draft.product_id == Some(*id), label)
-                            .clicked()
-                        {
+                        if product_picker_row(ui, name, detail, "", draft.product_id == Some(*id)) {
                             draft.product_id = Some(*id);
                         }
                     }

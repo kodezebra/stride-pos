@@ -685,3 +685,34 @@ fn purchase_picker_offers_unadded_products_first() {
         ]
     );
 }
+
+#[test]
+fn purchase_picker_action_says_when_a_line_is_a_repeat() {
+    assert_eq!(purchases::product_picker_action(false), "Add");
+    assert_eq!(purchases::product_picker_action(true), "Add again");
+}
+
+#[test]
+fn low_stock_action_hides_when_everything_is_handled() {
+    let mut low = stock_item(1, "Milk", "Dairy", true);
+    low.on_hand = 2;
+    let mut listed = stock_item(2, "Bread", "Bakery", false);
+    listed.on_hand = 2;
+    let draft = purchase_draft(None, vec![(2, "Bread")], "");
+
+    let actionable =
+        purchases::derive_purchase_from(&[], &[low.clone(), listed.clone()], Some(&draft));
+    assert!(actionable.has_low_stock_to_add());
+
+    let mut incoming = low;
+    incoming.incoming = 8;
+    let handled = purchases::derive_purchase_from(&[], &[incoming, listed], Some(&draft));
+    assert!(!handled.has_low_stock_to_add());
+
+    let none = purchases::derive_purchase_from(
+        &[],
+        &[stock_item(3, "Butter", "Dairy", false)],
+        Some(&draft),
+    );
+    assert!(!none.has_low_stock_to_add());
+}
