@@ -5,6 +5,33 @@
 //! worth recording because it moves stock.
 
 use super::*;
+
+/// Short label for the collapsed supplier details section.
+///
+/// A directory entry is often half-known: the rep's name and phone arrive
+/// before the email or the address. The heading says which of those optional
+/// fields already have something in them, so folding the form away never hides
+/// a detail the operator thought they had saved.
+pub(super) fn supplier_detail_summary(draft: &state::SupplierDraft) -> String {
+    let filled: Vec<&str> = [
+        ("Contact", draft.contact_name.trim()),
+        ("Phone", draft.phone.trim()),
+        ("Email", draft.email.trim()),
+        ("Address", draft.address.trim()),
+        ("Notes", draft.notes.trim()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .map(|(label, _)| label)
+    .collect();
+
+    match filled.len() {
+        0 => "Nothing filled yet".to_owned(),
+        1 | 2 => filled.join(", "),
+        count => format!("{}, {} +{} more", filled[0], filled[1], count - 2),
+    }
+}
+
 /// The supplier form, drawn by the shell beside the product form.
 ///
 /// A modal for the same reason the product form is one: the directory is a list
@@ -40,44 +67,58 @@ pub fn supplier_editor_modal(ctx: &egui::Context, state: &mut State) {
         ui.add_space(SPACING.xs);
         components::search_field(ui, &mut draft.name, "Acme Wholesale");
 
-        // Contact and phone share a row because the modal has the width for it;
-        // they are the two things a shop knows first about a rep.
+        // Only the name stays on the first screen. The rest is a list a shop
+        // fills in as it learns it, so it folds away behind a heading that
+        // says what is already there.
         ui.add_space(SPACING.md);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.md;
-
-            ui.vertical(|ui| {
-                components::field_label(ui, "Contact (optional)");
+        let detail_heading = components::semibold(format!(
+            "Contact & delivery details · {}",
+            supplier_detail_summary(draft)
+        ))
+        .size(TYPE.body);
+        egui::CollapsingHeader::new(detail_heading)
+            .id_salt("pos_supplier_details")
+            .show(ui, |ui| {
                 ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.contact_name, "Amina", 210.0);
-            });
+                // Contact and phone share a row because the modal has the
+                // width for it; they are the two things a shop knows first
+                // about a rep.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACING.md;
 
-            ui.vertical(|ui| {
-                components::field_label(ui, "Phone (optional)");
+                    ui.vertical(|ui| {
+                        components::field_label(ui, "Contact (optional)");
+                        ui.add_space(SPACING.xs);
+                        text_field(ui, &mut draft.contact_name, "Amina", 210.0);
+                    });
+
+                    ui.vertical(|ui| {
+                        components::field_label(ui, "Phone (optional)");
+                        ui.add_space(SPACING.xs);
+                        text_field(ui, &mut draft.phone, "+256 700 000", 210.0);
+                    });
+                });
+
+                ui.add_space(SPACING.md);
+                components::field_label(ui, "Email (optional)");
                 ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.phone, "+256 700 000", 210.0);
+                text_field(ui, &mut draft.email, "orders@example.com", 360.0);
+
+                ui.add_space(SPACING.md);
+                components::field_label(ui, "Address (optional)");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.address, "Street, town", 360.0);
+
+                ui.add_space(SPACING.md);
+                components::field_label(ui, "Notes (optional)");
+                ui.add_space(SPACING.xs);
+                text_field(
+                    ui,
+                    &mut draft.notes,
+                    "Delivery days, terms, rep's name",
+                    360.0,
+                );
             });
-        });
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Email (optional)");
-        ui.add_space(SPACING.xs);
-        text_field(ui, &mut draft.email, "orders@example.com", 360.0);
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Address (optional)");
-        ui.add_space(SPACING.xs);
-        text_field(ui, &mut draft.address, "Street, town", 360.0);
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Notes (optional)");
-        ui.add_space(SPACING.xs);
-        text_field(
-            ui,
-            &mut draft.notes,
-            "Delivery days, terms, rep's name",
-            360.0,
-        );
 
         if let Some(error) = &draft.error {
             ui.add_space(SPACING.sm);
@@ -313,26 +354,34 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
                 .collect();
 
             ui.add_space(SPACING.xs);
-            egui::ScrollArea::vertical()
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for (id, name, category) in &matches {
-                        let label = if category.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{name} — {category}")
-                        };
-                        if ui
-                            .selectable_label(draft.product_id == Some(*id), label)
-                            .clicked()
-                        {
-                            draft.product_id = Some(*id);
+            components::card(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                product_picker_header(ui, "");
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for (id, name, category) in &matches {
+                            let detail = if category.is_empty() {
+                                "No category"
+                            } else {
+                                category.as_str()
+                            };
+                            if product_picker_row(
+                                ui,
+                                name,
+                                detail,
+                                None,
+                                "",
+                                draft.product_id == Some(*id),
+                            ) {
+                                draft.product_id = Some(*id);
+                            }
                         }
-                    }
-                });
-            if matches.is_empty() {
-                components::caption(ui, "No untracked product matches.");
-            }
+                    });
+                if matches.is_empty() {
+                    components::caption(ui, "No untracked product matches.");
+                }
+            });
         }
 
         ui.add_space(SPACING.md);

@@ -6,6 +6,138 @@
 //! and a copy per screen is how the cart and the payment screen drift apart.
 
 use super::*;
+
+/// The column headings a product picker shares with the Catalog table.
+///
+/// The action heading is optional because the Track stock picker has no row
+/// action — selection is enough there. Drawing both pickers from this helper
+/// keeps their rules and spacing identical to the product list.
+pub(super) fn product_picker_header(ui: &mut egui::Ui, action: &str) {
+    ui.horizontal(|ui| {
+        components::table_header(ui, "Product");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !action.is_empty() {
+                components::table_header(ui, action);
+            }
+        });
+    });
+    components::divider(ui);
+}
+
+/// One product candidate in a picker, drawn like a Catalog product row.
+///
+/// The pill, caption and hairline rule are the Catalog page's components, not a
+/// second version of them. The whole row remains the click target, with a small
+/// action at the edge for people who would rather tap a button than a name.
+/// Long names wear an ellipsis and offer the full name on hover instead of
+/// pushing the action off the row. Unlike a Catalog row, this one has no
+/// per-row frame: the picker sits inside the form's card already.
+pub(super) fn product_picker_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    detail: &str,
+    stock: Option<&StockItem>,
+    action: &str,
+    selected: bool,
+) -> bool {
+    // Match the Catalog row height. The action column is fixed so the pill and
+    // caption do not move when a row becomes selected or gains a second word.
+    const HEIGHT: f32 = 52.0;
+    const ACTIONS_WIDTH: f32 = 128.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), HEIGHT),
+        egui::Sense::click(),
+    );
+    let mut action_clicked = false;
+
+    if ui.is_rect_visible(rect) {
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+        );
+        row.set_min_height(HEIGHT);
+
+        let text_width = (rect.width() - ACTIONS_WIDTH).max(120.0);
+        row.allocate_ui_with_layout(
+            egui::vec2(text_width, HEIGHT),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.horizontal(|ui| {
+                    let (badge_text, color, hint) = match stock {
+                        Some(item) => {
+                            let (color, hint) = catalog::stock_badge(ui, item);
+                            (item.on_hand.to_string(), color, hint)
+                        }
+                        // A dash, not a zero: the product has no ledger, and a
+                        // count of zero would be a statement the shop never made.
+                        None => (
+                            "—".to_owned(),
+                            theme::current(ui.ctx()).text_muted,
+                            "Stock is not tracked for this product.".to_owned(),
+                        ),
+                    };
+                    // Reserve the pill's full width before truncating the name.
+                    // Otherwise a long name eats the pill's slot and the count
+                    // wraps onto the next line.
+                    let badge_width = ui.ctx().fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                badge_text.clone(),
+                                egui::FontId::new(TYPE.small, egui::FontFamily::Proportional),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x
+                    }) + 13.0;
+                    let name_width = (ui.available_width() - badge_width).max(80.0);
+                    let label = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(name_width, 0.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(components::semibold(name).size(TYPE.body))
+                                        .truncate(),
+                                )
+                            },
+                        )
+                        .inner;
+                    if is_cut(ui, name, name_width) {
+                        label.on_hover_text(name);
+                    }
+                    let pill = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(badge_width, 0.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| components::badge(ui, &badge_text, color),
+                        )
+                        .response;
+                    pill.on_hover_text(hint);
+                });
+                components::caption(ui, detail);
+            },
+        );
+
+        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_height(HEIGHT);
+            if selected {
+                components::caption(ui, "Selected");
+            }
+            if !action.is_empty() {
+                action_clicked = actions::quiet_compact(ui, action).clicked();
+            }
+        });
+    }
+
+    components::divider(ui);
+
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        || action_clicked
+}
+
 /// One label/amount row: the cart's totals and the payment screen's due.
 ///
 /// Shared with `checkout` on purpose — the amount the cashier reads on the cart
