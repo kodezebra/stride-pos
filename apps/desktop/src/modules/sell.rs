@@ -17,6 +17,7 @@ pub(super) fn categories_bar(ui: &mut egui::Ui, state: &mut State) {
     let palette = theme::current(ui.ctx());
     egui::ScrollArea::horizontal()
         .id_salt("sell_categories_bar")
+        .max_height(40.0)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = SPACING.xs;
@@ -75,10 +76,10 @@ pub(super) fn categories_bar(ui: &mut egui::Ui, state: &mut State) {
 pub(super) struct Sell;
 
 impl Module for Sell {
-    /// Sell has no vertical sidebar; categories live in a horizontal pill bar
+    /// Sell has no sidebar; categories live in a horizontal pill bar
     /// directly above the product catalog, maximizing grid real estate.
-    fn fixed_sidebar(&self) -> Option<f32> {
-        Some(0.0)
+    fn has_sidebar(&self) -> bool {
+        false
     }
 
     /// The till owns its own frame: grid on the left, cart pinned right. A page
@@ -537,14 +538,26 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             resp.context_menu(|ui| {
                 ui.label(components::semibold("Parked Carts").size(TYPE.small));
                 ui.separator();
+                let mut recall_idx = None;
+                let mut discard_idx = None;
                 for i in 0..parked_count {
                     let p = &state.parked_carts[i];
                     let text = format!("{} · {} ({} items)", p.id, p.created_at, p.lines.len());
-                    if ui.button(text).clicked() {
-                        state.recall_cart(i);
-                        ui.close();
-                        break;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(text).clicked() {
+                            recall_idx = Some(i);
+                        }
+                        if ui.button("×").on_hover_text("Discard parked cart").clicked() {
+                            discard_idx = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = recall_idx {
+                    state.recall_cart(i);
+                    ui.close();
+                } else if let Some(i) = discard_idx {
+                    state.discard_parked_cart(i);
+                    ui.close();
                 }
             });
             if resp.clicked() {

@@ -500,30 +500,32 @@ impl PosShell {
         }
 
         let module = &mut modules[active];
-        let spec = match module.fixed_sidebar() {
-            Some(width) => Sidebar::new(width).fixed(),
-            None => Sidebar::default(),
-        };
+        if module.has_sidebar() {
+            let spec = match module.fixed_sidebar() {
+                Some(width) => Sidebar::new(width).fixed(),
+                None => Sidebar::default(),
+            };
 
-        // `show_collapsible` flips this flag when the user drags the sidebar
-        // shut, so the state is committed after the frame rather than read once.
-        let mut open = state.sidebar_open(active);
-        // The sidebar is part of the map, not of the cart: while the tender owns
-        // the screen it dims with the grid. On Sell that stops a category tap
-        // from re-filtering the products behind the panel the cashier is reading.
-        regions::sidebar(ui, spec, &mut open, |ui| {
-            if tendering {
-                ui.set_opacity(0.35);
-                ui.disable();
-            }
-            // A long category list scrolls instead of running under the panel's
-            // edge; the sidebar owns the height it is given.
-            egui::ScrollArea::vertical()
-                .id_salt(("sidebar", active))
-                .auto_shrink([false, false])
-                .show(ui, |ui| module.sidebar(ui, state));
-        });
-        state.set_sidebar_open(active, open);
+            // `show_collapsible` flips this flag when the user drags the sidebar
+            // shut, so the state is committed after the frame rather than read once.
+            let mut open = state.sidebar_open(active);
+            // The sidebar is part of the map, not of the cart: while the tender owns
+            // the screen it dims with the grid. On Sell that stops a category tap
+            // from re-filtering the products behind the panel the cashier is reading.
+            regions::sidebar(ui, spec, &mut open, |ui| {
+                if tendering {
+                    ui.set_opacity(0.35);
+                    ui.disable();
+                }
+                // A long category list scrolls instead of running under the panel's
+                // edge; the sidebar owns the height it is given.
+                egui::ScrollArea::vertical()
+                    .id_salt(("sidebar", active))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| module.sidebar(ui, state));
+            });
+            state.set_sidebar_open(active, open);
+        }
 
         regions::workspace(ui, |ui| {
             // A view with more than one page shows its tabs where a page title
