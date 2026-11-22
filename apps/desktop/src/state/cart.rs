@@ -48,24 +48,22 @@ pub struct CartLine {
     /// How many base units one line unit holds: `1` for a loose unit, the pack
     /// size for a sealed pack. Stock leaves the shelf by this, and the line is
     /// merged by `(product_id, unit_factor)` so a pack and a loose unit never
-    /// collapse into one row.
+    /// merge.
     pub unit_factor: i64,
-    /// What that unit was called at the time, when it was anything but `unit`.
     pub unit_label: Option<String>,
-    /// The ladder this line was added under, ascending: the shelf price at one
-    /// unit, then the shop's breaks. A pack line has a single rung — its price
-    /// is already the bulk deal and a break on top would stack two discounts.
-    ///
-    /// Kept on the line, not looked up on every frame, for the same reason the
-    /// name and price are: editing the catalog mid-sale cannot silently reprice
-    /// something already in the basket.
     pub tiers: Vec<PriceTier>,
-    /// The break that set `unit_minor`, when one did. `None` on the shelf price.
     pub tier_qty: Option<i64>,
-    /// Whether this line is priced wholesale: the deepest rung, whatever the
-    /// count. Kept on the line so the steppers and the quantity keypad keep the
-    /// customer's terms without threading a mode through every call.
     pub wholesale: bool,
+}
+
+/// A parked basket held at the counter while another customer is served.
+#[derive(Clone, Debug)]
+pub struct ParkedCart {
+    pub id: String,
+    pub lines: Vec<CartLine>,
+    pub customer: Option<Customer>,
+    pub customer_mode: CustomerMode,
+    pub created_at: String,
 }
 
 impl CartLine {
@@ -616,6 +614,60 @@ impl State {
     /// operator aborted the payment, not the sale.
     pub fn close_payment(&mut self) {
         self.payment = None;
+    }
+
+    /// Hold the current basket so another customer can be served.
+    pub fn hold_cart(&mut self) {
+        if self.cart.is_empty() {
+            return;
+        }
+        self.close_payment();
+        let parked_num = self.parked_carts.len() + 1;
+        let parked = ParkedCart {
+            id: format!("#{parked_num}"),
+            lines: std::mem::take(&mut self.cart),
+            customer: self.customer.take(),
+            customer_mode: std::mem::replace(&mut self.customer_mode, CustomerMode::Retail),
+            created_at: format!("Held cart #{parked_num}"),
+        };
+        self.parked_carts.push(parked);
+        self.scan_focus = true;
+    }
+
+    /// Restore a parked basket back to the active counter.
+    ///
+    /// If there is an active cart, it is parked first so nothing is lost.
+    pub fn recall_cart(&mut self, index: usize) {
+        if index >= self.parked_carts.len() {
+            return;
+        }
+        self.close_payment();
+        let parked = self.parked_carts.remove(index);
+
+        // If the counter currently has items, park them instead of discarding.
+        if !self.cart.is_empty() {
+            let parked_num = self.parked_carts.len() + 1;
+            let current = ParkedCart {
+                id: format!("#{parked_num}"),
+                lines: std::mem::take(&mut self.cart),
+                customer: self.customer.take(),
+                customer_mode: std::mem::replace(&mut self.customer_mode, CustomerMode::Retail),
+                created_at: format!("Held cart #{parked_num}"),
+            };
+            self.parked_carts.push(current);
+        }
+
+        self.cart = parked.lines;
+        self.customer = parked.customer;
+        self.customer_mode = parked.customer_mode;
+        self.scan_focus = true;
+    }
+
+    /// Discard a parked cart without recalling it.
+    pub fn discard_parked_cart(&mut self, index: usize) {
+        if index < self.parked_carts.len() {
+            self.parked_carts.remove(index);
+        }
     }
 
     fn payment_error(&mut self, message: impl Into<String>) {

@@ -1901,3 +1901,39 @@ fn a_discounted_basket_reconciles_from_the_sell_screen_to_the_books() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn holding_and_recalling_a_cart() {
+    let (mut state, path) = state("holding-and-recalling", Currency::UGX);
+
+    // Empty cart cannot be held
+    state.hold_cart();
+    assert!(state.parked_carts.is_empty());
+
+    // Add item to active cart
+    state.cart.push(line("First customer item", 2, 500));
+    assert_eq!(state.cart.len(), 1);
+
+    // Hold the basket
+    state.hold_cart();
+    assert!(state.cart.is_empty());
+    assert_eq!(state.parked_carts.len(), 1);
+    assert_eq!(state.parked_carts[0].lines[0].name, "First customer item");
+
+    // Serve second customer
+    state.cart.push(line("Second customer item", 1, 1000));
+    assert_eq!(state.cart.len(), 1);
+
+    // Recall first customer's basket (this parks second customer's basket)
+    state.recall_cart(0);
+    assert_eq!(state.cart.len(), 1);
+    assert_eq!(state.cart[0].name, "First customer item");
+    assert_eq!(state.parked_carts.len(), 1);
+    assert_eq!(state.parked_carts[0].lines[0].name, "Second customer item");
+
+    // Discard parked cart
+    state.discard_parked_cart(0);
+    assert!(state.parked_carts.is_empty());
+
+    let _ = std::fs::remove_file(path);
+}

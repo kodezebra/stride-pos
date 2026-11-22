@@ -9,14 +9,76 @@ use super::*;
 // Sell
 // ---------------------------------------------------------------------------
 
+/// Horizontal scrolling category pill bar.
+///
+/// Kept on a single row above the product grid so categories are reachable with
+/// a single tap, while scrolling smoothly horizontally if there are many.
+pub(super) fn categories_bar(ui: &mut egui::Ui, state: &mut State) {
+    let palette = theme::current(ui.ctx());
+    egui::ScrollArea::horizontal()
+        .id_salt("sell_categories_bar")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.xs;
+            ui.horizontal(|ui| {
+                let all_active = state.category.is_none();
+                let mut all_text = egui::RichText::new("All").size(TYPE.small);
+                if all_active {
+                    all_text = all_text
+                        .family(theme::semibold())
+                        .color(egui::Color32::from(palette.accent_ink()));
+                } else {
+                    all_text = all_text.color(egui::Color32::from(palette.text_muted));
+                }
+                let all_btn = egui::Button::new(all_text)
+                    .min_size(egui::vec2(52.0, 32.0))
+                    .fill(if all_active {
+                        egui::Color32::from(palette.accent_soft)
+                    } else {
+                        egui::Color32::from(palette.surface)
+                    })
+                    .stroke(egui::Stroke::new(1.0, palette.border))
+                    .corner_radius(egui::CornerRadius::same(RADII.pill as u8));
+                if ui.add(all_btn).clicked() {
+                    state.category = None;
+                }
+
+                let categories = state.categories.clone();
+                for cat in &categories {
+                    let active = state.category.as_deref() == Some(cat.as_str());
+                    let mut text = egui::RichText::new(cat).size(TYPE.small);
+                    if active {
+                        text = text
+                            .family(theme::semibold())
+                            .color(egui::Color32::from(palette.accent_ink()));
+                    } else {
+                        text = text.color(egui::Color32::from(palette.text));
+                    }
+                    let btn = egui::Button::new(text)
+                        .min_size(egui::vec2(0.0, 32.0))
+                        .fill(if active {
+                            egui::Color32::from(palette.accent_soft)
+                        } else {
+                            egui::Color32::from(palette.surface)
+                        })
+                        .stroke(egui::Stroke::new(1.0, palette.border))
+                        .corner_radius(egui::CornerRadius::same(RADII.pill as u8));
+                    if ui.add(btn).clicked() {
+                        state.category = Some(cat.clone());
+                    }
+                }
+            });
+        });
+}
+
 /// The till: the catalog on the left, the cart on the right.
 pub(super) struct Sell;
 
 impl Module for Sell {
-    /// Fixed: a drag that starts as a missed category button and ends as a
-    /// 40 px sidebar is a mistake the cashier pays for.
+    /// Sell has no vertical sidebar; categories live in a horizontal pill bar
+    /// directly above the product catalog, maximizing grid real estate.
     fn fixed_sidebar(&self) -> Option<f32> {
-        Some(regions::size::SIDEBAR_MIN)
+        Some(0.0)
     }
 
     /// The till owns its own frame: grid on the left, cart pinned right. A page
@@ -25,9 +87,7 @@ impl Module for Sell {
         false
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
-        categories_sidebar(ui, state);
-    }
+    fn sidebar(&mut self, _ui: &mut egui::Ui, _state: &mut State) {}
 
     /// The scan field lives on the page bar, like every other list's search.
     ///
@@ -193,6 +253,10 @@ impl Sell {
             });
             return;
         }
+
+        // Horizontal Category Pill Bar: smooth single-row scrolling across all categories.
+        categories_bar(ui, state);
+        ui.add_space(SPACING.xs);
 
         let needle = state.sell_search.trim().to_lowercase();
         let visible = visible_products(&state.products, state.category.as_deref(), &needle);
@@ -454,6 +518,41 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
 
     ui.horizontal(|ui| {
         ui.label(components::semibold("Cart").size(TYPE.heading));
+
+        // Parked cart recall button if there are any parked baskets
+        let parked_count = state.parked_carts.len();
+        if parked_count > 0 && state.payment.is_none() {
+            let label = format!("Parked ({parked_count})");
+            let resp = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(&label)
+                        .size(TYPE.small)
+                        .family(theme::semibold())
+                        .color(egui::Color32::from(palette.accent_ink())),
+                )
+                .fill(egui::Color32::from(palette.accent_soft))
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(egui::CornerRadius::same(RADII.pill as u8)),
+            );
+            resp.context_menu(|ui| {
+                ui.label(components::semibold("Parked Carts").size(TYPE.small));
+                ui.separator();
+                for i in 0..parked_count {
+                    let p = &state.parked_carts[i];
+                    let text = format!("{} · {} ({} items)", p.id, p.created_at, p.lines.len());
+                    if ui.button(text).clicked() {
+                        state.recall_cart(i);
+                        ui.close();
+                        break;
+                    }
+                }
+            });
+            if resp.clicked() {
+                // Quick tap recalls the most recent parked cart
+                state.recall_cart(parked_count - 1);
+            }
+        }
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !state.cart.is_empty() && state.payment.is_none() {
                 if actions::quiet_compact(ui, "Clear")
@@ -461,6 +560,13 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                     .clicked()
                 {
                     state.clear_cart();
+                }
+                ui.add_space(SPACING.xs);
+                if actions::quiet_compact(ui, "Hold")
+                    .on_hover_text("Hold basket for later")
+                    .clicked()
+                {
+                    state.hold_cart();
                 }
                 ui.add_space(SPACING.xs);
             }
