@@ -461,6 +461,9 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         "Tracked products — type to find one by name or category.",
                     );
                 }
+                // Same row gap as the Sell product list, so the picker reads
+                // as the same kind of list rather than a stacked form.
+                ui.spacing_mut().item_spacing.y = SPACING.xs;
                 for (id, name, category) in matches.iter().take(PICKER_LIMIT) {
                     let already = derived.already_on_list(*id);
                     let detail = if category.is_empty() {

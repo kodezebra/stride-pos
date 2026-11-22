@@ -7,13 +7,13 @@
 
 use super::*;
 
-/// One product candidate in a picker, drawn like the list rows it feeds.
+/// One product candidate in a picker, drawn like the Sell product list.
 ///
 /// The whole row is the click target, with a small action at the edge for
 /// people who would rather tap a button than a name. Long names wear an
 /// ellipsis and offer the full name on hover instead of pushing the action off
-/// the row. Rows sit flush as one white table; selection shows in the label,
-/// not as a gray wash over the row.
+/// the row. The frame is the same white card, hairline border and hover tint
+/// as a Sell list row; selection still shows in the label, not as a gray wash.
 pub(super) fn product_picker_row(
     ui: &mut egui::Ui,
     name: &str,
@@ -22,20 +22,36 @@ pub(super) fn product_picker_row(
     selected: bool,
 ) -> bool {
     let palette = theme::current(ui.ctx());
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+    // A picker row carries a second caption line, so it needs a little more
+    // height than Sell's one-line row. The frame and spacing are the same.
+    const HEIGHT: f32 = 48.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), HEIGHT),
+        egui::Sense::click(),
+    );
     let mut action_clicked = false;
 
     if ui.is_rect_visible(rect) {
-        // Every row is the same white surface, with no rule and no gap between
-        // them. Hover keeps the pointer feedback; selection keeps its label.
-        ui.painter().rect_filled(
+        let hovered = ui.rect_contains_pointer(rect);
+        let fill = if hovered {
+            palette.surface_alt
+        } else {
+            palette.surface
+        };
+        let border = if hovered {
+            palette.border_strong
+        } else {
+            palette.border
+        };
+        ui.painter().rect(
             rect,
-            egui::CornerRadius::ZERO,
-            egui::Color32::from(palette.surface),
+            egui::CornerRadius::same(RADII.sm as u8),
+            fill,
+            egui::Stroke::new(1.0_f32, border),
+            egui::StrokeKind::Inside,
         );
 
-        let inner = rect.shrink2(egui::vec2(SPACING.sm, SPACING.xs));
+        let inner = rect.shrink2(egui::vec2(SPACING.md, SPACING.xs));
         let mut row = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner)
@@ -61,7 +77,10 @@ pub(super) fn product_picker_row(
         });
     }
 
-    response.clicked() || action_clicked
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        || action_clicked
 }
 
 /// One label/amount row: the cart's totals and the payment screen's due.

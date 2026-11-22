@@ -357,6 +357,8 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .show(ui, |ui| {
+                    // Same row gap as the Sell product list.
+                    ui.spacing_mut().item_spacing.y = SPACING.xs;
                     for (id, name, category) in &matches {
                         let detail = if category.is_empty() {
                             "No category"
