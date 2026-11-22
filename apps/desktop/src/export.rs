@@ -176,7 +176,17 @@ pub fn template_csv(currency: Currency) -> String {
 pub fn sales_csv(rows: &[ExportSale], currency: Currency) -> String {
     let mut text = csv_row(
         [
-            "sale_id", "receipt", "when", "cashier", "total", "rounding", "paid", "method",
+            "sale_id",
+            "receipt",
+            "when",
+            "cashier",
+            "customer",
+            "total",
+            "discount",
+            "price_mode",
+            "rounding",
+            "paid",
+            "method",
         ]
         .map(str::to_owned),
     );
@@ -186,7 +196,10 @@ pub fn sales_csv(rows: &[ExportSale], currency: Currency) -> String {
             sale.receipt_no.clone().unwrap_or_default(),
             sale.created_at.clone(),
             sale.cashier.clone().unwrap_or_default(),
+            sale.customer.clone().unwrap_or_default(),
             decimal(sale.total_minor, currency),
+            decimal(sale.discount_minor, currency),
+            sale.price_mode.clone(),
             decimal(sale.rounding_minor, currency),
             decimal(sale.paid_minor, currency),
             sale.method.clone(),
@@ -287,7 +300,7 @@ mod tests {
     fn an_empty_range_writes_a_sales_header_and_nothing_else() {
         assert_eq!(
             sales_csv(&[], kes()),
-            "sale_id,receipt,when,cashier,total,rounding,paid,method\n"
+            "sale_id,receipt,when,cashier,customer,total,discount,price_mode,rounding,paid,method\n"
         );
     }
 
@@ -298,7 +311,10 @@ mod tests {
             receipt_no: Some("18CA-20261101-003".to_owned()),
             created_at: "2026-11-01 18:42:12".to_owned(),
             cashier: None,
+            customer: Some("Mama Njeri".to_owned()),
             total_minor: 340,
+            discount_minor: 17,
+            price_mode: "retail".to_owned(),
             rounding_minor: 60,
             paid_minor: 400,
             method: "cash".to_owned(),
@@ -306,8 +322,8 @@ mod tests {
 
         assert_eq!(
             sales_csv(&rows, ugx()),
-            "sale_id,receipt,when,cashier,total,rounding,paid,method\n\
-             7,18CA-20261101-003,2026-11-01 18:42:12,,340,60,400,cash\n"
+            "sale_id,receipt,when,cashier,customer,total,discount,price_mode,rounding,paid,method\n\
+             7,18CA-20261101-003,2026-11-01 18:42:12,,Mama Njeri,340,17,retail,60,400,cash\n"
         );
     }
 

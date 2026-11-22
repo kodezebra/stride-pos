@@ -684,4 +684,88 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    // The shop's regular customers, and the rate they buy at.
+    //
+    // A customer is a pricing term, not a loyalty record: the till needs a name
+    // to show the cashier, and a rate to take off the basket. The rate is basis
+    // points rather than percent because five percent is 500 and two and a half
+    // is 250; an integer percent would round the shop's own terms.
+    //
+    // `archived` mirrors products: a customer who stops coming is hidden, not
+    // deleted, because sales written under them still point here. The partial
+    // unique index keeps two live customers from sharing a name while letting
+    // the archived one keep it.
+    //
+    // The table is catalog, not a till's own list: it syncs to replicas with
+    // products, and the triggers below keep the catalog version honest.
+    Migration {
+        version: 19,
+        name: "customers",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS customers (
+                id          INTEGER PRIMARY KEY,
+                name        TEXT    NOT NULL CHECK (length(trim(name)) > 0),
+                phone       TEXT,
+                discount_bp INTEGER NOT NULL DEFAULT 0
+                    CHECK (discount_bp >= 0 AND discount_bp <= 10000),
+                archived    INTEGER NOT NULL DEFAULT 0
+                    CHECK (archived IN (0, 1)),
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS customers_name
+                ON customers (name COLLATE NOCASE) WHERE archived = 0;
+            CREATE INDEX IF NOT EXISTS customers_archived ON customers (archived);
+
+            CREATE TRIGGER IF NOT EXISTS customers_catalog_version_insert
+            AFTER INSERT ON customers
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS customers_catalog_version_update
+            AFTER UPDATE ON customers
+            BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'catalog_version';
+            END;
+        "#,
+    },
+    // A basket-level discount, recorded as money and as the rate that made it.
+    //
+    // `total_minor` stops being the exact sum of the lines and becomes what the
+    // customer was charged: the line sum less `discount_minor`. The lines keep
+    // their gross totals, so item revenue in a report stays the price on the
+    // shelf and the discount is a separate figure the books subtract once.
+    // Storing both halves is what lets a receipt reconcile and a peer verify.
+    //
+    // `discount_bp` is the rate as applied, kept for reporting and for the
+    // receipt's "Discount (5%)"; it is zero on every sale written before this
+    // migration, and on a wholesale sale where the customer's rate is
+    // suppressed. `price_mode` says which of those two a sale was, because a
+    // wholesale basket is not a retail basket with no discount.
+    //
+    // `customer_name` is a snapshot, like a line's name: a receipt reprinted
+    // after a rename must still say who was standing there. `customer_id` is
+    // only a link for reporting, and it is `SET NULL` so removing a customer
+    // never rewrites a sale.
+    Migration {
+        version: 20,
+        name: "sale_discount",
+        sql: r#"
+            ALTER TABLE sales ADD COLUMN discount_minor INTEGER NOT NULL DEFAULT 0
+                CHECK (discount_minor >= 0);
+            ALTER TABLE sales ADD COLUMN discount_bp INTEGER NOT NULL DEFAULT 0
+                CHECK (discount_bp >= 0 AND discount_bp <= 10000);
+            ALTER TABLE sales ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'retail'
+                CHECK (price_mode IN ('retail', 'wholesale'));
+            ALTER TABLE sales ADD COLUMN customer_id INTEGER
+                REFERENCES customers (id) ON DELETE SET NULL;
+            ALTER TABLE sales ADD COLUMN customer_name TEXT;
+
+            CREATE INDEX IF NOT EXISTS sales_customer
+                ON sales (customer_id) WHERE customer_id IS NOT NULL;
+        "#,
+    },
 ];

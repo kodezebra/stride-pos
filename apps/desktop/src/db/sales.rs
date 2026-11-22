@@ -30,15 +30,11 @@ use super::*;
 pub fn record_sale(
     store: &storage::Store,
     lines: &[SaleLine],
-    rounding_minor: i64,
-    tax_minor: i64,
-    tendered_minor: i64,
-    user_id: Option<&str>,
-    shift_uid: Option<&str>,
+    terms: &SaleTerms<'_>,
 ) -> anyhow::Result<RecordedSale> {
     anyhow::ensure!(!lines.is_empty(), "a sale needs at least one line");
 
-    let total_minor = lines.iter().try_fold(0_i64, |sum, line| {
+    let gross_minor = lines.iter().try_fold(0_i64, |sum, line| {
         anyhow::ensure!(line.qty > 0, "{} has no quantity", line.name);
         anyhow::ensure!(line.unit_minor >= 0, "{} has a negative price", line.name);
         anyhow::ensure!(
@@ -58,17 +54,31 @@ pub fn record_sale(
             .context("the sale total does not fit in 64 bits")
     })?;
 
-    anyhow::ensure!(tax_minor <= total_minor, "tax cannot exceed the sale total");
+    anyhow::ensure!(terms.discount_minor >= 0, "a discount cannot be negative");
+    anyhow::ensure!(
+        terms.discount_minor <= gross_minor,
+        "a discount cannot exceed the basket"
+    );
+    anyhow::ensure!(
+        (0..=10_000).contains(&terms.discount_bp),
+        "a discount rate cannot exceed the whole basket"
+    );
+    let total_minor = gross_minor - terms.discount_minor;
+
+    anyhow::ensure!(
+        terms.tax_minor <= total_minor,
+        "tax cannot exceed the sale total"
+    );
 
     let paid_minor = total_minor
-        .checked_add(rounding_minor)
+        .checked_add(terms.rounding_minor)
         .context("the amount due does not fit in 64 bits")?;
     anyhow::ensure!(paid_minor >= 0, "the amount due cannot be negative");
     anyhow::ensure!(
-        tendered_minor >= paid_minor,
+        terms.tendered_minor >= paid_minor,
         "cash received is less than the amount due"
     );
-    let change_minor = tendered_minor - paid_minor;
+    let change_minor = terms.tendered_minor - paid_minor;
 
     // Read the install identity before opening the transaction: on an upgraded
     // database this may write `meta`, and the transaction's first write must be
@@ -88,18 +98,24 @@ pub fn record_sale(
 
     transaction.execute(
         "INSERT INTO sales
-             (total_minor, rounding_minor, tax_minor, user_id, uid, origin_device,
+             (total_minor, rounding_minor, tax_minor, discount_minor, discount_bp,
+              price_mode, customer_id, customer_name, user_id, uid, origin_device,
               change_seq, shift_uid, receipt_no)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         (
             total_minor,
-            rounding_minor,
-            tax_minor,
-            user_id,
+            terms.rounding_minor,
+            terms.tax_minor,
+            terms.discount_minor,
+            terms.discount_bp,
+            terms.price_mode,
+            terms.customer_id,
+            terms.customer_name,
+            terms.user_id,
             sale_uid.as_str(),
             origin_device.as_str(),
             change_seq,
-            shift_uid,
+            terms.shift_uid,
             receipt_no.as_str(),
         ),
     )?;
@@ -169,7 +185,7 @@ pub fn record_sale(
                     "INSERT INTO stock_movements
                          (product_id, delta, kind, sale_id, user_id, uid)
                      VALUES (?1, ?2, 'sale', ?3, ?4, ?5)",
-                    (product_id, -units, id, user_id, movement_uid.as_str()),
+                    (product_id, -units, id, terms.user_id, movement_uid.as_str()),
                 )?;
             }
         }
@@ -183,7 +199,7 @@ pub fn record_sale(
         (
             id,
             paid_minor,
-            tendered_minor,
+            terms.tendered_minor,
             change_minor,
             payment_uid.as_str(),
         ),
@@ -195,9 +211,13 @@ pub fn record_sale(
         id,
         uid: sale_uid,
         total_minor,
-        rounding_minor,
-        tax_minor,
-        tendered_minor,
+        rounding_minor: terms.rounding_minor,
+        tax_minor: terms.tax_minor,
+        discount_minor: terms.discount_minor,
+        discount_bp: terms.discount_bp,
+        price_mode: terms.price_mode.to_owned(),
+        customer_name: terms.customer_name.map(str::to_owned),
+        tendered_minor: terms.tendered_minor,
         change_minor,
     })
 }
@@ -478,10 +498,20 @@ pub(super) fn totals_in(store: &storage::Store, clause: &str, user: Option<&str>
 /// cost would be worse than admitting the shop has not recorded one.
 pub fn margin(store: &storage::Store, range: usize, user: Option<&str>) -> Margin {
     let clause = window_clause(range, "s.created_at");
+    // The discount belongs to the sale, not to any one line, so it is spread
+    // across the sale's lines in proportion to their gross. Subtracting the
+    // whole discount on every joined line would count it once per item; not
+    // subtracting it at all would report profit the shop did not keep. The
+    // correlated sum is indexed by `sale_id` and only touches sales in the
+    // range.
     let sql = format!(
         "SELECT
-             COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL
-                               THEN l.qty * l.unit_minor ELSE 0 END), 0),
+             COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL THEN
+                 l.qty * l.unit_minor
+                 - s.discount_minor * (l.qty * l.unit_minor)
+                   / NULLIF((SELECT SUM(l2.qty * l2.unit_minor)
+                             FROM sale_lines l2 WHERE l2.sale_id = s.id), 0)
+             ELSE 0 END), 0),
              (COALESCE(SUM(CASE WHEN l.cost_milli IS NOT NULL
                                 THEN l.qty * l.unit_factor * l.cost_milli ELSE 0 END), 0)
               + 500) / 1000,
@@ -491,9 +521,19 @@ pub fn margin(store: &storage::Store, range: usize, user: Option<&str>) -> Margi
          WHERE {clause}"
     );
 
+    let discount_minor = store
+        .conn()
+        .query_row(
+            &format!("SELECT COALESCE(SUM(s.discount_minor), 0) FROM sales s WHERE {clause}"),
+            [user],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+
     match store.conn().query_row(&sql, [user], |row| {
         Ok(Margin {
             revenue_minor: row.get(0)?,
+            discount_minor,
             cost_minor: row.get(1)?,
             costed_lines: row.get(2)?,
             total_lines: row.get(3)?,
@@ -605,7 +645,8 @@ pub fn export_sales(
     let sql = format!(
         "SELECT s.id, strftime('%Y-%m-%d %H:%M:%S', s.created_at, 'localtime'), u.name,
                 s.total_minor, s.rounding_minor, s.total_minor + s.rounding_minor,
-                COALESCE(GROUP_CONCAT(DISTINCT p.method), ''), s.receipt_no
+                COALESCE(GROUP_CONCAT(DISTINCT p.method), ''), s.receipt_no,
+                s.discount_minor, s.price_mode, s.customer_name
          FROM sales s
          LEFT JOIN users u ON u.id = s.user_id
          LEFT JOIN payments p ON p.sale_id = s.id
@@ -625,6 +666,9 @@ pub fn export_sales(
                 created_at: row.get(1)?,
                 cashier: row.get(2)?,
                 total_minor: row.get(3)?,
+                discount_minor: row.get(8)?,
+                price_mode: row.get(9)?,
+                customer: row.get(10)?,
                 rounding_minor: row.get(4)?,
                 paid_minor: row.get(5)?,
                 method: row.get(6)?,
@@ -658,7 +702,8 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
 
     let head = match conn.query_row(
         "SELECT s.total_minor, s.rounding_minor, s.tax_minor, \
-         strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name, s.receipt_no
+         strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name, s.receipt_no, \
+         s.discount_minor, s.discount_bp, s.price_mode, s.customer_name
          FROM sales s LEFT JOIN users u ON u.id = s.user_id
          WHERE s.id = ?1",
         [id],
@@ -670,6 +715,10 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         },
     ) {
@@ -743,6 +792,10 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
         cashier: head.4,
         created_at: head.3,
         total_minor: head.0,
+        discount_minor: head.6,
+        discount_bp: head.7,
+        price_mode: head.8,
+        customer_name: head.9,
         rounding_minor: head.1,
         tax_minor: head.2,
         paid_minor: head.0 + head.1,

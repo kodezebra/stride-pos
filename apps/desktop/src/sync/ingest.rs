@@ -150,8 +150,20 @@ fn validate(sale: &SaleDto) -> Result<HashMap<i64, i64>> {
         }
     }
     anyhow::ensure!(
-        sale.total_minor == line_total,
-        "the total does not match the lines"
+        sale.discount_minor >= 0 && sale.discount_minor <= line_total,
+        "a discount must be between zero and the basket"
+    );
+    anyhow::ensure!(
+        (0..=10_000).contains(&sale.discount_bp),
+        "a discount rate cannot exceed the whole basket"
+    );
+    anyhow::ensure!(
+        sale.price_mode == "retail" || sale.price_mode == "wholesale",
+        "a sale is either retail or wholesale"
+    );
+    anyhow::ensure!(
+        sale.total_minor == line_total - sale.discount_minor,
+        "the total does not match the lines less the discount"
     );
 
     let due = sale
@@ -256,12 +268,34 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
         _ => None,
     };
 
+    // A customer this till has never seen keeps the name on the receipt and
+    // loses only the link, exactly as an unknown product keeps the line and
+    // loses the reference. The name is what the slip and the export show.
+    let customer_id = match sale.customer_id {
+        Some(id) if id > 0 => {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM customers WHERE id = ?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            exists.then_some(id)
+        }
+        _ => None,
+    };
+    let customer_name = sale
+        .customer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+
     let inserted = transaction.execute(
         "INSERT INTO sales
              (uid, origin_device, is_offline, clock_skew, created_at,
               received_at, change_seq, user_id, total_minor, rounding_minor,
-              tax_minor, receipt_no)
-         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11)
+              tax_minor, receipt_no, discount_minor, discount_bp, price_mode,
+              customer_id, customer_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11,
+                 ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT DO NOTHING",
         rusqlite::params![
             sale.uid.trim(),
@@ -277,6 +311,11 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
             // The origin's number, kept as it was printed. A peer too old to
             // send one leaves it null and the slip falls back to the row id.
             sale.receipt_no.as_deref(),
+            sale.discount_minor,
+            sale.discount_bp,
+            sale.price_mode.trim(),
+            customer_id,
+            customer_name,
         ],
     )?;
 
