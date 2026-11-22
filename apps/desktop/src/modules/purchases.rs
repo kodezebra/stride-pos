@@ -141,6 +141,106 @@ pub(super) fn visible_purchases(purchases: &[Purchase], needle: &str, filter: us
         .collect()
 }
 
+/// The read-only lists a purchase form is built from, assembled once per frame.
+///
+/// The supplier dropdown, the product picker and the expiry hints all ask the
+/// same questions of `state`. Doing that work inside the draw closure made a
+/// click add a line from a list assembled a few lines earlier in the same
+/// frame; this snapshot keeps every part of the form reading one answer.
+pub(super) struct PurchaseDerived {
+    suppliers: Vec<(String, String)>,
+    saved_supplier: Option<String>,
+    candidates: Vec<(i64, String, String)>,
+    perishable: Vec<i64>,
+    already: Vec<i64>,
+}
+
+impl PurchaseDerived {
+    pub(super) fn suppliers(&self) -> &[(String, String)] {
+        &self.suppliers
+    }
+
+    pub(super) fn saved_supplier(&self) -> Option<&str> {
+        self.saved_supplier.as_deref()
+    }
+
+    pub(super) fn candidates(&self) -> &[(i64, String, String)] {
+        &self.candidates
+    }
+
+    pub(super) fn perishable(&self) -> &[i64] {
+        &self.perishable
+    }
+
+    /// The picker matches follow the live search box, so they are filtered when
+    /// the box is drawn rather than when the snapshot is taken. The candidate
+    /// list itself is already fixed for the frame.
+    pub(super) fn matches(&self, search: &str) -> Vec<(i64, String, String)> {
+        let needle = search.trim().to_lowercase();
+        self.candidates
+            .iter()
+            .filter(|(_, name, category)| {
+                needle.is_empty()
+                    || name.to_lowercase().contains(&needle)
+                    || category.to_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn already_on_list(&self, product_id: i64) -> bool {
+        self.already.contains(&product_id)
+    }
+}
+
+pub(super) fn derive_purchase(state: &State) -> PurchaseDerived {
+    derive_purchase_from(
+        &state.suppliers,
+        &state.stock,
+        state.purchase_editor.as_ref(),
+    )
+}
+
+pub(super) fn derive_purchase_from(
+    suppliers: &[Supplier],
+    stock: &[StockItem],
+    draft: Option<&state::PurchaseDraft>,
+) -> PurchaseDerived {
+    let active = suppliers
+        .iter()
+        .filter(|supplier| !supplier.archived)
+        .map(|supplier| (supplier.id.clone(), supplier.name.clone()))
+        .collect();
+    // An old list can point at a supplier that has since been archived. Keep
+    // showing that name rather than silently rewriting the trip to "none".
+    let saved_supplier = draft
+        .and_then(|draft| draft.supplier_id.as_deref())
+        .and_then(|id| suppliers.iter().find(|supplier| supplier.id == id))
+        .map(|supplier| supplier.name.clone());
+    let candidates = stock
+        .iter()
+        .map(|item| (item.product_id, item.name.clone(), item.category.clone()))
+        .collect();
+    // Which lines ask for a date. A product that keeps is not dated; a
+    // perishable delivery must be, and the field says so.
+    let perishable = stock
+        .iter()
+        .filter(|item| item.perishable)
+        .map(|item| item.product_id)
+        .collect();
+    let already = draft
+        .map(|draft| draft.lines.iter().map(|line| line.product_id).collect())
+        .unwrap_or_default();
+
+    PurchaseDerived {
+        suppliers: active,
+        saved_supplier,
+        candidates,
+        perishable,
+        already,
+    }
+}
+
 /// Plan a trip: choose a supplier if there is one, list what to buy, and put
 /// an expected price beside each line so the total is known before leaving.
 ///
@@ -149,38 +249,10 @@ pub(super) fn visible_purchases(purchases: &[Purchase], needle: &str, filter: us
 /// learn at the market with one hand full.
 pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
     let currency = state.currency;
-    let suppliers: Vec<(String, String)> = state
-        .suppliers
-        .iter()
-        .filter(|supplier| !supplier.archived)
-        .map(|supplier| (supplier.id.clone(), supplier.name.clone()))
-        .collect();
-    // An old list can point at a supplier that has since been archived. Keep
-    // showing that name rather than silently rewriting the trip to "none".
-    let saved_supplier = state
-        .purchase_editor
-        .as_ref()
-        .and_then(|draft| draft.supplier_id.clone())
-        .and_then(|id| {
-            state
-                .suppliers
-                .iter()
-                .find(|supplier| supplier.id == id)
-                .map(|supplier| supplier.name.clone())
-        });
-    let candidates: Vec<(i64, String, String)> = state
-        .stock
-        .iter()
-        .map(|item| (item.product_id, item.name.clone(), item.category.clone()))
-        .collect();
-    // Which lines ask for a date. A product that keeps is not dated; a
-    // perishable delivery must be, and the field says so.
-    let perishable: Vec<i64> = state
-        .stock
-        .iter()
-        .filter(|item| item.perishable)
-        .map(|item| item.product_id)
-        .collect();
+    // The lists a trip is built from do not change while its form is open.
+    // Assemble them once, before the draft is borrowed mutably; the picker's
+    // matches still follow the live search box, but read this one snapshot.
+    let derived = derive_purchase(state);
 
     let Some(draft) = state.purchase_editor.as_mut() else {
         return;
@@ -199,9 +271,7 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                 ui.vertical(|ui| {
                     components::field_label(ui, "Supplier (optional)");
                     ui.add_space(SPACING.xs);
-                    let selected = saved_supplier
-                        .clone()
-                        .unwrap_or_else(|| "No supplier".to_owned());
+                    let selected = derived.saved_supplier().unwrap_or("No supplier").to_owned();
                     egui::ComboBox::from_id_salt("pos_purchase_supplier")
                         .width(240.0)
                         .selected_text(selected)
@@ -213,7 +283,7 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                                 draft.supplier_id = None;
                                 ui.close();
                             }
-                            for (id, name) in &suppliers {
+                            for (id, name) in derived.suppliers() {
                                 let selected = draft.supplier_id.as_deref() == Some(id.as_str());
                                 if ui.selectable_label(selected, name).clicked() {
                                     draft.supplier_id = Some(id.clone());
@@ -282,7 +352,7 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                     // until the goods are in hand. Receiving asks again for a
                     // perishable product, and a date typed there wins. Two
                     // printed dates on one delivery are two lines.
-                    if perishable.contains(&line.product_id) {
+                    if derived.perishable().contains(&line.product_id) {
                         ui.horizontal(|ui| {
                             components::caption(ui, "Expiry");
                             text_field(ui, &mut line.expires_on, "YYYY-MM-DD", 130.0)
@@ -337,23 +407,13 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
             ui.add_space(SPACING.xs);
             components::search_field(ui, &mut draft.search, "Name or category");
 
-            let needle = draft.search.trim().to_lowercase();
-            // A product already on the list stays findable: a delivery that
-            // arrives with two printed dates is two lines, and the plan needs
-            // a way to add the second one.
-            let already: Vec<i64> = draft.lines.iter().map(|line| line.product_id).collect();
-            let matches: Vec<(i64, String, String)> = candidates
-                .iter()
-                .filter(|(_, name, category)| {
-                    needle.is_empty()
-                        || name.to_lowercase().contains(&needle)
-                        || category.to_lowercase().contains(&needle)
-                })
-                .cloned()
-                .collect();
+            let needle = draft.search.trim();
+            // Matching follows the live search box, so it happens here rather
+            // than in the frame snapshot. Both read the same candidate list.
+            let matches = derived.matches(&draft.search);
 
             ui.add_space(SPACING.xs);
-            if candidates.is_empty() {
+            if derived.candidates().is_empty() {
                 components::caption(
                     ui,
                     "No tracked products yet. Track stock first, then plan a purchase.",
@@ -372,7 +432,7 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                     } else {
                         format!("{name} — {category}")
                     };
-                    let label = if already.contains(id) {
+                    let label = if derived.already_on_list(*id) {
                         format!("{label} · another line")
                     } else {
                         label

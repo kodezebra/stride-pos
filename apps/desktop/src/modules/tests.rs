@@ -527,3 +527,140 @@ fn product_form_summaries_describe_hidden_details() {
         "Dates every delivery · 30 days"
     );
 }
+
+fn supplier_draft(
+    contact: &str,
+    phone: &str,
+    email: &str,
+    address: &str,
+    notes: &str,
+) -> state::SupplierDraft {
+    state::SupplierDraft {
+        id: None,
+        name: "Acme".to_owned(),
+        contact_name: contact.to_owned(),
+        phone: phone.to_owned(),
+        email: email.to_owned(),
+        address: address.to_owned(),
+        notes: notes.to_owned(),
+        error: None,
+    }
+}
+
+#[test]
+fn supplier_detail_summary_counts_only_filled_fields() {
+    let blank = supplier_draft("", "", "", "", "");
+    assert_eq!(
+        suppliers::supplier_detail_summary(&blank),
+        "Nothing filled yet"
+    );
+
+    let one = supplier_draft("Amina", "", "", "", "");
+    assert_eq!(suppliers::supplier_detail_summary(&one), "Contact");
+
+    let two = supplier_draft("Amina", "+256 700", "", "", "");
+    assert_eq!(suppliers::supplier_detail_summary(&two), "Contact, Phone");
+
+    let three = supplier_draft("Amina", "+256 700", "orders@example.com", "", "");
+    assert_eq!(
+        suppliers::supplier_detail_summary(&three),
+        "Contact, Phone +1 more"
+    );
+}
+
+fn supplier_with_archive(id: &str, name: &str, archived: bool) -> Supplier {
+    Supplier {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        contact_name: None,
+        phone: None,
+        email: None,
+        address: None,
+        notes: None,
+        archived,
+    }
+}
+
+fn stock_item(id: i64, name: &str, category: &str, perishable: bool) -> StockItem {
+    StockItem {
+        product_id: id,
+        name: name.to_owned(),
+        category: category.to_owned(),
+        on_hand: 10,
+        low_stock: 5,
+        cost_milli: None,
+        pack_size: 1,
+        unit_label: "unit".to_owned(),
+        target_stock: None,
+        incoming: 0,
+        perishable,
+        shelf_life_days: None,
+    }
+}
+
+fn purchase_draft(
+    supplier_id: Option<&str>,
+    lines: Vec<(i64, &str)>,
+    search: &str,
+) -> state::PurchaseDraft {
+    state::PurchaseDraft {
+        id: None,
+        supplier_id: supplier_id.map(str::to_owned),
+        note: String::new(),
+        lines: lines
+            .into_iter()
+            .map(|(product_id, name)| state::PurchaseLineDraft {
+                product_id,
+                name: name.to_owned(),
+                qty: "1".to_owned(),
+                cost: String::new(),
+                pack_size: "1".to_owned(),
+                expires_on: String::new(),
+            })
+            .collect(),
+        search: search.to_owned(),
+        error: None,
+        confirm_delete: false,
+        confirm_receive: false,
+    }
+}
+
+#[test]
+fn purchase_derive_keeps_archived_supplier_name_for_old_list() {
+    let suppliers = vec![
+        supplier_with_archive("acme", "Acme", true),
+        supplier_with_archive("bulk", "Bulk Traders", false),
+    ];
+    let draft = purchase_draft(Some("acme"), vec![], "");
+
+    let derived = purchases::derive_purchase_from(&suppliers, &[], Some(&draft));
+
+    assert_eq!(derived.saved_supplier(), Some("Acme"));
+    assert_eq!(
+        derived.suppliers(),
+        &[("bulk".to_owned(), "Bulk Traders".to_owned())]
+    );
+}
+
+#[test]
+fn purchase_derive_filters_candidates_from_one_snapshot() {
+    let stock = vec![
+        stock_item(1, "Milk", "Dairy", true),
+        stock_item(2, "Bread", "Bakery", false),
+        stock_item(3, "Butter", "Dairy", false),
+    ];
+    let draft = purchase_draft(None, vec![(1, "Milk")], "dai");
+
+    let derived = purchases::derive_purchase_from(&[], &stock, Some(&draft));
+
+    assert_eq!(derived.perishable(), &[1]);
+    assert_eq!(
+        derived.matches("dai"),
+        vec![
+            (1, "Milk".to_owned(), "Dairy".to_owned()),
+            (3, "Butter".to_owned(), "Dairy".to_owned()),
+        ]
+    );
+    assert!(derived.already_on_list(1));
+    assert!(!derived.already_on_list(3));
+}
