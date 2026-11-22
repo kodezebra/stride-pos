@@ -5,9 +5,111 @@
 //! widget. The cart is the one screen that mutates a sale in progress.
 
 use super::*;
+use std::collections::{HashMap, hash_map::Entry};
+
+use crate::state::CartSummary;
+
 // ---------------------------------------------------------------------------
 // Sell
 // ---------------------------------------------------------------------------
+
+/// Sell's read-only view of the catalog, assembled once per frame.
+///
+/// Both catalog views used to filter independently; they now share this list.
+/// The hover hint for each match is derived here too, off the draw path, so a
+/// click that adds to the cart never has to borrow the products twice.
+pub(super) struct SellDerived {
+    /// Indices into `state.products`, in catalog order.
+    visible: Vec<usize>,
+    /// Hover text for each visible product, in the same order as `visible`.
+    details: Vec<Option<String>>,
+}
+
+impl SellDerived {
+    pub(super) fn visible(&self) -> &[usize] {
+        &self.visible
+    }
+
+    pub(super) fn detail(&self, slot: usize) -> Option<&str> {
+        self.details.get(slot).and_then(Option::as_deref)
+    }
+}
+
+pub(super) fn derive(state: &State) -> SellDerived {
+    let needle = state.sell_search.trim().to_lowercase();
+    let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+    let expiry = nearest_expiry(&state.expiring);
+    let details = visible
+        .iter()
+        .map(|&index| product_detail(state, &state.products[index], &expiry))
+        .collect();
+    SellDerived { visible, details }
+}
+
+/// The closest dated shelf per product, and how much is on it.
+///
+/// Undated stock is deliberately absent: "expires in 3 days" must never be
+/// inferred from a bucket with no date. Buckets on the same day are summed.
+fn nearest_expiry(buckets: &[ExpiryBucket]) -> HashMap<i64, (i64, i64)> {
+    let mut nearest = HashMap::new();
+    for bucket in buckets {
+        let Some(days) = bucket.days_left else {
+            continue;
+        };
+        match nearest.entry(bucket.product_id) {
+            Entry::Vacant(entry) => {
+                entry.insert((days, bucket.on_hand));
+            }
+            Entry::Occupied(mut entry) if days < entry.get().0 => {
+                entry.insert((days, bucket.on_hand));
+            }
+            Entry::Occupied(mut entry) if days == entry.get().0 => {
+                entry.get_mut().1 += bucket.on_hand;
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    nearest
+}
+
+/// The extra facts a cashier may need before choosing a tile: pack price,
+/// quantity breaks, and the nearest expiry. Kept as hover text so the grid
+/// itself stays at a glance.
+fn product_detail(
+    state: &State,
+    product: &Product,
+    expiry: &HashMap<i64, (i64, i64)>,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    if product.pack_size > 1
+        && let Some(price) = product.pack_price_minor
+    {
+        lines.push(format!(
+            "Pack of {}: {}",
+            product.pack_size,
+            state.money(price)
+        ));
+    }
+    if !product.tiers.is_empty() {
+        let breaks: Vec<String> = product
+            .tiers
+            .iter()
+            .map(|tier| format!("{}+ {}", tier.min_qty, state.money(tier.price_minor)))
+            .collect();
+        lines.push(format!("Breaks · {}", breaks.join(" · ")));
+    }
+    if let Some(&(days, on_hand)) = expiry.get(&product.id) {
+        let when = match days {
+            0 => "today".to_owned(),
+            1 => "tomorrow".to_owned(),
+            days if days > 0 => format!("in {days} days"),
+            -1 => "yesterday".to_owned(),
+            days => format!("{} days ago", -days),
+        };
+        lines.push(format!("Expires {when} · {on_hand} {}", product.unit_label));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
 
 /// Horizontal scrolling category pill bar.
 ///
@@ -198,6 +300,11 @@ impl Module for Sell {
             egui::pos2((cart_rect.min.x - gap).max(full.min.x), full.max.y),
         );
 
+        // One filtered list and one set of hover hints per frame. The shell
+        // runs the toolbar first, so the scan path still does its own lookup;
+        // everything below the bar shares this snapshot.
+        let derived = derive(state);
+
         let mut grid_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(grid_rect)
@@ -211,7 +318,7 @@ impl Module for Sell {
             grid_ui.set_opacity(0.35);
             grid_ui.disable();
         }
-        self.products(&mut grid_ui, state);
+        self.products(&mut grid_ui, state, &derived);
 
         let mut cart_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -232,7 +339,7 @@ impl Module for Sell {
 }
 
 impl Sell {
-    fn products(&mut self, ui: &mut egui::Ui, state: &mut State) {
+    fn products(&mut self, ui: &mut egui::Ui, state: &mut State, derived: &SellDerived) {
         // A till with an empty catalog is not a bug in the product panel: it is a
         // shop that has not entered its products yet. Point at the screen that
         // fixes it instead of showing an empty view with no explanation.
@@ -259,8 +366,7 @@ impl Sell {
         categories_bar(ui, state);
         ui.add_space(SPACING.xs);
 
-        let needle = state.sell_search.trim().to_lowercase();
-        let visible = visible_products(&state.products, state.category.as_deref(), &needle);
+        let visible = derived.visible();
 
         if visible.is_empty() {
             components::empty_state_card(
@@ -273,8 +379,8 @@ impl Sell {
         }
 
         let clicked = match state.sell_view {
-            SellView::Grid => product_tiles(ui, state, &visible),
-            SellView::List => product_rows(ui, state, &visible),
+            SellView::Grid => product_tiles(ui, state, derived),
+            SellView::List => product_rows(ui, state, derived),
         };
 
         if let Some((index, unit_factor)) = clicked {
@@ -333,8 +439,9 @@ pub(super) fn sell_view_toggle(ui: &mut egui::Ui, view: &mut SellView) {
 pub(super) fn product_tiles(
     ui: &mut egui::Ui,
     state: &State,
-    visible: &[usize],
+    derived: &SellDerived,
 ) -> Option<(usize, i64)> {
+    let visible = derived.visible();
     let gap = SPACING.sm;
     let available = ui.available_width();
     let columns = (((available + gap) / (TILE_MIN + gap)).floor() as usize).clamp(1, 6);
@@ -366,32 +473,8 @@ pub(super) fn product_tiles(
                     price: &price,
                 };
                 let response = ui.put(rect, tile);
-                let response = if product.pack_size > 1
-                    && let Some(pack_price) = product.pack_price_minor
-                {
-                    response.on_hover_text(format!(
-                        "Pack of {}: {}",
-                        product.pack_size,
-                        state.money(pack_price)
-                    ))
-                } else {
-                    response
-                };
-                response.context_menu(|ui| {
-                    if ui.button("Add loose").clicked() {
-                        clicked = Some((product_index, 1));
-                        ui.close();
-                    }
-                    if product.pack_size > 1
-                        && product.pack_price_minor.is_some()
-                        && ui
-                            .button(format!("Add pack of {}", product.pack_size))
-                            .clicked()
-                    {
-                        clicked = Some((product_index, product.pack_size));
-                        ui.close();
-                    }
-                });
+                let response = with_product_hint(response, derived.detail(index));
+                product_context_menu(&response, product, product_index, &mut clicked);
                 if response.clicked() {
                     clicked = Some((product_index, 1));
                 }
@@ -416,7 +499,7 @@ pub(super) fn product_tiles(
 pub(super) fn product_rows(
     ui: &mut egui::Ui,
     state: &State,
-    visible: &[usize],
+    derived: &SellDerived,
 ) -> Option<(usize, i64)> {
     let mut clicked = None;
     egui::ScrollArea::vertical()
@@ -424,36 +507,12 @@ pub(super) fn product_rows(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = SPACING.xs;
-            for &product_index in visible {
+            for (slot, &product_index) in derived.visible().iter().enumerate() {
                 let product = &state.products[product_index];
                 let price = state.money(product.price_minor);
                 let response = sell_row(ui, &product.name, &price);
-                let response = if product.pack_size > 1
-                    && let Some(pack_price) = product.pack_price_minor
-                {
-                    response.on_hover_text(format!(
-                        "Pack of {}: {}",
-                        product.pack_size,
-                        state.money(pack_price)
-                    ))
-                } else {
-                    response
-                };
-                response.context_menu(|ui| {
-                    if ui.button("Add loose").clicked() {
-                        clicked = Some((product_index, 1));
-                        ui.close();
-                    }
-                    if product.pack_size > 1
-                        && product.pack_price_minor.is_some()
-                        && ui
-                            .button(format!("Add pack of {}", product.pack_size))
-                            .clicked()
-                    {
-                        clicked = Some((product_index, product.pack_size));
-                        ui.close();
-                    }
-                });
+                let response = with_product_hint(response, derived.detail(slot));
+                product_context_menu(&response, product, product_index, &mut clicked);
                 if response.clicked() {
                     clicked = Some((product_index, 1));
                 }
@@ -461,6 +520,42 @@ pub(super) fn product_rows(
         });
 
     clicked
+}
+
+/// Attach the derived hint to a product response, if it has extra facts.
+fn with_product_hint(response: egui::Response, detail: Option<&str>) -> egui::Response {
+    match detail {
+        Some(detail) => response.on_hover_text(detail.to_owned()),
+        None => response,
+    }
+}
+
+/// The one right-click menu both catalog views use.
+///
+/// The loose item is always offered; a pack appears only when one is priced.
+/// The click is recorded rather than applied so the caller can drop its borrow
+/// of the products before touching the cart.
+fn product_context_menu(
+    response: &egui::Response,
+    product: &Product,
+    product_index: usize,
+    clicked: &mut Option<(usize, i64)>,
+) {
+    response.context_menu(|ui| {
+        if ui.button("Add loose").clicked() {
+            *clicked = Some((product_index, 1));
+            ui.close();
+        }
+        if product.pack_size > 1
+            && product.pack_price_minor.is_some()
+            && ui
+                .button(format!("Add pack of {}", product.pack_size))
+                .clicked()
+        {
+            *clicked = Some((product_index, product.pack_size));
+            ui.close();
+        }
+    });
 }
 
 /// One product in the Sell list: name and price on a row that is one big
@@ -514,6 +609,36 @@ pub(super) fn sell_row(ui: &mut egui::Ui, name: &str, price: &str) -> egui::Resp
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Space kept below the line list so the total never scrolls out of sight.
+///
+/// The tender panel replaces the whole footer, so it needs its own reserve.
+/// The optional caption rows (discount, wholesale warning, cash rounding) are
+/// added only when they exist, keeping a plain cart exactly as tall as before.
+fn footer_reserve(summary: &CartSummary, tendering: bool) -> f32 {
+    const CART_FOOTER: f32 = 196.0;
+    const TENDER_FOOTER: f32 = 420.0;
+
+    let caption = TYPE.small * 1.8;
+    let rounding = if summary.rounding_minor != 0 {
+        caption
+    } else {
+        0.0
+    };
+    if tendering {
+        // An error replaces the hint rather than stacking under it, so no
+        // extra reserve is needed here.
+        TENDER_FOOTER + rounding
+    } else {
+        let discount = if summary.discount_minor > 0 {
+            caption
+        } else {
+            0.0
+        };
+        let warning = if summary.suppressed { caption } else { 0.0 };
+        CART_FOOTER + rounding + discount + warning
+    }
+}
+
 pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     let palette = theme::current(ui.ctx());
 
@@ -547,7 +672,11 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                         if ui.button(text).clicked() {
                             recall_idx = Some(i);
                         }
-                        if ui.button("×").on_hover_text("Discard parked cart").clicked() {
+                        if ui
+                            .button("×")
+                            .on_hover_text("Discard parked cart")
+                            .clicked()
+                        {
                             discard_idx = Some(i);
                         }
                     });
@@ -593,42 +722,14 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     ui.add_space(SPACING.xs);
     customer_mode_row(ui, state);
 
+    // One arithmetic pass for the reserve and the footer. The header and the
+    // customer rows above can both change the basket; the line list below can
+    // too, so this is rebuilt after that loop before anything is drawn.
+    let mut summary = state.cart_summary();
+
     // Reserve the footer first so the line list scrolls instead of pushing the
     // total off the pane. A till whose total can scroll away is broken.
-    //
-    // The footer grows by one line when cash rounding applies, because that row
-    // only exists then and a fixed reserve would push the Pay button off the
-    // bottom at the window's narrow end.
-    //
-    // Paying takes the whole footer, and the tender panel is much taller than
-    // the totals it replaces. Its height is the sum of its rows — two 44.8
-    // amount rows, a 44 field, 44 chips, a 52 button, and the hint row that
-    // shares its line with "Back to cart" — plus 6px gaps and a little slack.
-    // An error replaces the hint rather than stacking under it, so that case
-    // does not need its own reserve.
-    let rounding_minor = state.cart_rounding_minor();
-    // A discount row and the wholesale warning are rows the footer does not
-    // always have; reserving for them only when they exist keeps a plain cart
-    // as tall as it was.
-    let discount_minor = state.cart_discount_minor();
-    let suppressed = state.customer_mode == CustomerMode::Wholesale && state.customer.is_some();
-    let extra = if discount_minor > 0 {
-        TYPE.small * 1.8
-    } else {
-        0.0
-    } + if suppressed { TYPE.small * 1.8 } else { 0.0 };
-    let footer = match state.payment.as_ref() {
-        Some(_) => {
-            420.0
-                + if rounding_minor != 0 {
-                    TYPE.small * 1.8
-                } else {
-                    0.0
-                }
-        }
-        None if rounding_minor == 0 => 196.0 + extra,
-        None => 196.0 + extra + TYPE.small * 1.8,
-    };
+    let footer = footer_reserve(&summary, state.payment.is_some());
     let list_height = (ui.available_height() - footer).max(80.0);
 
     if state.cart.is_empty() {
@@ -807,32 +908,41 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             });
     }
 
+    // The lines above can change the basket. Re-read it before the footer so
+    // the subtotal, discount, Total, and cash rounding all agree.
+    summary = state.cart_summary();
+
     ui.add_space(SPACING.sm);
     // Paying is not a screen: the footer becomes the tender panel in place.
     // The lines above stay visible, frozen, because the customer may still
     // change their mind about one of them.
     if state.payment.is_some() {
-        crate::checkout::tender(ui, state);
+        crate::checkout::tender(ui, state, &summary);
         return;
     }
     // The subtotal is the shelf price of everything in the basket; the total is
     // what the customer actually pays. Showing only the net would hide the
     // discount the cashier just granted, and showing only the gross would
     // disagree with the receipt.
-    let subtotal = state.cart_gross_minor();
-    let total = state.cart_total_minor();
-    amount_row(ui, "Subtotal", &state.money(subtotal), false);
-    if discount_minor > 0 {
-        let label = format!("Discount ({})", percent_text(state.effective_discount_bp()));
-        amount_row(ui, &label, &state.money(-discount_minor), false);
+    amount_row(ui, "Subtotal", &state.money(summary.gross_minor), false);
+    if summary.discount_minor > 0 {
+        let label = format!("Discount ({})", percent_text(summary.discount_bp));
+        amount_row(ui, &label, &state.money(-summary.discount_minor), false);
     }
-    amount_row(ui, "Tax", "not configured", false);
+    // Prices are tax-inclusive, so this is the tax already inside the total,
+    // not an amount to add on top.
+    let tax = if summary.tax_configured {
+        state.money(summary.tax_minor)
+    } else {
+        "not configured".to_owned()
+    };
+    amount_row(ui, "Tax", &tax, false);
     ui.add_space(SPACING.xs);
     // "Total" is the exact total, the number the receipt prints. The rounded
     // cash amount is the payment screen's, and it says so there: a cart that
     // showed 300 for a 340 basket would hide the 40 the shop is giving away.
-    amount_row(ui, "Total", &state.money(total), true);
-    if suppressed {
+    amount_row(ui, "Total", &state.money(summary.total_minor), true);
+    if summary.suppressed {
         let name = state
             .customer
             .as_ref()
@@ -846,8 +956,8 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             ),
         );
     }
-    if rounding_minor != 0 {
-        let due = state.money(state.due_minor());
+    if summary.rounding_minor != 0 {
+        let due = state.money(summary.due_minor);
         components::caption(ui, &format!("Rounds to {due} in cash"));
     }
     ui.add_space(SPACING.sm);
@@ -1160,3 +1270,75 @@ pub(super) const TILE_MIN: f32 = 140.0;
 
 /// Height of one table row, including its breathing room.
 pub(super) const ROW_HEIGHT: f32 = 40.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bucket(product_id: i64, days_left: Option<i64>, on_hand: i64) -> ExpiryBucket {
+        ExpiryBucket {
+            product_id,
+            name: "Milk".to_owned(),
+            unit_label: "bottle".to_owned(),
+            expires_on: days_left.map(|_| "2026-11-23".to_owned()),
+            on_hand,
+            days_left,
+        }
+    }
+
+    fn summary() -> CartSummary {
+        CartSummary {
+            count: 1,
+            gross_minor: 1000,
+            discount_minor: 0,
+            discount_bp: 0,
+            total_minor: 1000,
+            tax_minor: 0,
+            tax_configured: false,
+            rounding_minor: 0,
+            due_minor: 1000,
+            suppressed: false,
+        }
+    }
+
+    #[test]
+    fn nearest_expiry_keeps_the_closest_dated_bucket_and_sums_ties() {
+        let buckets = vec![
+            bucket(1, Some(5), 2),
+            bucket(1, Some(3), 4),
+            bucket(1, Some(3), 1),
+            bucket(1, None, 50),
+            bucket(2, Some(9), 7),
+        ];
+        let nearest = nearest_expiry(&buckets);
+        assert_eq!(nearest.get(&1), Some(&(3, 5)));
+        assert_eq!(nearest.get(&2), Some(&(9, 7)));
+        assert_eq!(nearest.len(), 2);
+    }
+
+    #[test]
+    fn footer_reserve_only_adds_the_rows_that_exist() {
+        let caption = TYPE.small * 1.8;
+        assert_eq!(footer_reserve(&summary(), false), 196.0);
+
+        let rounding = CartSummary {
+            rounding_minor: 5,
+            ..summary()
+        };
+        assert_eq!(footer_reserve(&rounding, false), 196.0 + caption);
+        assert_eq!(footer_reserve(&rounding, true), 420.0 + caption);
+
+        let discount = CartSummary {
+            discount_minor: 100,
+            ..summary()
+        };
+        assert_eq!(footer_reserve(&discount, false), 196.0 + caption);
+
+        let suppressed = CartSummary {
+            suppressed: true,
+            ..summary()
+        };
+        assert_eq!(footer_reserve(&suppressed, false), 196.0 + caption);
+        assert_eq!(footer_reserve(&suppressed, true), 420.0);
+    }
+}

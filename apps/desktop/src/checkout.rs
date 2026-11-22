@@ -22,23 +22,24 @@ use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 
 use crate::actions;
-use crate::state::{self, State};
+use crate::state::{self, CartSummary, State};
 
 /// Draw the tender panel into the cart column.
 ///
 /// Called from the Sell module's cart, at the point where the totals and the
 /// Pay button would otherwise be. It owns the footer for as long as
 /// [`State::payment`] is set: the panel is the payment, not an overlay on it.
-pub fn tender(ui: &mut egui::Ui, state: &mut State) {
+pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     if state.payment.is_none() {
         return;
     }
 
-    // Read the amounts before borrowing the payment: they come from the cart,
-    // which the payment does not own, and `Money::format` is the one rendering.
+    // Read the amounts before borrowing the payment. They arrive in one
+    // snapshot from the cart, so the amount due cannot disagree with the
+    // rounding line even if a quantity edit landed in the same frame.
     let currency = state.currency;
-    let rounding_minor = state.cart_rounding_minor();
-    let due_minor = state.due_minor();
+    let rounding_minor = summary.rounding_minor;
+    let due_minor = summary.due_minor;
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
     // The field carries the currency as a prefix, so its hint is the bare

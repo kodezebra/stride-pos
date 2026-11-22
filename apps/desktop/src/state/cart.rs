@@ -216,6 +216,28 @@ pub enum SellView {
     Grid,
 }
 
+/// Every number the Sell footer and the tender panel read from the basket.
+///
+/// The cart arithmetic used to be re-run at each call site during a draw. A
+/// quantity edit between two of those calls could leave the subtotal and the
+/// total from different baskets in the same frame. Callers now take one
+/// snapshot and rebuild it only after a mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CartSummary {
+    pub count: i64,
+    pub gross_minor: i64,
+    pub discount_minor: i64,
+    pub discount_bp: i64,
+    pub total_minor: i64,
+    pub tax_minor: i64,
+    /// Tax is shown as "not configured" until a rate is set.
+    pub tax_configured: bool,
+    pub rounding_minor: i64,
+    pub due_minor: i64,
+    /// A regular customer's rate is ignored while wholesale pricing is on.
+    pub suppressed: bool,
+}
+
 impl State {
     /// Add one unit of a product, merging with an existing line.
     ///
@@ -458,6 +480,22 @@ impl State {
     /// What the customer must hand over.
     pub fn due_minor(&self) -> i64 {
         self.cart_total_minor() + self.cart_rounding_minor()
+    }
+
+    /// One consistent read of every basket figure a Sell frame displays.
+    pub fn cart_summary(&self) -> CartSummary {
+        CartSummary {
+            count: self.cart_count(),
+            gross_minor: self.cart_gross_minor(),
+            discount_minor: self.cart_discount_minor(),
+            discount_bp: self.effective_discount_bp(),
+            total_minor: self.cart_total_minor(),
+            tax_minor: self.cart_tax_minor(),
+            tax_configured: self.settings.tax_rate_percent > 0,
+            rounding_minor: self.cart_rounding_minor(),
+            due_minor: self.due_minor(),
+            suppressed: self.customer_mode == CustomerMode::Wholesale && self.customer.is_some(),
+        }
     }
 
     /// The tax on the cart, given the till's tax rate. Prices are tax-inclusive:
