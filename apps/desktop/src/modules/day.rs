@@ -79,6 +79,17 @@ impl Module for Dashboard {
                 trend: Trend::Flat,
             },
         ];
+        // Takings are already net, so a discounted day looks like a smaller
+        // day. Saying what was given away keeps that honest: the shop can see
+        // the shelf price it did not collect.
+        if margin.discount_minor > 0 {
+            cards.push(Kpi {
+                label: "Discounts",
+                value: state.money(margin.discount_minor),
+                sub: "given away".to_owned(),
+                trend: Trend::Flat,
+            });
+        }
         // Margin only where the shop records costs, and only over the items that
         // have one: a percentage across uncosted sales would be a guess wearing
         // a decimal point.

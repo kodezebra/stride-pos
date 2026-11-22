@@ -28,7 +28,7 @@ use crate::actions;
 use crate::category_seeds;
 use crate::db::{ExpiryBucket, Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplier};
 use crate::picker::ExportKind;
-use crate::state::{self, CustomerMode, MAX_PRICE_BREAKS, SellView, State};
+use crate::state::{self, CustomerMode, MAX_PRICE_BREAKS, SellView, State, percent_text};
 
 mod catalog;
 mod day;
