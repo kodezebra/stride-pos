@@ -8,6 +8,7 @@
 
 mod backup;
 mod catalog;
+mod customers;
 mod purchasing;
 mod sales;
 mod schema;
@@ -22,6 +23,7 @@ mod tests;
 
 pub use backup::*;
 pub use catalog::*;
+pub use customers::*;
 pub use purchasing::*;
 pub use sales::*;
 pub use schema::*;

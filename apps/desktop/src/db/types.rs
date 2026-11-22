@@ -41,8 +41,15 @@ pub struct ExportSale {
     /// books, so the minute the screen shows is not precise enough.
     pub created_at: String,
     pub cashier: Option<String>,
-    /// The exact sum of the lines.
+    /// The customer's name, when one was attached to the sale.
+    pub customer: Option<String>,
+    /// What the customer was charged before cash rounding: the lines less the
+    /// basket discount. The gross is `total_minor + discount_minor`.
     pub total_minor: i64,
+    /// The basket discount taken off the lines.
+    pub discount_minor: i64,
+    /// `retail` or `wholesale`.
+    pub price_mode: String,
     /// The cash adjustment, signed.
     pub rounding_minor: i64,
     /// `total_minor + rounding_minor`: what the customer paid.
@@ -70,6 +77,51 @@ pub struct SaleLine {
     pub unit_label: Option<String>,
 }
 
+/// The money and attribution of one sale, as the checkout collected it.
+///
+/// A struct rather than positional arguments because five of these are `i64`
+/// amounts: a call site that swapped the discount for the tax would compile and
+/// write a sale that reconciles with nothing.
+pub struct SaleTerms<'a> {
+    /// The cash adjustment, signed: `paid = net + rounding`.
+    pub rounding_minor: i64,
+    /// The tax collected, included in the net total.
+    pub tax_minor: i64,
+    /// Cash handed over.
+    pub tendered_minor: i64,
+    /// The basket discount taken off the lines.
+    pub discount_minor: i64,
+    /// The rate that produced it, in basis points.
+    pub discount_bp: i64,
+    /// `retail` or `wholesale`.
+    pub price_mode: &'a str,
+    /// The customer row, when one is still in the catalog.
+    pub customer_id: Option<i64>,
+    /// The customer's name as it was at the sale.
+    pub customer_name: Option<&'a str>,
+    /// The cashier the money is attributed to.
+    pub user_id: Option<&'a str>,
+    /// The drawer the cash went into.
+    pub shift_uid: Option<&'a str>,
+}
+
+impl Default for SaleTerms<'_> {
+    fn default() -> Self {
+        Self {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 0,
+            discount_minor: 0,
+            discount_bp: 0,
+            price_mode: "retail",
+            customer_id: None,
+            customer_name: None,
+            user_id: None,
+            shift_uid: None,
+        }
+    }
+}
+
 /// A sale after it is written.
 ///
 /// The amounts are the ones the cashier reads out, so a caller does not have to
@@ -79,13 +131,23 @@ pub struct RecordedSale {
     pub id: i64,
     /// The row's portable identity: what a peer uses to recognise a replay.
     pub uid: String,
-    /// The exact sum of the lines, tax-inclusive.
+    /// What the customer was charged before cash rounding: the line sum less
+    /// the basket discount, tax-inclusive.
     pub total_minor: i64,
     /// The cash adjustment, signed: `paid = total + rounding`.
     pub rounding_minor: i64,
     /// The tax the sale collected, included in `total_minor`: `pre_tax =
     /// total - tax`. Zero when the till charges no tax.
     pub tax_minor: i64,
+    /// The basket discount, in money: `gross = total + discount`.
+    pub discount_minor: i64,
+    /// The rate the discount was taken at, in basis points. `0` on a wholesale
+    /// sale, where the ladder replaced the rate.
+    pub discount_bp: i64,
+    /// `retail` or `wholesale`.
+    pub price_mode: String,
+    /// The customer's name as it was at the sale, when one was attached.
+    pub customer_name: Option<String>,
     pub tendered_minor: i64,
     pub change_minor: i64,
 }
@@ -210,6 +272,22 @@ pub struct Product {
     /// none, and always empty for a pack: the box price is already the bulk
     /// deal.
     pub tiers: Vec<PriceTier>,
+}
+
+/// A regular customer, and the rate the till takes off their basket.
+///
+/// Not a loyalty card: the shop knows the name and the terms it gives, and the
+/// till needs both at the counter. `discount_bp` is basis points (`500` is
+/// five percent) because a rate is not always a whole percent. A customer with
+/// `0` is someone the shop tracks by name and buys at retail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Customer {
+    pub id: i64,
+    pub name: String,
+    pub phone: Option<String>,
+    /// The rate taken off the basket, in basis points. `0` is a customer with
+    /// no discount.
+    pub discount_bp: i64,
 }
 
 /// One of the shops or people the shop buys from.
@@ -555,7 +633,12 @@ pub struct ReceiveLine {
 /// speak for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Margin {
+    /// Item revenue at the shelf price, less each sale's discount. The
+    /// discount is allocated across the sale's lines in proportion to their
+    /// gross, so the profit figure is what the shop actually kept.
     pub revenue_minor: i64,
+    /// Everything the range discounted, retail and wholesale alike.
+    pub discount_minor: i64,
     pub cost_minor: i64,
     pub costed_lines: i64,
     pub total_lines: i64,
@@ -695,8 +778,18 @@ pub struct SaleDetail {
     pub cashier: Option<String>,
     /// Local time, like the list shows: the stored value stays UTC.
     pub created_at: String,
-    /// The pre-rounding amount, tax-inclusive.
+    /// The pre-rounding amount the customer was charged: the line sum less the
+    /// basket discount, tax-inclusive.
     pub total_minor: i64,
+    /// The basket discount taken off the lines, in money. `0` on a sale rung
+    /// up before discounts, and on a wholesale sale.
+    pub discount_minor: i64,
+    /// The rate the discount was taken at, in basis points.
+    pub discount_bp: i64,
+    /// `retail` or `wholesale`.
+    pub price_mode: String,
+    /// The customer on the sale, as named at the time.
+    pub customer_name: Option<String>,
     /// Cash rounding on top of `total` — `0` most of the time, and what the
     /// customer paid above the exact total otherwise.
     pub rounding_minor: i64,

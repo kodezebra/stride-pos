@@ -22,8 +22,19 @@ fn unit_label() -> String {
     "unit".to_owned()
 }
 
+/// The default pricing mode: a sale rung up before wholesale existed, and the
+/// mode every walk-in customer buys at.
+fn retail_mode() -> String {
+    "retail".to_owned()
+}
+
 /// Bumped when a shape changes in a way an older peer cannot read.
-pub const PROTOCOL: i64 = 1;
+///
+/// 2: `sales.total_minor` is the net charged amount, with the basket discount
+/// carried beside it. A peer that still reads `total_minor` as the line sum
+/// would disagree with the till about every discounted sale, so the two
+/// versions do not exchange sales.
+pub const PROTOCOL: i64 = 2;
 
 /// One sale, with the lines, payments and stock movements that belong to it.
 ///
@@ -41,7 +52,26 @@ pub struct SaleDto {
     pub occurred_at: String,
     #[serde(default)]
     pub user_id: Option<String>,
+    /// The net charged amount: the line sum less `discount_minor`.
     pub total_minor: i64,
+    /// The basket discount in money. Absent from a peer that never applied
+    /// one, which is exactly the default.
+    #[serde(default)]
+    pub discount_minor: i64,
+    /// The rate the discount was taken at, in basis points.
+    #[serde(default)]
+    pub discount_bp: i64,
+    /// `retail` or `wholesale`. A wholesale basket is not a retail basket with
+    /// a zero discount, so the mode travels even when the rate is zero.
+    #[serde(default = "retail_mode")]
+    pub price_mode: String,
+    /// The customer's name at the time of sale, when one was attached.
+    #[serde(default)]
+    pub customer_name: Option<String>,
+    /// The customer row, when the origin still had it. A peer that has never
+    /// seen the customer keeps the name and drops the link.
+    #[serde(default)]
+    pub customer_id: Option<i64>,
     #[serde(default)]
     pub rounding_minor: i64,
     #[serde(default)]
@@ -189,6 +219,26 @@ pub struct CatalogSnapshot {
     pub products: Vec<ProductDto>,
     pub categories: Vec<CategoryDto>,
     pub staff: Vec<StaffDto>,
+    /// The shop's regular customers and their rates. Absent from an older
+    /// owner's snapshot, which is the same as a shop that has none.
+    #[serde(default)]
+    pub customers: Vec<CustomerDto>,
+}
+
+/// One regular customer. Like a product, `id` is the authoring till's rowid and
+/// a replica adopts it, so the same customer is the same customer everywhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CustomerDto {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// The rate taken off the basket, in basis points.
+    #[serde(default)]
+    pub discount_bp: i64,
+    #[serde(default)]
+    pub archived: i64,
 }
 
 /// One catalog product. `id` is the authoring till's rowid and is stable for

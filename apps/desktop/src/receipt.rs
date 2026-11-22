@@ -75,6 +75,10 @@ pub fn sample() -> SaleDetail {
         cashier: Some("Amina".to_owned()),
         created_at: "02/11/2026 14:03".to_owned(),
         total_minor: 14_750,
+        discount_minor: 0,
+        discount_bp: 0,
+        price_mode: "retail".to_owned(),
+        customer_name: None,
         rounding_minor: 0,
         tax_minor: 0,
         paid_minor: 14_750,
@@ -168,6 +172,9 @@ pub fn body(
     if !left.is_empty() || !right.is_empty() {
         meta_row(ui, &left, &right);
     }
+    if let Some(name) = detail.customer_name.as_deref().and_then(non_empty) {
+        meta_row(ui, name, "");
+    }
     ui.add_space(SPACING.xs);
 
     components::divider(ui);
@@ -180,6 +187,31 @@ pub fn body(
     }
 
     components::divider(ui);
+
+    // The shelf total earns a line whenever a figure below it moves: a discount
+    // takes money off, and rounding moves the cash. Without either it would only
+    // repeat the total a centimetre below it. It is the sum of the lines, so the
+    // slip reconciles from the top down.
+    if detail.discount_minor > 0 || detail.rounding_minor != 0 {
+        row(
+            ui,
+            "Subtotal",
+            &amount(detail.total_minor + detail.discount_minor, currency),
+            Weight::Plain,
+        );
+    }
+
+    // The discount sits above the tax breakdown because it changes what the
+    // customer pays: tax was backed out of the discounted total, and a reader
+    // who meets the tax first cannot reconcile the two.
+    if detail.discount_minor > 0 {
+        row(
+            ui,
+            &discount_label(detail),
+            &amount(-detail.discount_minor, currency),
+            Weight::Plain,
+        );
+    }
 
     // When the till charges tax, the shelf price is tax-inclusive: the receipt
     // backs the tax out of the total so the customer can see what the shop
@@ -200,16 +232,9 @@ pub fn body(
         );
     }
 
-    // Subtotal earns a line only when rounding moved the figure: otherwise it
-    // would repeat the total a centimetre above it. The rounding is named by
-    // the direction it went, the same words the payment screen uses.
+    // Rounding is named by the direction it went, the same words the payment
+    // screen uses.
     if detail.rounding_minor != 0 {
-        row(
-            ui,
-            "Subtotal",
-            &amount(detail.total_minor, currency),
-            Weight::Plain,
-        );
         row(
             ui,
             if detail.rounding_minor < 0 {
@@ -287,6 +312,9 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
         String::new()
     };
     push_pair(&mut out, &left, &right);
+    if let Some(name) = detail.customer_name.as_deref().and_then(non_empty) {
+        push_pair(&mut out, name, "");
+    }
     out.push('\n');
 
     if detail.lines.is_empty() {
@@ -301,6 +329,20 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
     }
 
     out.push('\n');
+    if detail.discount_minor > 0 || detail.rounding_minor != 0 {
+        out.push_str(&text_row(
+            "Subtotal",
+            &amount(detail.total_minor + detail.discount_minor, currency),
+        ));
+        out.push('\n');
+    }
+    if detail.discount_minor > 0 {
+        out.push_str(&text_row(
+            &discount_label(detail),
+            &amount(-detail.discount_minor, currency),
+        ));
+        out.push('\n');
+    }
     if detail.tax_minor > 0 {
         out.push_str(&text_row(
             "Pre-tax",
@@ -314,8 +356,6 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
         out.push('\n');
     }
     if detail.rounding_minor != 0 {
-        out.push_str(&text_row("Subtotal", &amount(detail.total_minor, currency)));
-        out.push('\n');
         let direction = if detail.rounding_minor < 0 {
             "Rounded down"
         } else {
@@ -550,6 +590,32 @@ fn non_empty(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
 }
 
+/// How the slip names a basket discount: `Discount (5%)`, or plain `Discount`
+/// when the sale recorded money off without a rate, as a wholesale basket does.
+fn discount_label(detail: &SaleDetail) -> String {
+    if detail.discount_bp > 0 {
+        format!("Discount ({})", percent(detail.discount_bp))
+    } else {
+        "Discount".to_owned()
+    }
+}
+
+/// A basis-point rate as the slip prints it: `5%`, `2.5%`, `12.25%`.
+///
+/// Trailing zeroes are dropped, so a whole-percent shop reads `5%` and not
+/// `5.00%`; the rate is the shop's own term, not a computed figure.
+fn percent(bp: i64) -> String {
+    let whole = bp / 100;
+    let frac = bp % 100;
+    if frac == 0 {
+        format!("{whole}%")
+    } else if frac % 10 == 0 {
+        format!("{whole}.{}%", frac / 10)
+    } else {
+        format!("{whole}.{frac:02}%")
+    }
+}
+
 /// How much weight a money row carries.
 #[derive(Clone, Copy)]
 enum Weight {
@@ -700,6 +766,10 @@ mod tests {
             cashier: Some("Amina".to_owned()),
             created_at: "2026-11-02 14:03".to_owned(),
             total_minor: 12_400,
+            discount_minor: 0,
+            discount_bp: 0,
+            price_mode: "retail".to_owned(),
+            customer_name: None,
             rounding_minor: 100,
             tax_minor: 0,
             paid_minor: 12_500,

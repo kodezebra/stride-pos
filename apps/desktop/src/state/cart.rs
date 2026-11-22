@@ -355,6 +355,7 @@ impl State {
         self.notice = None;
         // The next customer is a walk-in until the till is told otherwise.
         self.customer_mode = CustomerMode::Retail;
+        self.customer = None;
     }
 
     /// Switch the whole cart between retail and wholesale pricing.
@@ -383,8 +384,61 @@ impl State {
         self.cart.iter().map(|line| line.qty).sum()
     }
 
-    pub fn cart_total_minor(&self) -> i64 {
+    /// The sum of the lines, before any basket discount: the price on the
+    /// shelf for everything in the cart.
+    pub fn cart_gross_minor(&self) -> i64 {
         self.cart.iter().map(CartLine::total_minor).sum()
+    }
+
+    /// The rate taken off this basket, in basis points.
+    ///
+    /// A wholesale basket is priced by the ladder, which already gives the
+    /// customer the shop's floor; stacking the regular-customer rate on top
+    /// would discount the same sale twice. So the rate is suppressed there, and
+    /// the sell screen says so rather than silently charging more.
+    pub fn effective_discount_bp(&self) -> i64 {
+        if self.customer_mode == CustomerMode::Wholesale {
+            return 0;
+        }
+        self.customer
+            .as_ref()
+            .map_or(0, |customer| customer.discount_bp)
+    }
+
+    /// The basket discount in money: the rate applied to the gross, rounded
+    /// down to the minor unit so the shop never gives away a fraction of one.
+    pub fn cart_discount_minor(&self) -> i64 {
+        let gross = self.cart_gross_minor();
+        let bp = self.effective_discount_bp();
+        if gross <= 0 || bp <= 0 {
+            return 0;
+        }
+        let discount = i128::from(gross) * i128::from(bp) / 10_000;
+        i64::try_from(discount).unwrap_or(gross)
+    }
+
+    /// What the customer is charged before cash rounding: the line sum less the
+    /// basket discount.
+    pub fn cart_total_minor(&self) -> i64 {
+        self.cart_gross_minor() - self.cart_discount_minor()
+    }
+
+    /// Attach a regular customer to this basket, or clear the attachment.
+    ///
+    /// A customer with a rate is a discount, so it asks for the discount
+    /// permission. The approval cannot resume the action, so the cashier taps
+    /// the name again once a manager has approved — the same rule the wholesale
+    /// switch follows. Clearing needs no permission: taking a discount off is
+    /// never the risky direction.
+    pub fn set_customer(&mut self, customer: Option<Customer>) {
+        let Some(customer) = customer else {
+            self.customer = None;
+            return;
+        };
+        if customer.discount_bp > 0 && !self.permits(crate::auth::Permission::Discount) {
+            return self.ask_override(crate::auth::Permission::Discount, None);
+        }
+        self.customer = Some(customer);
     }
 
     /// The cash adjustment for this cart: how far the exact total is from the
@@ -505,22 +559,37 @@ impl State {
         // before serving a customer.
         let shift_uid = self.ensure_shift();
 
-        match crate::db::record_sale(
-            &self.store,
-            &lines,
-            self.cart_rounding_minor(),
-            self.cart_tax_minor(),
+        let terms = SaleTerms {
+            rounding_minor: self.cart_rounding_minor(),
+            tax_minor: self.cart_tax_minor(),
             tendered_minor,
-            self.session
+            discount_minor: self.cart_discount_minor(),
+            discount_bp: self.effective_discount_bp(),
+            price_mode: match self.customer_mode {
+                CustomerMode::Retail => "retail",
+                CustomerMode::Wholesale => "wholesale",
+            },
+            customer_id: self.customer.as_ref().map(|customer| customer.id),
+            customer_name: self
+                .customer
+                .as_ref()
+                .map(|customer| customer.name.as_str()),
+            user_id: self
+                .session
                 .as_ref()
                 .map(|session| session.user_id.as_str()),
-            shift_uid.as_deref(),
-        ) {
+            shift_uid: shift_uid.as_deref(),
+        };
+
+        let written = crate::db::record_sale(&self.store, &lines, &terms);
+
+        match written {
             Ok(_) => {
                 self.cart.clear();
                 // The sale is over, so its pricing terms are too: the next
                 // customer is a walk-in until the till is told otherwise.
                 self.customer_mode = CustomerMode::Retail;
+                self.customer = None;
                 // The sale is written, so the tender panel has done its job.
                 // Leaving a change readout behind would make an empty cart look
                 // like a cart that never cleared; the change is on the sale.

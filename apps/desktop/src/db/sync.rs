@@ -288,7 +288,8 @@ pub fn pull_sales(
             "SELECT id, change_seq, uid, COALESCE(origin_device, ''),
                     is_offline, user_id, total_minor, rounding_minor, tax_minor,
                     COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), ''),
-                    receipt_no
+                    receipt_no, discount_minor, discount_bp, price_mode,
+                    customer_id, customer_name
              FROM sales
              WHERE uid IS NOT NULL AND change_seq IS NOT NULL AND change_seq > ?1
              ORDER BY change_seq ASC
@@ -308,6 +309,11 @@ pub fn pull_sales(
                     rounding_minor: row.get(7)?,
                     tax_minor: row.get(8)?,
                     receipt_no: row.get(10)?,
+                    discount_minor: row.get(11)?,
+                    discount_bp: row.get(12)?,
+                    price_mode: row.get(13)?,
+                    customer_id: row.get(14)?,
+                    customer_name: row.get(15)?,
                     lines: Vec::new(),
                     payments: Vec::new(),
                     movements: Vec::new(),
@@ -488,6 +494,26 @@ pub fn catalog_snapshot(
         })
         .collect();
 
+    // Archived customers travel too: a replica learns a customer is gone the
+    // same way it learns about a product, and the local sale history keeps
+    // pointing at the same id.
+    let customers = {
+        let mut statement = store.conn().prepare(
+            "SELECT id, name, phone, discount_bp, archived
+             FROM customers ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(sync_proto::CustomerDto {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                phone: row.get(2)?,
+                discount_bp: row.get(3)?,
+                archived: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
     let version = meta(store, "catalog_version")
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
@@ -504,6 +530,7 @@ pub fn catalog_snapshot(
         products,
         categories,
         staff,
+        customers,
     })
 }
 
@@ -552,6 +579,33 @@ pub fn apply_catalog_snapshot(
             category_names.insert(name.to_lowercase()),
             "the catalog lists the category name {name} twice"
         );
+    }
+
+    let mut customer_ids = std::collections::HashSet::new();
+    let mut customer_names = std::collections::HashSet::new();
+    for customer in &snapshot.customers {
+        anyhow::ensure!(customer.id > 0, "a customer needs a positive id");
+        anyhow::ensure!(
+            customer_ids.insert(customer.id),
+            "the catalog lists customer {} twice",
+            customer.id
+        );
+        let name = customer.name.trim();
+        anyhow::ensure!(!name.is_empty(), "a customer needs a name");
+        anyhow::ensure!(
+            (0..=10_000).contains(&customer.discount_bp),
+            "customer {name} has a discount outside 0..100%"
+        );
+        anyhow::ensure!(
+            customer.archived == 0 || customer.archived == 1,
+            "archived must be 0 or 1"
+        );
+        if customer.archived == 0 {
+            anyhow::ensure!(
+                customer_names.insert(name.to_lowercase()),
+                "the catalog lists the customer name {name} twice"
+            );
+        }
     }
 
     let mut product_ids = std::collections::HashSet::new();
@@ -779,6 +833,53 @@ pub fn apply_catalog_snapshot(
                 "INSERT INTO price_breaks (product_id, min_qty, price_minor)
                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![product.id, tier.min_qty, tier.price_minor],
+            )?;
+        }
+    }
+
+    // Customers are archived before they are upserted. A replica may still
+    // have a live customer whose name the owner has given to someone else, and
+    // archiving the row the snapshot no longer lists first leaves the unique
+    // live-name index clear for the rename.
+    let local_customers = {
+        let mut statement = transaction.prepare("SELECT id FROM customers WHERE archived = 0")?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in local_customers {
+        if !customer_ids.contains(&id) {
+            transaction.execute("UPDATE customers SET archived = 1 WHERE id = ?1", [id])?;
+        }
+    }
+
+    // Archived rows first, live ones second: a snapshot that renames A to B's
+    // old name while archiving B must not hit the live-name index on the way.
+    for archived in [1_i64, 0] {
+        for customer in snapshot
+            .customers
+            .iter()
+            .filter(|customer| customer.archived == archived)
+        {
+            let phone = customer
+                .phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|phone| !phone.is_empty());
+            transaction.execute(
+                "INSERT INTO customers (id, name, phone, discount_bp, archived)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     phone = excluded.phone,
+                     discount_bp = excluded.discount_bp,
+                     archived = excluded.archived",
+                rusqlite::params![
+                    customer.id,
+                    customer.name.trim(),
+                    phone,
+                    customer.discount_bp,
+                    customer.archived,
+                ],
             )?;
         }
     }

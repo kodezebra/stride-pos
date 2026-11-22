@@ -36,6 +36,10 @@ mod cart;
 
 pub use cart::*;
 
+mod customers;
+
+pub use customers::*;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -44,7 +48,7 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
-use crate::db::{PriceTier, Product, SaleLine, StockItem, Supplier};
+use crate::db::{Customer, PriceTier, Product, SaleLine, SaleTerms, StockItem, Supplier};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
 
@@ -122,6 +126,14 @@ pub struct State {
     /// Which price ladder the cart is selling on. A session choice, not a sale
     /// fact: the lines keep the unit price they were charged at.
     pub customer_mode: CustomerMode,
+    /// The regular customer this basket belongs to, when the cashier picked
+    /// one. Their rate is what `effective_discount_bp` reads.
+    pub customer: Option<Customer>,
+    /// The regular customers the shop keeps, by name. Read with the catalog and
+    /// re-read after a write, like the product list.
+    pub customers: Vec<Customer>,
+    /// The customer form, when it is open.
+    pub customer_editor: Option<CustomerDraft>,
     /// The cart line whose quantity is being set, if any. One editor at a time:
     /// the modal owns the screen while it is open.
     pub cart_quantity: Option<CartQuantity>,
@@ -418,10 +430,14 @@ impl State {
         let purchases = crate::db::purchases(&store);
         let users = crate::db::users(&store);
         let drawer = crate::db::drawer(&store);
+        let customers = crate::db::customers(&store);
         Self {
             store,
             cart: Vec::new(),
             customer_mode: CustomerMode::Retail,
+            customer: None,
+            customers,
+            customer_editor: None,
             cart_quantity: None,
             module,
             sidebar_open,
@@ -578,6 +594,7 @@ pub const SETTINGS_SECTIONS: &[&str] = &[
     "Receipt",
     "Scanner",
     "Money",
+    "Customers",
     "Staff",
     "Sync",
 ];

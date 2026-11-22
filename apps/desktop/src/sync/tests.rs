@@ -12,7 +12,7 @@ use super::protocol::{
     CatalogSnapshot, PROTOCOL, PriceBreakDto, PullResponse, PushRequest, SaleDto,
 };
 use super::worker::{PeerCursor, PeerLink, sync_once};
-use crate::db::{self, SaleLine, StockKind};
+use crate::db::{self, SaleLine, SaleTerms, StockKind};
 
 /// A migrated database that deletes itself when the test ends.
 struct Fixture {
@@ -81,11 +81,14 @@ fn record_tea(store: &storage::Store) -> db::RecordedSale {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        1_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 1_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record sale")
 }
@@ -154,11 +157,14 @@ fn a_pack_sale_carries_its_factor_and_moves_a_pack() {
             unit_factor: 100,
             unit_label: Some("pack of 100".to_owned()),
         }],
-        0,
-        0,
-        56_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 56_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record a pack sale");
 
@@ -666,4 +672,204 @@ impl PeerLink for FakePeer {
     fn catalog(&self) -> anyhow::Result<CatalogSnapshot> {
         Ok(self.catalog.clone())
     }
+}
+
+/// A discounted sale crosses as a fact about the whole basket: the net total,
+/// the rate it was taken at, the mode, and the name the slip printed.
+#[test]
+fn a_discounted_sale_carries_its_customer_and_rate_to_a_peer() {
+    let a = Fixture::new("discount-a");
+    let b = Fixture::new("discount-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    let njeri = db::save_customer(a.db(), None, "Mama Njeri", None, 500).expect("customer");
+
+    // The customer travels with the catalog, so the peer knows the row before
+    // the sale that points at it arrives.
+    let snapshot = db::catalog_snapshot(a.db(), 0).expect("snapshot");
+    db::apply_catalog_snapshot(b.db(), &snapshot).expect("apply");
+
+    db::record_sale(
+        a.db(),
+        &[SaleLine {
+            product_id: Some(10),
+            name: "Tea".to_owned(),
+            qty: 2,
+            unit_minor: 500,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            tendered_minor: 950,
+            discount_minor: 50,
+            discount_bp: 500,
+            customer_id: Some(njeri),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
+
+    let sale = pulled(a.db());
+    assert_eq!(sale.total_minor, 950, "the net crosses, not the gross");
+    assert_eq!(sale.discount_minor, 50);
+    assert_eq!(sale.discount_bp, 500);
+    assert_eq!(sale.price_mode, "retail");
+
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert!(response.rejected.is_empty(), "{:?}", response.rejected);
+
+    assert_eq!(b.scalar::<i64>("SELECT total_minor FROM sales"), 950);
+    assert_eq!(b.scalar::<i64>("SELECT discount_minor FROM sales"), 50);
+    assert_eq!(b.scalar::<i64>("SELECT discount_bp FROM sales"), 500);
+    assert_eq!(
+        b.scalar::<String>("SELECT customer_name FROM sales"),
+        "Mama Njeri"
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT customer_id FROM sales"),
+        njeri,
+        "the name resolves to the row the catalog carried"
+    );
+}
+
+/// A peer that never saw the customer still keeps the name the slip printed;
+/// it just cannot point the sale at a row it does not have.
+#[test]
+fn a_sale_for_an_unknown_customer_keeps_the_name_and_drops_the_link() {
+    let a = Fixture::new("unknown-customer-a");
+    let b = Fixture::new("unknown-customer-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    let njeri = db::save_customer(a.db(), None, "Mama Njeri", None, 500).expect("customer");
+
+    db::record_sale(
+        a.db(),
+        &[SaleLine {
+            product_id: Some(10),
+            name: "Tea".to_owned(),
+            qty: 2,
+            unit_minor: 500,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            tendered_minor: 950,
+            discount_minor: 50,
+            discount_bp: 500,
+            customer_id: Some(njeri),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
+
+    let sale = pulled(a.db());
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert!(response.rejected.is_empty(), "{:?}", response.rejected);
+
+    assert_eq!(
+        b.scalar::<Option<i64>>("SELECT customer_id FROM sales"),
+        None,
+        "a dangling id would break the foreign key"
+    );
+    assert_eq!(
+        b.scalar::<String>("SELECT customer_name FROM sales"),
+        "Mama Njeri",
+        "the receipt still names who bought it"
+    );
+}
+
+/// The discount is checked against the lines, not trusted: a total that
+/// ignores it is a sale that reconciles with nothing.
+#[test]
+fn a_sale_whose_total_ignores_the_discount_is_refused() {
+    let a = Fixture::new("discount-tamper-a");
+    let b = Fixture::new("discount-tamper-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    db::record_sale(
+        a.db(),
+        &[SaleLine {
+            product_id: Some(10),
+            name: "Tea".to_owned(),
+            qty: 2,
+            unit_minor: 500,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            tendered_minor: 950,
+            discount_minor: 50,
+            discount_bp: 500,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
+
+    let mut sale = pulled(a.db());
+    sale.total_minor = 1_000;
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert_eq!(response.rejected.len(), 1, "the gross is not the net");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM sales"), 0);
+
+    let mut sale = pulled(a.db());
+    sale.discount_minor = 1_001;
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert_eq!(response.rejected.len(), 1, "a discount above the basket");
+
+    let mut sale = pulled(a.db());
+    sale.discount_bp = 10_001;
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert_eq!(response.rejected.len(), 1, "a rate above 100%");
+
+    let mut sale = pulled(a.db());
+    sale.price_mode = "free".to_owned();
+    let response = ingest_sales(b.db(), &offer(vec![sale])).expect("ingest");
+    assert_eq!(response.rejected.len(), 1, "a mode the till cannot price");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM sales"), 0);
+}
+
+/// Customers are catalog, not a till's private list: a peer learns the rate,
+/// and learns when a customer is archived. A rename onto a vacated name has to
+/// land, which is why the archive is applied before the live rows.
+#[test]
+fn a_catalog_snapshot_carries_customers_and_archives_the_missing() {
+    let a = Fixture::new("customers-a");
+    let b = Fixture::new("customers-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    let njeri = db::save_customer(a.db(), None, "Mama Njeri", Some("0700 000 000"), 500)
+        .expect("add njeri");
+    let otieno = db::save_customer(a.db(), None, "Otieno", None, 0).expect("add otieno");
+
+    let first = db::catalog_snapshot(a.db(), 0).expect("snapshot");
+    db::apply_catalog_snapshot(b.db(), &first).expect("apply");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM customers"), 2);
+    assert_eq!(
+        b.scalar::<i64>("SELECT discount_bp FROM customers WHERE name = 'Mama Njeri'"),
+        500
+    );
+
+    // Njeri leaves and Otieno takes her name: the snapshot carries both facts,
+    // and the archive-first order is what lets the rename land.
+    db::archive_customer(a.db(), njeri).expect("archive");
+    db::save_customer(a.db(), Some(otieno), "Mama Njeri", None, 0).expect("rename");
+
+    let second = db::catalog_snapshot(a.db(), 0).expect("second snapshot");
+    db::apply_catalog_snapshot(b.db(), &second).expect("apply the rename");
+
+    assert_eq!(
+        b.scalar::<i64>("SELECT COUNT(*) FROM customers WHERE archived = 0"),
+        1
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT COUNT(*) FROM customers WHERE archived = 1"),
+        1,
+        "the archived row is kept, not deleted"
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT id FROM customers WHERE archived = 0"),
+        otieno
+    );
 }

@@ -345,11 +345,14 @@ fn the_drawer_split_covers_one_shift_and_leaves_the_others_alone() {
         record_sale(
             &store,
             &[sale(name, amount)],
-            0,
-            0,
-            amount,
-            Some(user),
-            Some(shift),
+            &SaleTerms {
+                rounding_minor: 0,
+                tax_minor: 0,
+                tendered_minor: amount,
+                user_id: Some(user),
+                shift_uid: Some(shift),
+                ..SaleTerms::default()
+            },
         )
         .expect("sale");
     };
@@ -854,7 +857,19 @@ fn a_sale_writes_its_lines_and_its_payment() {
     ];
 
     // 2800 + 1000 = 3800 exact; rounded down 20 to the 100 shilling coin.
-    let sale = record_sale(&store, &lines, -20, 0, 4_000, None, None).expect("record");
+    let sale = record_sale(
+        &store,
+        &lines,
+        &SaleTerms {
+            rounding_minor: -20,
+            tax_minor: 0,
+            tendered_minor: 4_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
 
     assert_eq!(sale.total_minor, 3_800, "the exact total is kept exact");
     assert_eq!(sale.paid_minor(), 3_780);
@@ -919,11 +934,47 @@ fn the_drawer_opens_once_and_counts_its_cash() {
         unit_factor: 1,
         unit_label: None,
     };
-    record_sale(&store, &[line(2_000)], 0, 0, 2_000, None, Some(&shift.uid)).expect("first sale");
-    record_sale(&store, &[line(2_000)], 0, 0, 2_000, None, Some(&shift.uid)).expect("second sale");
+    record_sale(
+        &store,
+        &[line(2_000)],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_000,
+            user_id: None,
+            shift_uid: Some(&shift.uid),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("first sale");
+    record_sale(
+        &store,
+        &[line(2_000)],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_000,
+            user_id: None,
+            shift_uid: Some(&shift.uid),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("second sale");
     // A sale the drawer could not be opened for still records. It is a gap
     // in a count, not a lost sale, so it must not appear in the totals.
-    record_sale(&store, &[line(700)], 0, 0, 700, None, None).expect("unattributed");
+    record_sale(
+        &store,
+        &[line(700)],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 700,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("unattributed");
 
     let open = drawer(&store).expect("drawer");
     assert_eq!(open.totals.cash_minor, 4_000);
@@ -1051,11 +1102,14 @@ fn a_sale_subtracts_only_the_tracked_lines() {
                 unit_label: None,
             },
         ],
-        0,
-        0,
-        4_000,
-        Some(&cashier.id),
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 4_000,
+            user_id: Some(&cashier.id),
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("sale");
 
@@ -1153,11 +1207,14 @@ fn stock_may_go_negative_when_the_shelf_and_the_ledger_disagree() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        4_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 4_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("the till sells even when the count says it cannot");
 
@@ -1206,7 +1263,19 @@ fn a_short_tender_writes_nothing() {
     }];
 
     assert!(
-        record_sale(&store, &lines, 0, 0, 2_000, None, None).is_err(),
+        record_sale(
+            &store,
+            &lines,
+            &SaleTerms {
+                rounding_minor: 0,
+                tax_minor: 0,
+                tendered_minor: 2_000,
+                user_id: None,
+                shift_uid: None,
+                ..SaleTerms::default()
+            }
+        )
+        .is_err(),
         "2000 does not cover 2800"
     );
 
@@ -1237,8 +1306,32 @@ fn a_sale_is_numbered_by_its_device_and_its_day() {
         unit_label: None,
     };
 
-    let first = record_sale(&store, &[line()], 0, 0, 2_000, None, None).expect("first");
-    let second = record_sale(&store, &[line()], 0, 0, 2_000, None, None).expect("second");
+    let first = record_sale(
+        &store,
+        &[line()],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("first");
+    let second = record_sale(
+        &store,
+        &[line()],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("second");
 
     let device = ensure_device_id(&store).expect("device");
     let short = device_short(&device);
@@ -1290,11 +1383,14 @@ fn the_count_starts_over_on_a_new_day() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        2_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("sale");
     let number = sale_detail(&store, sale.id)
@@ -1328,7 +1424,21 @@ fn an_old_sale_has_no_device_number() {
 fn an_empty_cart_is_not_a_sale() {
     let (store, path) = store("empty-cart");
 
-    assert!(record_sale(&store, &[], 0, 0, 0, None, None).is_err());
+    assert!(
+        record_sale(
+            &store,
+            &[],
+            &SaleTerms {
+                rounding_minor: 0,
+                tax_minor: 0,
+                tendered_minor: 0,
+                user_id: None,
+                shift_uid: None,
+                ..SaleTerms::default()
+            }
+        )
+        .is_err()
+    );
     assert_eq!(totals(&store, 3, None), (0, 0));
 
     let _ = std::fs::remove_file(path);
@@ -1350,11 +1460,14 @@ fn archiving_a_product_does_not_rewrite_its_receipt() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        3_400,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 3_400,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record");
 
@@ -1394,9 +1507,32 @@ fn a_sale_is_stamped_with_an_identity_and_moves_the_cursor() {
         unit_factor: 1,
         unit_label: None,
     };
-    let first =
-        record_sale(&store, std::slice::from_ref(&line), 0, 0, 1_000, None, None).expect("first");
-    let second = record_sale(&store, &[line], 0, 0, 1_000, None, None).expect("second");
+    let first = record_sale(
+        &store,
+        std::slice::from_ref(&line),
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 1_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("first");
+    let second = record_sale(
+        &store,
+        &[line],
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 1_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
+    )
+    .expect("second");
 
     assert_ne!(first.uid, second.uid);
     assert!(uuid::Uuid::parse_str(&first.uid).is_ok(), "{}", first.uid);
@@ -1544,11 +1680,14 @@ fn a_sale_names_the_person_who_took_it() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        500,
-        Some(&brian.id),
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 500,
+            user_id: Some(&brian.id),
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record");
 
@@ -1637,11 +1776,12 @@ fn a_sale_detail_reads_back_its_receipt() {
             },
         ],
         // Total is 16 500; UGX coins end in 100, so the till rounds up 100.
-        100,
-        0,
-        16_600,
-        Some(&brian.id),
-        None,
+        &SaleTerms {
+            rounding_minor: 100,
+            tendered_minor: 16_600,
+            user_id: Some(&brian.id),
+            ..SaleTerms::default()
+        },
     )
     .expect("record");
 
@@ -1683,11 +1823,14 @@ fn a_change_returns_in_the_sale_detail() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        1_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 1_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record");
 
@@ -1718,11 +1861,14 @@ fn payments_taken_are_the_amounts_that_stayed() {
             unit_factor: 1,
             unit_label: None,
         }],
-        60,
-        0,
-        1_000,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 60,
+            tax_minor: 0,
+            tendered_minor: 1_000,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record a rounded sale");
     record_sale(
@@ -1735,11 +1881,14 @@ fn payments_taken_are_the_amounts_that_stayed() {
             unit_factor: 1,
             unit_label: None,
         }],
-        0,
-        0,
-        500,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 500,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("record an exact sale");
 
@@ -3313,11 +3462,14 @@ fn a_pack_sale_moves_a_pack_of_stock_and_costs_a_pack() {
             unit_factor: 100,
             unit_label: Some("pack of 100".to_owned()),
         }],
-        0,
-        0,
-        2_800,
-        None,
-        None,
+        &SaleTerms {
+            rounding_minor: 0,
+            tax_minor: 0,
+            tendered_minor: 2_800,
+            user_id: None,
+            shift_uid: None,
+            ..SaleTerms::default()
+        },
     )
     .expect("sell a pack");
 
@@ -3564,6 +3716,157 @@ fn one_product_can_arrive_on_two_dates_but_not_the_same_date_twice() {
         .is_err(),
         "the same product on the same date is one line"
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_basket_discount_is_written_and_read_back() {
+    let (store, path) = store("sale-discount");
+    let lines = vec![SaleLine {
+        product_id: None,
+        name: "Sugar".to_owned(),
+        qty: 4,
+        unit_minor: 2_500,
+        unit_factor: 1,
+        unit_label: None,
+    }];
+
+    let sale = record_sale(
+        &store,
+        &lines,
+        &SaleTerms {
+            tendered_minor: 10_000,
+            discount_minor: 1_000,
+            discount_bp: 1_000,
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
+
+    assert_eq!(sale.total_minor, 9_000, "the net is what the customer owes");
+    assert_eq!(sale.change_minor, 1_000);
+
+    let detail = sale_detail(&store, sale.id).expect("the sale just written");
+    assert_eq!(detail.total_minor, 9_000);
+    assert_eq!(detail.discount_minor, 1_000);
+    assert_eq!(detail.discount_bp, 1_000);
+    assert_eq!(detail.price_mode, "retail");
+    assert_eq!(detail.customer_name.as_deref(), Some("Mama Njeri"));
+    assert_eq!(detail.paid_minor, 9_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_discount_larger_than_the_basket_is_refused() {
+    let (store, path) = store("sale-discount-over");
+    let lines = vec![SaleLine {
+        product_id: None,
+        name: "Tea".to_owned(),
+        qty: 1,
+        unit_minor: 1_000,
+        unit_factor: 1,
+        unit_label: None,
+    }];
+
+    assert!(
+        record_sale(
+            &store,
+            &lines,
+            &SaleTerms {
+                tendered_minor: 0,
+                discount_minor: 1_001,
+                ..SaleTerms::default()
+            },
+        )
+        .is_err(),
+        "a discount cannot exceed the lines it comes off"
+    );
+    assert!(
+        record_sale(
+            &store,
+            &lines,
+            &SaleTerms {
+                tendered_minor: 1_000,
+                discount_bp: 10_001,
+                ..SaleTerms::default()
+            },
+        )
+        .is_err(),
+        "a rate above the whole basket is not a rate"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_basket_discount_comes_out_of_margin_by_its_share() {
+    let (store, path) = store("margin-discount");
+    // Gross 600 + 200 = 800; a tenth off leaves 720 to the customer.
+    let id = insert_sale(&store, "-0 days", &[("Tea", 2, 300), ("Sugar", 1, 200)]);
+    store
+        .conn()
+        .execute(
+            "UPDATE sales SET discount_minor = 80, discount_bp = 1000, total_minor = 720
+             WHERE id = ?1",
+            [id],
+        )
+        .expect("write the discount");
+    store
+        .conn()
+        .execute(
+            "UPDATE sale_lines SET cost_milli = 100000 WHERE sale_id = ?1 AND name = 'Tea'",
+            [id],
+        )
+        .expect("cost one line");
+
+    let reported = margin(&store, 0, None);
+    assert_eq!(
+        reported.revenue_minor, 540,
+        "600 gross less the tea line's 60 share of the discount"
+    );
+    assert_eq!(reported.discount_minor, 80, "the shop gave 80 away");
+    assert_eq!(reported.cost_minor, 200);
+    assert_eq!(reported.profit_minor(), 340);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_customer_name_is_unique_while_live_and_freed_by_archiving() {
+    let (store, path) = store("customers");
+    let first = save_customer(&store, None, "Mama Njeri", Some("0700 000 000"), 500).expect("add");
+    assert!(
+        customer_name_taken(&store, "mama njeri", None),
+        "the index is case-insensitive"
+    );
+    assert!(
+        save_customer(&store, None, "Mama Njeri", None, 0).is_err(),
+        "two live customers cannot share a name"
+    );
+
+    // Saving the same row keeps it, and does not count itself as a clash.
+    save_customer(&store, Some(first), "Mama Njeri", None, 750).expect("re-save");
+    let listed = customers(&store);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].discount_bp, 750);
+    assert_eq!(listed[0].phone, None, "a cleared phone is stored as none");
+
+    archive_customer(&store, first).expect("archive");
+    assert!(
+        customers(&store).is_empty(),
+        "the counter no longer offers an archived customer"
+    );
+    assert!(
+        !customer_name_taken(&store, "Mama Njeri", None),
+        "the name is free once the row is archived"
+    );
+
+    let second = save_customer(&store, None, "Mama Njeri", None, 0).expect("reuse the name");
+    assert_ne!(second, first, "a new row, not the archived one");
+    assert_eq!(customers(&store).len(), 1);
 
     let _ = std::fs::remove_file(path);
 }

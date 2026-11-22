@@ -1560,3 +1560,344 @@ fn the_pack_price_helper_rounds_up_not_down() {
 
     assert_eq!(draft.price, "29");
 }
+
+#[test]
+fn a_customer_rate_comes_off_the_basket() {
+    let (mut state, path) = state("cart-customer", Currency::UGX);
+    state.session.as_mut().expect("session").role = crate::auth::Role::Manager;
+    crate::db::save_customer(&state.store, None, "Mama Njeri", None, 500).expect("customer");
+    state.reload_customers();
+    assert_eq!(state.customers.len(), 1);
+
+    state.cart = vec![line("Sugar", 1, 340)];
+    assert_eq!(state.cart_gross_minor(), 340);
+    assert_eq!(state.cart_discount_minor(), 0, "a walk-in pays the shelf");
+
+    let customer = state.customers[0].clone();
+    state.set_customer(Some(customer));
+    assert_eq!(state.effective_discount_bp(), 500);
+    assert_eq!(state.cart_discount_minor(), 17, "5% of 340, rounded down");
+    assert_eq!(state.cart_total_minor(), 323);
+
+    // Clearing the customer takes the rate with it, not just the name.
+    state.set_customer(None);
+    assert_eq!(state.customer, None);
+    assert_eq!(state.cart_total_minor(), 340);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn wholesale_suppresses_the_customer_rate() {
+    let (mut state, path) = state("cart-customer-wholesale", Currency::UGX);
+    state.session.as_mut().expect("session").role = crate::auth::Role::Manager;
+    let id = seed_ladder(
+        &state.store,
+        "Panadol",
+        500,
+        &[PriceTier {
+            min_qty: 50,
+            price_minor: 450,
+        }],
+    );
+    crate::db::save_customer(&state.store, None, "Mama Njeri", None, 500).expect("customer");
+    state.reload_products();
+    state.reload_customers();
+
+    let product = state
+        .products
+        .iter()
+        .find(|product| product.id == id)
+        .expect("the ladder product")
+        .clone();
+    state.add_to_cart(&product, 1);
+    let customer = state.customers[0].clone();
+    state.set_customer(Some(customer));
+    assert_eq!(state.cart_discount_minor(), 25, "5% of the retail 500");
+
+    state.set_customer_mode(CustomerMode::Wholesale);
+    assert_eq!(state.cart[0].unit_minor, 450);
+    assert_eq!(
+        state.effective_discount_bp(),
+        0,
+        "the ladder already gives the shop's floor"
+    );
+    assert_eq!(state.cart_discount_minor(), 0);
+    assert_eq!(state.cart_total_minor(), 450);
+    assert_eq!(
+        state
+            .customer
+            .as_ref()
+            .map(|customer| customer.name.as_str()),
+        Some("Mama Njeri"),
+        "the customer stays attached; only the rate is suppressed"
+    );
+
+    state.set_customer_mode(CustomerMode::Retail);
+    assert_eq!(
+        state.cart_discount_minor(),
+        25,
+        "retail brings the rate back"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn attaching_a_rate_needs_the_discount_permission() {
+    let (mut state, path) = state("cart-customer-gate", Currency::UGX);
+    let njeri = crate::db::save_customer(&state.store, None, "Mama Njeri", None, 500)
+        .expect("customer with a rate");
+    let otieno = crate::db::save_customer(&state.store, None, "Otieno", None, 0)
+        .expect("customer without one");
+    state.reload_customers();
+    state.cart = vec![line("Sugar", 1, 1_000)];
+
+    let rated = state
+        .customers
+        .iter()
+        .find(|customer| customer.id == njeri)
+        .expect("njeri")
+        .clone();
+    state.set_customer(Some(rated));
+    assert_eq!(state.customer, None, "a cashier cannot give a rate");
+    assert!(
+        state.override_request.is_some(),
+        "the till asks for a manager instead of refusing silently"
+    );
+
+    // A customer with no rate is not a discount, so it needs no approval.
+    let plain = state
+        .customers
+        .iter()
+        .find(|customer| customer.id == otieno)
+        .expect("otieno")
+        .clone();
+    state.set_customer(Some(plain));
+    assert_eq!(
+        state
+            .customer
+            .as_ref()
+            .map(|customer| customer.name.as_str()),
+        Some("Otieno")
+    );
+    assert_eq!(state.cart_discount_minor(), 0);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_typed_percent_becomes_basis_points() {
+    assert_eq!(parse_percent("").expect("empty is no rate"), 0);
+    assert_eq!(parse_percent("5").expect("whole"), 500);
+    assert_eq!(parse_percent("5%").expect("with a sign"), 500);
+    assert_eq!(parse_percent("5.").expect("trailing dot"), 500);
+    assert_eq!(parse_percent("2.5").expect("half"), 250);
+    assert_eq!(parse_percent("2.25").expect("quarter"), 225);
+    assert_eq!(parse_percent("0.05").expect("tiny"), 5);
+    assert_eq!(parse_percent(".5").expect("leading dot"), 50);
+    assert_eq!(parse_percent("100").expect("the whole basket"), 10_000);
+
+    assert!(parse_percent("2.555").is_err(), "two decimals at most");
+    assert!(
+        parse_percent("-5").is_err(),
+        "a discount cannot be negative"
+    );
+    assert!(
+        parse_percent("100.01").is_err(),
+        "more than the whole basket"
+    );
+    assert!(parse_percent("five").is_err(), "not a number");
+
+    assert_eq!(percent_text(0), "0%");
+    assert_eq!(percent_text(5), "0.05%");
+    assert_eq!(percent_text(225), "2.25%");
+    assert_eq!(percent_text(250), "2.5%");
+    assert_eq!(percent_text(500), "5%");
+    assert_eq!(percent_text(10_000), "100%");
+}
+
+#[test]
+fn the_customer_form_rejects_a_bad_rate_and_keeps_the_text() {
+    let (mut state, path) = state("customer-form", Currency::UGX);
+    state.start_customer();
+    {
+        let draft = state.customer_editor.as_mut().expect("form");
+        draft.name = "  Mama Njeri  ".to_owned();
+        draft.phone = " 0700 000 000 ".to_owned();
+        draft.discount = "2.5".to_owned();
+    }
+    state.save_customer();
+    assert!(state.customer_editor.is_none(), "a good form closes");
+    let saved = state
+        .customers
+        .iter()
+        .find(|customer| customer.name == "Mama Njeri")
+        .expect("the trimmed name");
+    assert_eq!(saved.discount_bp, 250);
+    assert_eq!(saved.phone.as_deref(), Some("0700 000 000"));
+
+    state.start_customer();
+    {
+        let draft = state.customer_editor.as_mut().expect("form");
+        draft.name = "Otieno".to_owned();
+        draft.discount = "2.555".to_owned();
+    }
+    state.save_customer();
+    let draft = state.customer_editor.as_ref().expect("the form stays open");
+    assert_eq!(draft.discount, "2.555", "the typed text survives");
+    assert!(draft.error.is_some(), "and says what is wrong");
+    assert!(
+        !state
+            .customers
+            .iter()
+            .any(|customer| customer.name == "Otieno"),
+        "a rejected form writes nothing"
+    );
+
+    // A duplicate name is refused before the write too.
+    state.customer_editor.as_mut().expect("form").name = "mama njeri".to_owned();
+    state.customer_editor.as_mut().expect("form").discount = "5".to_owned();
+    state.save_customer();
+    assert!(
+        state
+            .customer_editor
+            .as_ref()
+            .expect("form")
+            .error
+            .is_some(),
+        "the live name is taken, whatever the case"
+    );
+    assert_eq!(state.customers.len(), 1);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_paid_basket_writes_the_discount_and_the_customer() {
+    let (mut state, path) = state("cart-customer-sale", Currency::UGX);
+    state.session.as_mut().expect("session").role = crate::auth::Role::Manager;
+    let njeri =
+        crate::db::save_customer(&state.store, None, "Mama Njeri", None, 1_000).expect("customer");
+    state.reload_customers();
+    state.cart = vec![line("Sugar", 1, 340)];
+    let customer = state
+        .customers
+        .iter()
+        .find(|customer| customer.id == njeri)
+        .expect("njeri")
+        .clone();
+    state.set_customer(Some(customer));
+
+    // 10% of 340 is 34, leaving 306. UGX coins end in 100, so 300 is due.
+    state.start_payment();
+    assert_eq!(state.due_minor(), 300);
+    state.payment.as_mut().expect("tender").tendered = "300".to_owned();
+    state.confirm_payment();
+    assert!(state.payment.is_none(), "the sale went through");
+    assert_eq!(state.customer, None, "the next customer is a walk-in");
+    assert_eq!(state.customer_mode, CustomerMode::Retail);
+
+    let id: i64 = state
+        .store
+        .conn()
+        .query_row("SELECT MAX(id) FROM sales", [], |row| row.get(0))
+        .expect("a sale");
+    let detail = crate::db::sale_detail(&state.store, id).expect("the sale just written");
+    assert_eq!(detail.discount_minor, 34);
+    assert_eq!(detail.discount_bp, 1_000);
+    assert_eq!(detail.total_minor, 306);
+    assert_eq!(detail.price_mode, "retail");
+    assert_eq!(detail.customer_name.as_deref(), Some("Mama Njeri"));
+    assert_eq!(detail.paid_minor, 300, "the drawer took the rounded amount");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The same basket, followed all the way out of the till: the form in Settings,
+/// the figures on the sell screen, the slip the customer takes, the day report
+/// and the export. Each of those computes the money separately, so this is the
+/// test that would catch two of them disagreeing.
+#[test]
+fn a_discounted_basket_reconciles_from_the_sell_screen_to_the_books() {
+    let (mut state, path) = state("cart-discount-paper-trail", Currency::UGX);
+    state.session.as_mut().expect("session").role = crate::auth::Role::Owner;
+
+    // Settings -> Customers: a regular at 5%, typed as a percent.
+    state.start_customer();
+    {
+        let draft = state.customer_editor.as_mut().expect("form");
+        draft.name = "Mama Njeri".to_owned();
+        draft.phone = "0776 123 456".to_owned();
+        draft.discount = "5".to_owned();
+    }
+    state.save_customer();
+    assert!(state.customer_editor.is_none(), "the form closes on save");
+    let customer = state.customers[0].clone();
+
+    // Sell: pick her, ring three items.
+    state.cart = vec![
+        line("Diclo Star", 2, 10_000),
+        line("Classic milk 500ml", 1, 2_500),
+        line("Sugar", 1, 340),
+    ];
+    state.set_customer(Some(customer));
+    assert_eq!(state.cart_gross_minor(), 22_840);
+    assert_eq!(state.cart_discount_minor(), 1_142, "5% of 22,840");
+    assert_eq!(state.cart_total_minor(), 21_698);
+
+    // Pay the rounded cash amount.
+    state.start_payment();
+    let due = state.due_minor();
+    assert_eq!(due, 21_700, "the till rounds cash to the nearest 100");
+    state.payment.as_mut().expect("tender").tendered = due.to_string();
+    state.confirm_payment();
+    assert!(state.payment.is_none());
+
+    let id: i64 = state
+        .store
+        .conn()
+        .query_row("SELECT MAX(id) FROM sales", [], |row| row.get(0))
+        .expect("a sale");
+    let detail = crate::db::sale_detail(&state.store, id).expect("detail");
+    assert_eq!(detail.total_minor, 21_698, "the slip records the net");
+    assert_eq!(detail.discount_minor, 1_142);
+    assert_eq!(detail.customer_name.as_deref(), Some("Mama Njeri"));
+
+    // The slip has to reconcile top down: the lines, then the shelf total, then
+    // what came off, then what was paid.
+    let paper = crate::receipt::Paper {
+        shop: "Stride POS",
+        address: "",
+        phone: "",
+        tax_number: "",
+        return_policy: "",
+        footer: "",
+        show_cashier: true,
+    };
+    let text = crate::receipt::plain(&detail, &paper, state.currency);
+    let subtotal = text.find("Subtotal").expect("shelf total");
+    let discount = text.find("Discount (5%)").expect("discount");
+    let total = text.find("Total (UGX)").expect("total");
+    assert!(subtotal < discount, "{text}");
+    assert!(discount < total, "{text}");
+    assert!(text.contains("22,840"), "the lines' own sum: {text}");
+    assert!(text.contains("-1,142"), "{text}");
+    assert!(text.contains("21,700"), "what was paid: {text}");
+
+    // The day report: takings are the cash that came in, the discount is its
+    // own figure, and the margin knows what the basket gave away.
+    let (count, takings) = crate::db::totals(&state.store, 0, None);
+    let margin = crate::db::margin(&state.store, 0, None);
+    assert_eq!(count, 1);
+    assert_eq!(takings, 21_700);
+    assert_eq!(margin.discount_minor, 1_142);
+
+    // The export: gross is recoverable as total + discount, and the customer
+    // travels with the row.
+    let rows = crate::db::export_sales(&state.store, 0, None).expect("export");
+    assert_eq!(rows[0].total_minor + rows[0].discount_minor, 22_840);
+    assert_eq!(rows[0].customer.as_deref(), Some("Mama Njeri"));
+
+    let _ = std::fs::remove_file(path);
+}

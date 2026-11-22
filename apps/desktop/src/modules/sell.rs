@@ -470,6 +470,8 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     ui.add_space(SPACING.sm);
     components::divider(ui);
     ui.add_space(SPACING.sm);
+    customer_row(ui, state);
+    ui.add_space(SPACING.xs);
     customer_mode_row(ui, state);
 
     // Reserve the footer first so the line list scrolls instead of pushing the
@@ -486,6 +488,16 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     // An error replaces the hint rather than stacking under it, so that case
     // does not need its own reserve.
     let rounding_minor = state.cart_rounding_minor();
+    // A discount row and the wholesale warning are rows the footer does not
+    // always have; reserving for them only when they exist keeps a plain cart
+    // as tall as it was.
+    let discount_minor = state.cart_discount_minor();
+    let suppressed = state.customer_mode == CustomerMode::Wholesale && state.customer.is_some();
+    let extra = if discount_minor > 0 {
+        TYPE.small * 1.8
+    } else {
+        0.0
+    } + if suppressed { TYPE.small * 1.8 } else { 0.0 };
     let footer = match state.payment.as_ref() {
         Some(_) => {
             420.0
@@ -495,8 +507,8 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                     0.0
                 }
         }
-        None if rounding_minor == 0 => 196.0,
-        None => 196.0 + TYPE.small * 1.8,
+        None if rounding_minor == 0 => 196.0 + extra,
+        None => 196.0 + extra + TYPE.small * 1.8,
     };
     let list_height = (ui.available_height() - footer).max(80.0);
 
@@ -684,14 +696,37 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
         crate::checkout::tender(ui, state);
         return;
     }
-    let subtotal = state.cart_total_minor();
+    // The subtotal is the shelf price of everything in the basket; the total is
+    // what the customer actually pays. Showing only the net would hide the
+    // discount the cashier just granted, and showing only the gross would
+    // disagree with the receipt.
+    let subtotal = state.cart_gross_minor();
+    let total = state.cart_total_minor();
     amount_row(ui, "Subtotal", &state.money(subtotal), false);
+    if discount_minor > 0 {
+        let label = format!("Discount ({})", percent_text(state.effective_discount_bp()));
+        amount_row(ui, &label, &state.money(-discount_minor), false);
+    }
     amount_row(ui, "Tax", "not configured", false);
     ui.add_space(SPACING.xs);
     // "Total" is the exact total, the number the receipt prints. The rounded
     // cash amount is the payment screen's, and it says so there: a cart that
     // showed 300 for a 340 basket would hide the 40 the shop is giving away.
-    amount_row(ui, "Total", &state.money(subtotal), true);
+    amount_row(ui, "Total", &state.money(total), true);
+    if suppressed {
+        let name = state
+            .customer
+            .as_ref()
+            .map(|customer| customer.name.as_str())
+            .unwrap_or_default();
+        components::caption(
+            ui,
+            &format!(
+                "Wholesale prices — {name}'s {} is not applied",
+                percent_text(state.customer.as_ref().map_or(0, |c| c.discount_bp))
+            ),
+        );
+    }
     if rounding_minor != 0 {
         let due = state.money(state.due_minor());
         components::caption(ui, &format!("Rounds to {due} in cash"));
@@ -719,6 +754,65 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
         .on_hover_text("F12 or Ctrl+Enter");
     if pay.clicked() {
         state.start_payment();
+    }
+}
+
+/// The regular customer this basket belongs to, above the ladder switch.
+///
+/// A chooser rather than a text field: the rate is the shop's own term, and a
+/// typed name would either match nothing or invent a second "Mama Njeri" at a
+/// different rate. Walk-in is the default and needs no permission; attaching a
+/// customer with a rate asks for the discount permission, like the switch below.
+fn customer_row(ui: &mut egui::Ui, state: &mut State) {
+    let selected = state
+        .customer
+        .as_ref()
+        .map(|customer| customer.name.clone())
+        .unwrap_or_else(|| "Walk-in".to_owned());
+    // The choice is taken out of the loop and applied afterwards: attaching a
+    // customer needs `&mut state`, which the list borrow forbids mid-iteration.
+    let mut choice: Option<Option<usize>> = None;
+
+    ui.add_enabled_ui(!state.is_tendering(), |ui| {
+        egui::ComboBox::from_id_salt("pos_cart_customer")
+            .width(ui.available_width())
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(state.customer.is_none(), "Walk-in")
+                    .clicked()
+                {
+                    choice = Some(None);
+                    ui.close();
+                }
+                if state.customers.is_empty() {
+                    components::caption(ui, "No regular customers yet. Add them in Settings.");
+                }
+                for (index, customer) in state.customers.iter().enumerate() {
+                    let label = if customer.discount_bp > 0 {
+                        format!("{} · {}", customer.name, percent_text(customer.discount_bp))
+                    } else {
+                        customer.name.clone()
+                    };
+                    let attached = state
+                        .customer
+                        .as_ref()
+                        .is_some_and(|current| current.id == customer.id);
+                    if ui.selectable_label(attached, label).clicked() {
+                        choice = Some(Some(index));
+                        ui.close();
+                    }
+                }
+            });
+    });
+
+    match choice {
+        Some(Some(index)) => {
+            let customer = state.customers[index].clone();
+            state.set_customer(Some(customer));
+        }
+        Some(None) => state.set_customer(None),
+        None => {}
     }
 }
 
