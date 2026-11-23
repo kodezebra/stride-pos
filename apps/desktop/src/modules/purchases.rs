@@ -144,6 +144,14 @@ pub(super) fn visible_purchases(purchases: &[Purchase], needle: &str, filter: us
 /// How many products the picker shows before asking the user to search.
 const PICKER_LIMIT: usize = 6;
 
+/// The picker owns a pane beside the list, so adding a line never pushes it
+/// down. The share and floors follow the till's cart: wide enough to read a
+/// product row, narrow enough to leave the cost/qty fields a real width.
+const PICKER_PANE_SHARE: f32 = 0.34;
+const PICKER_PANE_MIN: f32 = 300.0;
+const PICKER_PANE_MAX: f32 = 400.0;
+const LINES_PANE_MIN: f32 = 380.0;
+
 /// The read-only lists a purchase form is built from, assembled once per frame.
 ///
 /// The supplier dropdown, the product picker and the expiry hints all ask the
@@ -289,180 +297,215 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
     let mut add_product = None;
     let mut remove_line = None;
 
-    egui::ScrollArea::vertical()
-        .id_salt("pos_purchase_page")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = SPACING.md;
-                ui.vertical(|ui| {
-                    components::field_label(ui, "Supplier (optional)");
-                    ui.add_space(SPACING.xs);
-                    let selected = derived.saved_supplier().unwrap_or("No supplier").to_owned();
-                    egui::ComboBox::from_id_salt("pos_purchase_supplier")
-                        .width(240.0)
-                        .selected_text(selected)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(draft.supplier_id.is_none(), "No supplier")
-                                .clicked()
-                            {
-                                draft.supplier_id = None;
+    // The list and the picker own one pane each. Adding a line grows only the
+    // left pane's scroll content; the search box and its matches stay exactly
+    // where the cashier left them, on a window-height card.
+    let gap = SPACING.md;
+    let full = ui.available_rect_before_wrap();
+    let picker_width = (full.width() * PICKER_PANE_SHARE)
+        .clamp(PICKER_PANE_MIN, PICKER_PANE_MAX)
+        .min((full.width() - LINES_PANE_MIN - gap).max(PICKER_PANE_MIN));
+    let picker_rect =
+        egui::Rect::from_min_max(egui::pos2(full.max.x - picker_width, full.min.y), full.max);
+    let lines_rect = egui::Rect::from_min_max(
+        full.min,
+        egui::pos2((picker_rect.min.x - gap).max(full.min.x), full.max.y),
+    );
+
+    let mut lines_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(lines_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    components::card(&mut lines_ui, |ui| {
+        ui.set_min_width(ui.available_width());
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+            ui.vertical(|ui| {
+                components::field_label(ui, "Supplier (optional)");
+                ui.add_space(SPACING.xs);
+                let selected = derived.saved_supplier().unwrap_or("No supplier").to_owned();
+                egui::ComboBox::from_id_salt("pos_purchase_supplier")
+                    .width(240.0)
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(draft.supplier_id.is_none(), "No supplier")
+                            .clicked()
+                        {
+                            draft.supplier_id = None;
+                            ui.close();
+                        }
+                        for (id, name) in derived.suppliers() {
+                            let selected = draft.supplier_id.as_deref() == Some(id.as_str());
+                            if ui.selectable_label(selected, name).clicked() {
+                                draft.supplier_id = Some(id.clone());
                                 ui.close();
                             }
-                            for (id, name) in derived.suppliers() {
-                                let selected = draft.supplier_id.as_deref() == Some(id.as_str());
-                                if ui.selectable_label(selected, name).clicked() {
-                                    draft.supplier_id = Some(id.clone());
-                                    ui.close();
-                                }
-                            }
-                        });
-                });
-                ui.vertical(|ui| {
-                    components::field_label(ui, "Note (optional)");
-                    ui.add_space(SPACING.xs);
-                    text_field(ui, &mut draft.note, "Market, stall, reference", 300.0);
-                });
+                        }
+                    });
             });
-
-            ui.add_space(SPACING.md);
-            ui.horizontal(|ui| {
-                components::field_label(ui, "To buy");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if derived.has_low_stock_to_add()
-                        && actions::secondary_compact(ui, "Add low stock").clicked()
-                    {
-                        add_low = true;
-                    }
-                });
+            ui.vertical(|ui| {
+                components::field_label(ui, "Note (optional)");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.note, "Market, stall, reference", 300.0);
             });
-            ui.add_space(SPACING.xs);
+        });
 
-            if draft.lines.is_empty() {
-                components::caption(
-                    ui,
-                    if derived.has_low_stock_to_add() {
-                        "Nothing on the list yet. Add a product below, or fill it from low stock."
-                    } else {
-                        "Nothing on the list yet. Add a product below."
-                    },
-                );
-            } else {
-                components::divider(ui);
-                for (index, line) in draft.lines.iter_mut().enumerate() {
-                    // The numbers are a quantity and a unit cost, so the row
-                    // says so with the one symbol that reads as arithmetic:
-                    // 12 x 2,000. The name keeps whatever is left.
-                    let (_, removed) = egui::containers::Sides::new()
-                        .height(44.0)
-                        .shrink_left()
-                        .show(
-                            ui,
-                            |ui| {
-                                ui.label(components::semibold(&line.name).size(TYPE.body));
-                            },
-                            |ui| {
-                                let mut removed = false;
-                                if components::icon_button(ui, Icon::TRASH, 44.0)
-                                    .on_hover_text("Remove")
-                                    .clicked()
-                                {
-                                    removed = true;
-                                }
-                                text_field(ui, &mut line.cost, "Cost", 110.0)
-                                    .on_hover_text("Cost of one purchase unit");
-                                components::caption(ui, "×");
-                                text_field(ui, &mut line.qty, "Qty", 70.0)
-                                    .on_hover_text("How many purchase units");
-                                components::caption(ui, "units/pack");
-                                text_field(ui, &mut line.pack_size, "1", 54.0)
-                                    .on_hover_text("Base units in one purchase unit");
-                                removed
-                            },
-                        );
-                    // The date is optional on a plan: the shop may not know it
-                    // until the goods are in hand. Receiving asks again for a
-                    // perishable product, and a date typed there wins. Two
-                    // printed dates on one delivery are two lines.
-                    if derived.perishable().contains(&line.product_id) {
-                        ui.horizontal(|ui| {
-                            components::caption(ui, "Expiry");
-                            text_field(ui, &mut line.expires_on, "YYYY-MM-DD", 130.0)
-                                .on_hover_text(
-                                    "The date printed on the pack — required when you receive it. \
-                                 Mixed dates: add the product twice.",
-                                );
-                        });
-                    }
-                    if removed {
-                        remove_line = Some(index);
-                    }
-                    components::divider(ui);
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            components::field_label(ui, "To buy");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if derived.has_low_stock_to_add()
+                    && actions::secondary_compact(ui, "Add low stock").clicked()
+                {
+                    add_low = true;
                 }
-            }
+            });
+        });
+        ui.add_space(SPACING.xs);
 
-            let (estimated, missing_cost) = purchase_estimate(&draft.lines, currency);
-            ui.add_space(SPACING.sm);
-            if estimated > 0 {
-                components::caption(
-                    ui,
-                    &if missing_cost {
-                        format!(
-                            "Estimated total {} · lines without a cost are not counted.",
-                            Money::new(estimated, currency).format()
-                        )
-                    } else {
-                        format!(
-                            "Estimated total {}.",
-                            Money::new(estimated, currency).format()
-                        )
-                    },
-                );
-            } else {
-                components::caption(ui, "Add a quantity and cost to see the trip total.");
-            }
-
-            if draft.id.is_some() {
-                ui.add_space(SPACING.sm);
-                let label = if draft.confirm_delete {
-                    "Tap again to delete this list"
-                } else {
-                    "Delete this list"
-                };
-                if actions::quiet(ui, label).clicked() {
-                    delete = true;
-                }
-            }
-
-            ui.add_space(SPACING.lg);
-            components::field_label(ui, "Add a product");
-            ui.add_space(SPACING.xs);
-            components::search_field(ui, &mut draft.search, "Name or category");
-
-            let needle = draft.search.trim();
-            // Matching follows the live search box, so it happens here rather
-            // than in the frame snapshot. Both read the same candidate list.
-            let matches = derived.matches(&draft.search);
-
-            ui.add_space(SPACING.xs);
-            if derived.candidates().is_empty() {
-                components::caption(
-                    ui,
-                    "No tracked products yet. Track stock first, then plan a purchase.",
-                );
-            } else if matches.is_empty() {
-                components::caption(ui, "No other tracked product matches.");
-            } else {
-                if needle.is_empty() {
+        // Only this pane scrolls. The total sits with the lines so a long list
+        // never steals the picker's height or pushes Save out of the toolbar.
+        egui::ScrollArea::vertical()
+            .id_salt("pos_purchase_lines")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if draft.lines.is_empty() {
                     components::caption(
                         ui,
-                        "Tracked products — type to find one by name or category.",
+                        if derived.has_low_stock_to_add() {
+                            "Nothing on the list yet. Add a product on the right, or fill it from low stock."
+                        } else {
+                            "Nothing on the list yet. Add a product on the right."
+                        },
                     );
+                } else {
+                    components::divider(ui);
+                    for (index, line) in draft.lines.iter_mut().enumerate() {
+                        // The numbers are a quantity and a unit cost, so the row
+                        // says so with the one symbol that reads as arithmetic:
+                        // 12 x 2,000. The name keeps whatever is left.
+                        let (_, removed) = egui::containers::Sides::new()
+                            .height(44.0)
+                            .shrink_left()
+                            .show(
+                                ui,
+                                |ui| {
+                                    ui.label(components::semibold(&line.name).size(TYPE.body));
+                                },
+                                |ui| {
+                                    let mut removed = false;
+                                    if components::icon_button(ui, Icon::TRASH, 44.0)
+                                        .on_hover_text("Remove")
+                                        .clicked()
+                                    {
+                                        removed = true;
+                                    }
+                                    text_field(ui, &mut line.cost, "Cost", 110.0)
+                                        .on_hover_text("Cost of one purchase unit");
+                                    components::caption(ui, "×");
+                                    text_field(ui, &mut line.qty, "Qty", 70.0)
+                                        .on_hover_text("How many purchase units");
+                                    components::caption(ui, "units/pack");
+                                    text_field(ui, &mut line.pack_size, "1", 54.0)
+                                        .on_hover_text("Base units in one purchase unit");
+                                    removed
+                                },
+                            );
+                        // The date is optional on a plan: the shop may not know it
+                        // until the goods are in hand. Receiving asks again for a
+                        // perishable product, and a date typed there wins. Two
+                        // printed dates on one delivery are two lines.
+                        if derived.perishable().contains(&line.product_id) {
+                            ui.horizontal(|ui| {
+                                components::caption(ui, "Expiry");
+                                text_field(ui, &mut line.expires_on, "YYYY-MM-DD", 130.0)
+                                    .on_hover_text(
+                                        "The date printed on the pack — required when you receive it. \
+                                     Mixed dates: add the product twice.",
+                                    );
+                            });
+                        }
+                        if removed {
+                            remove_line = Some(index);
+                        }
+                        components::divider(ui);
+                    }
                 }
-                components::card(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    product_picker_header(ui, "Add");
+
+                let (estimated, missing_cost) = purchase_estimate(&draft.lines, currency);
+                ui.add_space(SPACING.sm);
+                if estimated > 0 {
+                    components::caption(
+                        ui,
+                        &if missing_cost {
+                            format!(
+                                "Estimated total {} · lines without a cost are not counted.",
+                                Money::new(estimated, currency).format()
+                            )
+                        } else {
+                            format!(
+                                "Estimated total {}.",
+                                Money::new(estimated, currency).format()
+                            )
+                        },
+                    );
+                } else {
+                    components::caption(ui, "Add a quantity and cost to see the trip total.");
+                }
+
+                if draft.id.is_some() {
+                    ui.add_space(SPACING.sm);
+                    let label = if draft.confirm_delete {
+                        "Tap again to delete this list"
+                    } else {
+                        "Delete this list"
+                    };
+                    if actions::quiet(ui, label).clicked() {
+                        delete = true;
+                    }
+                }
+            });
+    });
+
+    let mut picker_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(picker_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    components::card(&mut picker_ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::field_label(ui, "Add a product");
+        ui.add_space(SPACING.xs);
+        components::search_field(ui, &mut draft.search, "Name or category");
+
+        let needle = draft.search.trim();
+        // Matching follows the live search box, so it happens here rather than
+        // in the frame snapshot. Both read the same candidate list.
+        let matches = derived.matches(&draft.search);
+
+        ui.add_space(SPACING.xs);
+        if derived.candidates().is_empty() {
+            components::caption(
+                ui,
+                "No tracked products yet. Track stock first, then plan a purchase.",
+            );
+        } else if matches.is_empty() {
+            components::caption(ui, "No other tracked product matches.");
+        } else {
+            if needle.is_empty() {
+                components::caption(
+                    ui,
+                    "Tracked products — type to find one by name or category.",
+                );
+            }
+            product_picker_header(ui, "Add");
+            egui::ScrollArea::vertical()
+                .id_salt("pos_purchase_picker")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                     for item in matches.iter().take(PICKER_LIMIT) {
                         let already = derived.already_on_list(item.product_id);
                         let detail = if item.category.is_empty() {
@@ -501,17 +544,20 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         components::caption(ui, &more_hint);
                     }
                 });
-            }
+        }
 
-            if let Some(error) = &draft.error {
-                ui.add_space(SPACING.sm);
-                ui.label(
-                    egui::RichText::new(error)
-                        .size(TYPE.small)
-                        .color(ui.visuals().error_fg_color),
-                );
-            }
-        });
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+    });
+
+    // Claim the whole row so the workspace grows by the pane's real height.
+    ui.advance_cursor_after_rect(full);
 
     if add_low {
         state.purchase_add_low_stock();
@@ -639,6 +685,13 @@ pub(super) fn bought_label(line: &crate::db::PurchaseLine) -> String {
     }
 }
 impl Module for Purchases {
+    /// The editor owns a two-column frame with its own pane scrolls, the
+    /// received view owns its table scroll, and the list wraps itself below.
+    /// A page-level scroll would make the picker's height unbounded again.
+    fn scrolls(&self) -> bool {
+        false
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Buying");
         components::field_label(ui, "Show");
@@ -744,59 +797,65 @@ impl Module for Purchases {
             return purchase_received_page(ui, state);
         }
 
-        components::caption(
-            ui,
-            "A shopping list for the shop. Add what is low, adjust the quantities \
-             at the market, and receive what you actually bought.",
-        );
-        if let Some(notice) = state.notice.as_deref() {
-            components::caption(ui, notice);
-        }
-
-        if state.purchases.is_empty() {
-            components::empty_state_card(
-                ui,
-                "No lists yet",
-                "Start a list before the next trip. Everything that is low can be \
-                 added in one click.",
-                180.0,
-            );
-            return;
-        }
-
-        let to_buy = state
-            .purchases
-            .iter()
-            .filter(|purchase| purchase.status == PurchaseStatus::Planned)
-            .count();
-        let received = state.purchases.len() - to_buy;
-        ui.add_space(SPACING.xs);
-        components::caption(ui, &format!("{to_buy} to buy · {received} received"));
-
-        let needle = state.purchase_search.trim().to_lowercase();
-        let visible = visible_purchases(&state.purchases, &needle, state.purchase_filter);
-        if visible.is_empty() {
-            components::empty_state_card(
-                ui,
-                "Nothing matches",
-                "Clear the search or choose another filter.",
-                160.0,
-            );
-            return;
-        }
-
-        let currency = state.currency;
         let mut open = None;
-        components::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            purchase_header(ui);
-            for &index in &visible {
-                let purchase = &state.purchases[index];
-                if let Some(id) = purchase_row(ui, purchase, currency) {
-                    open = Some(id);
+        egui::ScrollArea::vertical()
+            .id_salt("pos_purchase_list")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                components::caption(
+                    ui,
+                    "A shopping list for the shop. Add what is low, adjust the quantities \
+                     at the market, and receive what you actually bought.",
+                );
+                if let Some(notice) = state.notice.as_deref() {
+                    components::caption(ui, notice);
                 }
-            }
-        });
+
+                if state.purchases.is_empty() {
+                    components::empty_state_card(
+                        ui,
+                        "No lists yet",
+                        "Start a list before the next trip. Everything that is low can be \
+                         added in one click.",
+                        180.0,
+                    );
+                    return;
+                }
+
+                let to_buy = state
+                    .purchases
+                    .iter()
+                    .filter(|purchase| purchase.status == PurchaseStatus::Planned)
+                    .count();
+                let received = state.purchases.len() - to_buy;
+                ui.add_space(SPACING.xs);
+                components::caption(ui, &format!("{to_buy} to buy · {received} received"));
+
+                let needle = state.purchase_search.trim().to_lowercase();
+                let visible = visible_purchases(&state.purchases, &needle, state.purchase_filter);
+                if visible.is_empty() {
+                    components::empty_state_card(
+                        ui,
+                        "Nothing matches",
+                        "Clear the search or choose another filter.",
+                        160.0,
+                    );
+                    return;
+                }
+
+                let currency = state.currency;
+                components::card(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    purchase_header(ui);
+                    for &index in &visible {
+                        let purchase = &state.purchases[index];
+                        if let Some(id) = purchase_row(ui, purchase, currency) {
+                            open = Some(id);
+                        }
+                    }
+                });
+                ui.add_space(SPACING.xl);
+            });
 
         if let Some(id) = open {
             state.edit_purchase(id);
