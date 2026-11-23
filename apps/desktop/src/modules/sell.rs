@@ -639,10 +639,22 @@ fn footer_reserve(summary: &CartSummary, tendering: bool) -> f32 {
     }
 }
 
+/// Height of the cart header and its compact customer chip. The Hold and Clear
+/// buttons use the same compact height, so every control in the row shares a
+/// baseline.
+const CART_HEADER_HEIGHT: f32 = 36.0;
+
+/// Width of the chevron column on a cart line. The glyph is deliberately small;
+/// the whole 44 px row is still the click target, so shrinking the arrow costs
+/// no reach.
+const CART_CHEVRON_COLUMN: f32 = 28.0;
+const CART_CHEVRON_GLYPH: f32 = 12.0;
+
 pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     let palette = theme::current(ui.ctx());
 
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACING.xs;
         ui.label(components::semibold("Cart").size(TYPE.heading));
 
         // Parked cart recall button if there are any parked baskets
@@ -695,30 +707,51 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             }
         }
 
+        // The customer chip used to own a full row. It now rides in this
+        // header, so the first cart line starts directly under the divider.
+        // The count stays only when the pane can afford it: on a narrow till
+        // it is the count that yields, never the price-mode badge.
+        let show_count = ui.available_width() >= 300.0;
+        if show_count {
+            components::caption(ui, &format!("{} item(s)", state.cart_count()));
+            ui.add_space(SPACING.xs);
+        }
+
+        let has_actions = !state.cart.is_empty() && state.payment.is_none();
+        let action_width = if has_actions { 116.0 } else { 0.0 };
+        let chip_width = (ui.available_width() - action_width - SPACING.xs).clamp(96.0, 180.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(chip_width, CART_HEADER_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().button_padding = egui::vec2(SPACING.xs, 0.0);
+                customer_header(ui, state, chip_width);
+            },
+        );
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !state.cart.is_empty() && state.payment.is_none() {
-                if actions::quiet_compact(ui, "Clear")
+            ui.spacing_mut().item_spacing.x = SPACING.xs;
+            ui.spacing_mut().button_padding = egui::vec2(SPACING.sm, 0.0);
+            if has_actions {
+                if actions::secondary_compact(ui, "Clear")
                     .on_hover_text("Clear entire cart")
                     .clicked()
                 {
                     state.clear_cart();
                 }
                 ui.add_space(SPACING.xs);
-                if actions::quiet_compact(ui, "Hold")
+                if actions::secondary_compact(ui, "Hold")
                     .on_hover_text("Hold basket for later")
                     .clicked()
                 {
                     state.hold_cart();
                 }
-                ui.add_space(SPACING.xs);
             }
-            components::caption(ui, &format!("{} item(s)", state.cart_count()));
         });
     });
     ui.add_space(SPACING.sm);
     components::divider(ui);
     ui.add_space(SPACING.sm);
-    customer_header(ui, state);
 
     // One arithmetic pass for the reserve and the footer. The header above can
     // change the basket; the line list below can too, so this is rebuilt after
@@ -807,8 +840,10 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                     );
                     row_ui.spacing_mut().item_spacing.x = SPACING.xs;
 
-                    let (chev_rect, chev_resp) = row_ui
-                        .allocate_exact_size(egui::vec2(44.0, row_height), egui::Sense::click());
+                    let (chev_rect, chev_resp) = row_ui.allocate_exact_size(
+                        egui::vec2(CART_CHEVRON_COLUMN, row_height),
+                        egui::Sense::click(),
+                    );
                     let chev_resp = chev_resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(if expanded {
@@ -823,7 +858,10 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                         let hovered = chev_resp.hovered();
                         let visual = egui::Rect::from_center_size(
                             chev_rect.center(),
-                            egui::vec2(32.0, 32.0),
+                            egui::vec2(
+                                CART_CHEVRON_COLUMN - SPACING.xs,
+                                CART_CHEVRON_COLUMN - SPACING.xs,
+                            ),
                         );
                         if hovered {
                             row_ui.painter().rect_filled(
@@ -842,7 +880,9 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                         } else {
                             Icon::CHEVRON_RIGHT
                         };
-                        chevron.image(16.0, chevron_color).paint_at(&row_ui, visual);
+                        chevron
+                            .image(CART_CHEVRON_GLYPH, chevron_color)
+                            .paint_at(&row_ui, visual);
                     }
 
                     row_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -886,7 +926,7 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = SPACING.xs;
                             // Align the detail with the name, not the chevron.
-                            ui.add_space(44.0 + SPACING.xs);
+                            ui.add_space(CART_CHEVRON_COLUMN + SPACING.xs);
                             let each = format!(
                                 "{} × {}{}{}",
                                 line.qty,
@@ -1108,14 +1148,16 @@ fn customer_header_name(customer: Option<&crate::db::Customer>) -> String {
 ///
 /// Choices are deferred until the popup closes because both `set_customer` and
 /// `set_customer_mode` need `&mut state`, while the menu body holds `&state`.
-fn customer_header(ui: &mut egui::Ui, state: &mut State) {
+fn customer_header(ui: &mut egui::Ui, state: &mut State, width: f32) {
     let palette = theme::current(ui.ctx());
     let wholesale = state.customer_mode == CustomerMode::Wholesale;
     let badge = customer_header_badge(state.customer_mode);
     let name = customer_header_name(state.customer.as_ref());
 
     // Badge first: `Button::truncate` keeps the leading atoms and drops the
-    // later ones, so a long customer name can never hide the price mode.
+    // later ones, so a long customer name can never hide the price mode. On a
+    // narrow pane the name is left out entirely and the tooltip carries it.
+    let show_name = width >= 180.0;
     let mut job = egui::text::LayoutJob::default();
     job.append(
         badge,
@@ -1130,29 +1172,30 @@ fn customer_header(ui: &mut egui::Ui, state: &mut State) {
             ..Default::default()
         },
     );
-    job.append(
-        "  ",
-        0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
-            color: egui::Color32::from(palette.text),
-            ..Default::default()
-        },
-    );
-    job.append(
-        &name,
-        0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
-            color: egui::Color32::from(palette.text),
-            ..Default::default()
-        },
-    );
+    if show_name {
+        job.append(
+            "  ",
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
+                color: egui::Color32::from(palette.text),
+                ..Default::default()
+            },
+        );
+        job.append(
+            &name,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
+                color: egui::Color32::from(palette.text),
+                ..Default::default()
+            },
+        );
+    }
 
-    let width = ui.available_width();
     let button = egui::Button::new(job)
         .truncate()
-        .min_size(egui::vec2(width, 44.0))
+        .min_size(egui::vec2(width, CART_HEADER_HEIGHT))
         .fill(if wholesale {
             egui::Color32::from(palette.accent_soft)
         } else {
@@ -1160,7 +1203,9 @@ fn customer_header(ui: &mut egui::Ui, state: &mut State) {
         })
         .stroke(egui::Stroke::new(1.0_f32, palette.border))
         .corner_radius(egui::CornerRadius::same(RADII.sm as u8))
-        .right_text(Icon::CHEVRON_DOWN.image(16.0, egui::Color32::from(palette.text_muted)));
+        .right_text(
+            Icon::CHEVRON_DOWN.image(CART_CHEVRON_GLYPH, egui::Color32::from(palette.text_muted)),
+        );
 
     let mut customer_choice: Option<Option<usize>> = None;
     let mut mode_choice: Option<CustomerMode> = None;
@@ -1218,9 +1263,11 @@ fn customer_header(ui: &mut egui::Ui, state: &mut State) {
         })
     });
 
-    enabled.inner.0.on_hover_text(
-        "Customer and price mode · wholesale uses each product's deepest quantity break",
-    );
+    enabled.inner.0.on_hover_text(format!(
+        "{} · {}\nClick to change customer or price mode",
+        name,
+        state.customer_mode.label()
+    ));
 
     match customer_choice {
         Some(Some(index)) => {
