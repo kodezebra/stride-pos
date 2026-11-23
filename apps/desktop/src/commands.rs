@@ -112,4 +112,22 @@ mod tests {
             .expect("a manager can open the catalog");
         assert_eq!(catalog.hint, "F3", "F3 opens Shop, and Shop lands on it");
     }
+
+    #[test]
+    fn the_palette_offers_customers_as_a_shop_page() {
+        let manager = all(Role::Manager);
+        let customers = manager
+            .iter()
+            .find(|command| command.label == "Go to Customers")
+            .expect("a manager can manage regulars");
+        assert_eq!(customers.hint, "", "only the landing tab claims F3");
+
+        let cashier = all(Role::Cashier);
+        assert!(
+            !cashier
+                .iter()
+                .any(|command| command.label == "Go to Customers"),
+            "a cashier has no Shop to manage regulars in"
+        );
+    }
 }

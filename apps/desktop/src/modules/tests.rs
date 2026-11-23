@@ -87,7 +87,7 @@ fn the_tabs_of_a_view_are_named_and_ordered() {
     );
     assert_eq!(
         tabs(View::Shop, crate::auth::Role::Manager),
-        &[PRODUCTS, PURCHASES, SUPPLIERS][..]
+        &[PRODUCTS, PURCHASES, SUPPLIERS, CUSTOMERS][..]
     );
 
     // A cashier reads the day's own sales; the trends that read the shop's
@@ -101,6 +101,26 @@ fn the_tabs_of_a_view_are_named_and_ordered() {
     for index in 0..COUNT {
         assert!(!tab_label(index).is_empty());
     }
+}
+
+#[test]
+fn customers_are_a_shop_tab_with_the_old_settings_door() {
+    assert_eq!(view_of(CUSTOMERS), View::Shop);
+    assert_eq!(tab_label(CUSTOMERS), "Customers");
+    assert_eq!(
+        permission(CUSTOMERS),
+        crate::auth::Permission::EditSettings,
+        "moving the page must not widen who can change a customer's rate"
+    );
+    assert!(reachable(crate::auth::Role::Manager, CUSTOMERS));
+    assert!(
+        !reachable(crate::auth::Role::Cashier, CUSTOMERS),
+        "a cashier has no Shop to manage regulars in"
+    );
+    assert!(
+        !crate::state::SETTINGS_SECTIONS.contains(&"Customers"),
+        "the old Settings section must not keep a second door open"
+    );
 }
 
 fn day(day: &str, weekday: u8, revenue: i64) -> crate::db::DayTotal {
