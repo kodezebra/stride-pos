@@ -31,6 +31,7 @@ use crate::picker::ExportKind;
 use crate::state::{self, CustomerMode, MAX_PRICE_BREAKS, SellView, State, percent_text};
 
 mod catalog;
+mod customers;
 mod day;
 mod purchases;
 mod sales;
@@ -40,6 +41,7 @@ mod suppliers;
 mod widgets;
 
 use catalog::*;
+use customers::*;
 use day::*;
 use purchases::*;
 use sales::*;
@@ -72,10 +74,11 @@ pub const SALES: usize = 3;
 pub const SETTINGS: usize = 4;
 pub const SUPPLIERS: usize = 5;
 pub const PURCHASES: usize = 6;
+pub const CUSTOMERS: usize = 7;
 
 /// Number of modules. Used to clamp a persisted index from an older or newer
 /// build before it is used as an array index.
-pub const COUNT: usize = 7;
+pub const COUNT: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Views and tabs
@@ -129,9 +132,10 @@ impl View {
 /// Day's tabs: the sales that happened, and what they add up to.
 const DAY_TABS: [usize; 2] = [SALES, DASHBOARD];
 
-/// Shop's tabs: what is for sale, what is coming in, who brings it. Stock is
-/// not a page of its own: it is a column and a filter on the catalog.
-const SHOP_TABS: [usize; 3] = [PRODUCTS, PURCHASES, SUPPLIERS];
+/// Shop's tabs: what is for sale, what is coming in, who brings it, and who
+/// buys it. Stock is not a page of its own: it is a column and a filter on the
+/// catalog.
+const SHOP_TABS: [usize; 4] = [PRODUCTS, PURCHASES, SUPPLIERS, CUSTOMERS];
 
 /// Height of a module's pinned action strip.
 ///
@@ -299,6 +303,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(Settings),
         Box::new(Suppliers),
         Box::new(Purchases),
+        Box::new(Customers),
     ]
 }
 
@@ -384,6 +389,7 @@ pub fn tab_label(module: usize) -> &'static str {
         PRODUCTS => "Catalog",
         PURCHASES => "Restock",
         SUPPLIERS => "Suppliers",
+        CUSTOMERS => "Customers",
         _ => "Setup",
     }
 }
@@ -397,6 +403,7 @@ pub fn tab_icon(module: usize) -> Icon {
         PRODUCTS => Icon::PACKAGE,
         PURCHASES => Icon::TRUCK,
         SUPPLIERS => Icon::USER,
+        CUSTOMERS => Icon::USER,
         _ => Icon::SETTINGS,
     }
 }
@@ -426,6 +433,9 @@ pub fn permission(index: usize) -> crate::auth::Permission {
         // Planning and receiving a trip changes stock and cost, so it is the
         // same gate as recording a movement. A cashier never sees the screen.
         PURCHASES => Permission::ManageInventory,
+        // Regulars used to live in Settings, so keep the same door. Moving the
+        // page must not widen who can change a customer's rate.
+        CUSTOMERS => Permission::EditSettings,
         _ => Permission::EditSettings,
     }
 }

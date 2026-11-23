@@ -1424,7 +1424,10 @@ fn customer_header(ui: &mut egui::Ui, state: &mut State, width: f32) {
                 }
 
                 if state.customers.is_empty() {
-                    components::caption(ui, "No regular customers yet. Add them in Settings.");
+                    components::caption(
+                        ui,
+                        "No regular customers yet. Add them in Shop → Customers.",
+                    );
                 } else {
                     let matches: Vec<(usize, &crate::db::Customer)> = state
                         .customers

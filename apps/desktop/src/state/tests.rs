@@ -1846,7 +1846,7 @@ fn a_discounted_basket_reconciles_from_the_sell_screen_to_the_books() {
     let (mut state, path) = state("cart-discount-paper-trail", Currency::UGX);
     state.session.as_mut().expect("session").role = crate::auth::Role::Owner;
 
-    // Settings -> Customers: a regular at 5%, typed as a percent.
+    // Shop -> Customers: a regular at 5%, typed as a percent.
     state.start_customer();
     {
         let draft = state.customer_editor.as_mut().expect("form");

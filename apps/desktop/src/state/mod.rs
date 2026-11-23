@@ -601,7 +601,6 @@ pub const SETTINGS_SECTIONS: &[&str] = &[
     "Receipt",
     "Scanner",
     "Money",
-    "Customers",
     "Staff",
     "Sync",
 ];
