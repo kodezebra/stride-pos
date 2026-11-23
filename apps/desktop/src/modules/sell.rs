@@ -718,13 +718,11 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     ui.add_space(SPACING.sm);
     components::divider(ui);
     ui.add_space(SPACING.sm);
-    customer_row(ui, state);
-    ui.add_space(SPACING.xs);
-    customer_mode_row(ui, state);
+    customer_header(ui, state);
 
-    // One arithmetic pass for the reserve and the footer. The header and the
-    // customer rows above can both change the basket; the line list below can
-    // too, so this is rebuilt after that loop before anything is drawn.
+    // One arithmetic pass for the reserve and the footer. The header above can
+    // change the basket; the line list below can too, so this is rebuilt after
+    // that loop before anything is drawn.
     let mut summary = state.cart_summary();
 
     // Reserve the footer first so the line list scrolls instead of pushing the
@@ -757,129 +755,226 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                 let mut remove = None;
                 let mut edit = None;
                 let mut steps: Vec<(usize, components::Step)> = Vec::new();
+                let mut toggles: Vec<(i64, i64)> = Vec::new();
 
                 for (index, line) in state.cart.iter().enumerate() {
-                    // The name and the line total share the first row, with the
-                    // amount placed first from the right so the name truncates
-                    // into what is left. A long product name then costs an
-                    // ellipsis, never the price or the stepper.
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                components::numeric(state.money(line.total_minor()))
-                                    .size(TYPE.body),
-                            );
+                    let key = (line.product_id, line.unit_factor);
+                    let expanded = state.is_cart_line_expanded(key.0, key.1);
 
-                            // The child is sized to the whole remainder, so a
-                            // short name stays on the left edge instead of
-                            // hugging the amount.
-                            let width =
-                                (ui.available_width() - ui.spacing().item_spacing.x).max(0.0);
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(width, 0.0),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    let name = ui.add(
-                                        egui::Label::new(
-                                            components::semibold(&line.name).size(TYPE.body),
-                                        )
+                    // One compact row by default: count, product and total are
+                    // the three things a cashier checks while scanning. The
+                    // unit price and its controls live one tap below, so a
+                    // packed basket fits on the till without hiding the money.
+                    let row_height = 44.0;
+                    let (row_rect, row_resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Sense::click(),
+                    );
+                    let row_resp = row_resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if expanded {
+                            "Hide line details"
+                        } else {
+                            "Show line details"
+                        });
+
+                    if ui.is_rect_visible(row_rect) {
+                        let fill = if expanded {
+                            egui::Color32::from(palette.accent_soft)
+                        } else if row_resp.hovered() {
+                            egui::Color32::from(palette.surface_alt)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        if fill != egui::Color32::TRANSPARENT {
+                            ui.painter().rect_filled(
+                                row_rect,
+                                egui::CornerRadius::same(RADII.sm as u8),
+                                fill,
+                            );
+                        }
+                        ui.painter().line_segment(
+                            [row_rect.left_bottom(), row_rect.right_bottom()],
+                            egui::Stroke::new(1.0, egui::Color32::from(palette.border)),
+                        );
+                    }
+
+                    let mut chevron_clicked = false;
+                    let mut row_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(row_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    row_ui.spacing_mut().item_spacing.x = SPACING.xs;
+
+                    let (chev_rect, chev_resp) = row_ui
+                        .allocate_exact_size(egui::vec2(44.0, row_height), egui::Sense::click());
+                    let chev_resp = chev_resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if expanded {
+                            "Hide line details"
+                        } else {
+                            "Show line details"
+                        });
+                    if chev_resp.clicked() {
+                        chevron_clicked = true;
+                    }
+                    if row_ui.is_rect_visible(chev_rect) {
+                        let hovered = chev_resp.hovered();
+                        let visual = egui::Rect::from_center_size(
+                            chev_rect.center(),
+                            egui::vec2(32.0, 32.0),
+                        );
+                        if hovered {
+                            row_ui.painter().rect_filled(
+                                visual,
+                                egui::CornerRadius::same(RADII.sm as u8),
+                                row_ui.visuals().widgets.hovered.weak_bg_fill,
+                            );
+                        }
+                        let chevron_color = if hovered {
+                            egui::Color32::from(palette.text)
+                        } else {
+                            egui::Color32::from(palette.text_muted)
+                        };
+                        let chevron = if expanded {
+                            Icon::CHEVRON_DOWN
+                        } else {
+                            Icon::CHEVRON_RIGHT
+                        };
+                        chevron.image(16.0, chevron_color).paint_at(&row_ui, visual);
+                    }
+
+                    row_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            components::numeric(state.money(line.total_minor())).size(TYPE.body),
+                        );
+
+                        // The name gets the remainder. A long name costs an
+                        // ellipsis and a tooltip, never the amount on the right.
+                        let width = (ui.available_width() - ui.spacing().item_spacing.x).max(0.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let label = match line.unit_label.as_deref() {
+                                    Some(unit) if line.unit_factor > 1 => {
+                                        format!("{} × {} · {}", line.qty, line.name, unit)
+                                    }
+                                    _ => format!("{} × {}", line.qty, line.name),
+                                };
+                                let name = ui.add(
+                                    egui::Label::new(components::semibold(&label).size(TYPE.body))
                                         .truncate(),
+                                );
+                                if is_cut(ui, &label, width) {
+                                    name.on_hover_text(&label);
+                                }
+                            },
+                        );
+                    });
+                    ui.advance_cursor_after_rect(row_rect);
+
+                    // The row and its chevron are separate hit targets, but a
+                    // tap on either asks for the same toggle. Collect it here
+                    // and apply after the borrow of `state.cart` ends.
+                    if row_resp.clicked() || chevron_clicked {
+                        toggles.push(key);
+                    }
+
+                    if expanded {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACING.xs;
+                            // Align the detail with the name, not the chevron.
+                            ui.add_space(44.0 + SPACING.xs);
+                            let each = format!(
+                                "{} × {}{}{}",
+                                line.qty,
+                                state.money(line.unit_minor),
+                                line.unit_label
+                                    .as_deref()
+                                    .map(|label| format!(" · {label}"))
+                                    .unwrap_or_default(),
+                                // The rung is not optional: without it the cashier
+                                // and the customer read the same amount differently.
+                                line.tier_label()
+                                    .map(|label| format!(" · {label}"))
+                                    .unwrap_or_default()
+                            );
+                            ui.label(
+                                components::numeric(each)
+                                    .size(TYPE.small)
+                                    .color(palette.text_muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Quick-remove item button (trash). The hit area
+                                    // is a full 44-point target; the glyph and its
+                                    // hover fill stay 32 so the row keeps density.
+                                    let (trash_rect, trash_resp) = ui.allocate_exact_size(
+                                        egui::vec2(44.0, 44.0),
+                                        egui::Sense::click(),
                                     );
-                                    // Only when something is hidden: a tooltip
-                                    // repeating a name already on screen is
-                                    // noise on every hover.
-                                    if is_cut(ui, &line.name, width) {
-                                        name.on_hover_text(&line.name);
+                                    let trash_resp = trash_resp
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Remove item");
+                                    if ui.is_rect_visible(trash_rect) {
+                                        let hovered = trash_resp.hovered();
+                                        let visual = egui::Rect::from_center_size(
+                                            trash_rect.center(),
+                                            egui::vec2(32.0, 32.0),
+                                        );
+                                        if hovered {
+                                            ui.painter().rect_filled(
+                                                visual,
+                                                egui::CornerRadius::same(RADII.sm as u8),
+                                                ui.visuals().widgets.hovered.weak_bg_fill,
+                                            );
+                                        }
+                                        let trash_color = if hovered {
+                                            egui::Color32::from(palette.danger)
+                                        } else {
+                                            egui::Color32::from(palette.text_muted)
+                                        };
+                                        Icon::TRASH.image(16.0, trash_color).paint_at(ui, visual);
+                                    }
+                                    if trash_resp.clicked() {
+                                        remove = Some(index);
+                                    }
+
+                                    ui.add_space(SPACING.xs);
+
+                                    // The stepper is minus, count, plus everywhere
+                                    // else it appears. `horizontal` inherits the
+                                    // parent's direction, so inside this
+                                    // right-to-left row it would read plus, count,
+                                    // minus — the opposite of every other stepper.
+                                    let (step, count) = ui
+                                        .with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| components::stepper(ui, line.qty),
+                                        )
+                                        .inner;
+                                    // The count in the middle of the stepper is a
+                                    // button. A till is a touch screen, so there is
+                                    // no hover to reveal that the quantity is
+                                    // editable; tapping it opens the keypad.
+                                    if count.on_hover_text("Set quantity").clicked() {
+                                        edit = Some(index);
+                                    }
+                                    if step != components::Step::None {
+                                        steps.push((index, step));
                                     }
                                 },
                             );
                         });
-                    });
-
-                    // Quantity and unit price under the name, the stepper under
-                    // the amount: the control belongs to the number it changes.
-                    //
-                    // The count in the middle of the stepper is a button. A till
-                    // is a touch screen, so there is no hover to reveal that the
-                    // quantity is editable; tapping the number opens the keypad,
-                    // which is how a cashier sells ten of something without
-                    // tapping `+` ten times.
-                    ui.horizontal(|ui| {
-                        let each = format!(
-                            "{} × {}{}{}",
-                            line.qty,
-                            state.money(line.unit_minor),
-                            line.unit_label
-                                .as_deref()
-                                .map(|label| format!(" · {label}"))
-                                .unwrap_or_default(),
-                            // The rung is not optional: without it the cashier
-                            // and the customer read the same amount differently.
-                            line.tier_label()
-                                .map(|label| format!(" · {label}"))
-                                .unwrap_or_default()
-                        );
-                        ui.label(
-                            components::numeric(each)
-                                .size(TYPE.small)
-                                .color(palette.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Quick-remove item button (trash). The hit area is a
-                            // full 44-point target; the glyph and its hover fill
-                            // stay 32 so the cart line keeps its density.
-                            let (trash_rect, trash_resp) = ui
-                                .allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
-                            let trash_resp = trash_resp
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text("Remove item");
-                            if ui.is_rect_visible(trash_rect) {
-                                let hovered = trash_resp.hovered();
-                                let visual = egui::Rect::from_center_size(
-                                    trash_rect.center(),
-                                    egui::vec2(32.0, 32.0),
-                                );
-                                if hovered {
-                                    ui.painter().rect_filled(
-                                        visual,
-                                        egui::CornerRadius::same(RADII.sm as u8),
-                                        ui.visuals().widgets.hovered.weak_bg_fill,
-                                    );
-                                }
-                                let trash_color = if hovered {
-                                    egui::Color32::from(palette.danger)
-                                } else {
-                                    egui::Color32::from(palette.text_muted)
-                                };
-                                Icon::TRASH.image(16.0, trash_color).paint_at(ui, visual);
-                            }
-                            if trash_resp.clicked() {
-                                remove = Some(index);
-                            }
-
-                            ui.add_space(SPACING.xs);
-
-                            // The stepper is minus, count, plus everywhere else it
-                            // appears. `horizontal` inherits the parent's
-                            // direction, so inside this right-to-left row it
-                            // would read plus, count, minus — "more" before
-                            // "less", which is the opposite of every other
-                            // stepper in the app.
-                            let (step, count) = ui
-                                .with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| components::stepper(ui, line.qty),
-                                )
-                                .inner;
-                            if count.on_hover_text("Set quantity").clicked() {
-                                edit = Some(index);
-                            }
-                            if step != components::Step::None {
-                                steps.push((index, step));
-                            }
-                        });
-                    });
+                    }
                     ui.add_space(SPACING.sm);
+                }
+
+                for (product_id, unit_factor) in toggles {
+                    state.toggle_cart_line_expansion(product_id, unit_factor);
                 }
 
                 for (index, step) in steps {
@@ -901,7 +996,7 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                 }
 
                 if let Some(index) = remove {
-                    state.cart.remove(index);
+                    state.remove_cart_line(index);
                 } else if let Some(index) = edit {
                     state.edit_cart_quantity(index);
                 }
@@ -986,56 +1081,148 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     }
 }
 
-/// The regular customer this basket belongs to, above the ladder switch.
+/// The short, always-visible price mode on the customer chip.
 ///
-/// A chooser rather than a text field: the rate is the shop's own term, and a
-/// typed name would either match nothing or invent a second "Mama Njeri" at a
-/// different rate. Walk-in is the default and needs no permission; attaching a
-/// customer with a rate asks for the discount permission, like the switch below.
-fn customer_row(ui: &mut egui::Ui, state: &mut State) {
-    let selected = state
-        .customer
-        .as_ref()
-        .map(|customer| customer.name.clone())
-        .unwrap_or_else(|| "Walk-in".to_owned());
-    // The choice is taken out of the loop and applied afterwards: attaching a
-    // customer needs `&mut state`, which the list borrow forbids mid-iteration.
-    let mut choice: Option<Option<usize>> = None;
+/// The popup has words, but the chip has to read at a glance before the first
+/// item is scanned. Uppercase keeps it distinct from the customer's name.
+fn customer_header_badge(mode: CustomerMode) -> &'static str {
+    match mode {
+        CustomerMode::Retail => "RETAIL",
+        CustomerMode::Wholesale => "WHOLESALE",
+    }
+}
 
-    ui.add_enabled_ui(!state.is_tendering(), |ui| {
-        egui::ComboBox::from_id_salt("pos_cart_customer")
-            .width(ui.available_width())
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(state.customer.is_none(), "Walk-in")
-                    .clicked()
-                {
-                    choice = Some(None);
+/// The name shown on the header chip.
+fn customer_header_name(customer: Option<&crate::db::Customer>) -> String {
+    customer
+        .map(|customer| customer.name.clone())
+        .unwrap_or_else(|| "Walk-in".to_owned())
+}
+
+/// One header chip for the customer and the price ladder.
+///
+/// Both choices used to own a full row each, which pushed the first cart line
+/// down and made the basket look busier than it is. The badge stays outside the
+/// popup: mode changes reprice every line already in the basket, so the cashier
+/// must be able to read it without opening anything.
+///
+/// Choices are deferred until the popup closes because both `set_customer` and
+/// `set_customer_mode` need `&mut state`, while the menu body holds `&state`.
+fn customer_header(ui: &mut egui::Ui, state: &mut State) {
+    let palette = theme::current(ui.ctx());
+    let wholesale = state.customer_mode == CustomerMode::Wholesale;
+    let badge = customer_header_badge(state.customer_mode);
+    let name = customer_header_name(state.customer.as_ref());
+
+    // Badge first: `Button::truncate` keeps the leading atoms and drops the
+    // later ones, so a long customer name can never hide the price mode.
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        badge,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(TYPE.small, theme::semibold()),
+            color: egui::Color32::from(if wholesale {
+                palette.accent_ink()
+            } else {
+                palette.text_muted
+            }),
+            ..Default::default()
+        },
+    );
+    job.append(
+        "  ",
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
+            color: egui::Color32::from(palette.text),
+            ..Default::default()
+        },
+    );
+    job.append(
+        &name,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
+            color: egui::Color32::from(palette.text),
+            ..Default::default()
+        },
+    );
+
+    let width = ui.available_width();
+    let button = egui::Button::new(job)
+        .truncate()
+        .min_size(egui::vec2(width, 44.0))
+        .fill(if wholesale {
+            egui::Color32::from(palette.accent_soft)
+        } else {
+            egui::Color32::from(palette.surface_alt)
+        })
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(egui::CornerRadius::same(RADII.sm as u8))
+        .right_text(Icon::CHEVRON_DOWN.image(16.0, egui::Color32::from(palette.text_muted)));
+
+    let mut customer_choice: Option<Option<usize>> = None;
+    let mut mode_choice: Option<CustomerMode> = None;
+
+    // While the tender panel owns the screen the basket is frozen, so both
+    // choices are too: repricing under a payment already on the counter is not
+    // a thing the cashier can mean.
+    let enabled = ui.add_enabled_ui(!state.is_tendering(), |ui| {
+        egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+            ui.set_min_width(260.0);
+            components::caption(ui, "Customer");
+            ui.add_space(SPACING.xs);
+            if ui
+                .selectable_label(state.customer.is_none(), "Walk-in")
+                .clicked()
+            {
+                customer_choice = Some(None);
+                ui.close();
+            }
+            if state.customers.is_empty() {
+                components::caption(ui, "No regular customers yet. Add them in Settings.");
+            }
+            for (index, customer) in state.customers.iter().enumerate() {
+                let label = if customer.discount_bp > 0 {
+                    format!("{} · {}", customer.name, percent_text(customer.discount_bp))
+                } else {
+                    customer.name.clone()
+                };
+                let attached = state
+                    .customer
+                    .as_ref()
+                    .is_some_and(|current| current.id == customer.id);
+                if ui.selectable_label(attached, label).clicked() {
+                    customer_choice = Some(Some(index));
                     ui.close();
                 }
-                if state.customers.is_empty() {
-                    components::caption(ui, "No regular customers yet. Add them in Settings.");
-                }
-                for (index, customer) in state.customers.iter().enumerate() {
-                    let label = if customer.discount_bp > 0 {
-                        format!("{} · {}", customer.name, percent_text(customer.discount_bp))
-                    } else {
-                        customer.name.clone()
-                    };
-                    let attached = state
-                        .customer
-                        .as_ref()
-                        .is_some_and(|current| current.id == customer.id);
-                    if ui.selectable_label(attached, label).clicked() {
-                        choice = Some(Some(index));
-                        ui.close();
+            }
+
+            ui.add_space(SPACING.sm);
+            components::divider(ui);
+            ui.add_space(SPACING.sm);
+            components::caption(ui, "Price mode");
+            for mode in [CustomerMode::Retail, CustomerMode::Wholesale] {
+                if ui
+                    .selectable_label(state.customer_mode == mode, mode.label())
+                    .clicked()
+                {
+                    if mode != state.customer_mode {
+                        mode_choice = Some(mode);
                     }
+                    ui.close();
                 }
-            });
+            }
+            components::caption(ui, "Wholesale uses the deepest quantity break.");
+        })
     });
 
-    match choice {
+    enabled.inner.0.on_hover_text(
+        "Customer and price mode · wholesale uses each product's deepest quantity break",
+    );
+
+    match customer_choice {
         Some(Some(index)) => {
             let customer = state.customers[index].clone();
             state.set_customer(Some(customer));
@@ -1043,43 +1230,10 @@ fn customer_row(ui: &mut egui::Ui, state: &mut State) {
         Some(None) => state.set_customer(None),
         None => {}
     }
-}
 
-/// The retail/wholesale switch, above the lines it reprices.
-///
-/// A switch rather than a menu because there are two states and the cashier has
-/// to see which one is live before the first item is scanned. Wholesale is a
-/// pricing decision, so it asks for the same permission as a discount; the
-/// override leaves a minute-long approval and the cashier taps again.
-fn customer_mode_row(ui: &mut egui::Ui, state: &mut State) {
-    let palette = theme::current(ui.ctx());
-    let wholesale = state.customer_mode == CustomerMode::Wholesale;
-    let text = egui::RichText::new(state.customer_mode.label())
-        .size(TYPE.small)
-        .family(theme::semibold());
-    let text = if wholesale {
-        text.color(egui::Color32::from(palette.accent_ink()))
-    } else {
-        text.color(egui::Color32::from(palette.text_muted))
-    };
-    let button = egui::Button::new(text)
-        .min_size(egui::vec2(ui.available_width(), 36.0))
-        .fill(if wholesale {
-            egui::Color32::from(palette.accent_soft)
-        } else {
-            egui::Color32::TRANSPARENT
-        })
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
-        .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
-    // While the tender panel owns the screen the basket is frozen, so the mode
-    // is too: repricing under a payment already on the counter is not a thing
-    // the cashier can mean.
-    let response = ui
-        .add_enabled(!state.is_tendering(), button)
-        .on_hover_text("Wholesale prices use each product's deepest quantity break");
-    if response.clicked() {
+    if let Some(mode) = mode_choice {
         if state.permits(crate::auth::Permission::Discount) {
-            state.toggle_customer_mode();
+            state.set_customer_mode(mode);
         } else {
             state.ask_override(crate::auth::Permission::Discount, None);
         }
@@ -1340,5 +1494,23 @@ mod tests {
         };
         assert_eq!(footer_reserve(&suppressed, false), 196.0 + caption);
         assert_eq!(footer_reserve(&suppressed, true), 420.0);
+    }
+
+    #[test]
+    fn customer_header_badge_names_the_active_price_mode() {
+        assert_eq!(customer_header_badge(CustomerMode::Retail), "RETAIL");
+        assert_eq!(customer_header_badge(CustomerMode::Wholesale), "WHOLESALE");
+    }
+
+    #[test]
+    fn customer_header_name_uses_customer_or_walk_in() {
+        let customer = crate::db::Customer {
+            id: 1,
+            name: "Mama Njeri".to_owned(),
+            phone: None,
+            discount_bp: 0,
+        };
+        assert_eq!(customer_header_name(Some(&customer)), "Mama Njeri");
+        assert_eq!(customer_header_name(None), "Walk-in");
     }
 }

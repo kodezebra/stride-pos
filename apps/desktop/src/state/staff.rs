@@ -188,6 +188,7 @@ impl State {
         self.override_request = None;
         self.payment = None;
         self.cart_quantity = None;
+        self.clear_cart_expansion();
         self.product_editor = None;
         self.product_delete = None;
         self.supplier_editor = None;
