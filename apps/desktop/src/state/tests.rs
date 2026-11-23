@@ -1960,3 +1960,74 @@ fn holding_and_recalling_a_cart() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// Expanding a cart line is a view choice keyed by the line's identity, not by
+/// its row number, so a compacted list cannot open a different product's detail.
+#[test]
+fn cart_line_expansion_is_keyed_by_product_and_pack() {
+    let (mut state, path) = state("cart-expansion-key", Currency::UGX);
+    state.cart.push(line("Sugar", 1, 340));
+
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    state.toggle_cart_line_expansion(1, 1);
+    assert!(state.is_cart_line_expanded(1, 1));
+    assert!(!state.is_cart_line_expanded(1, 2));
+    assert!(!state.is_cart_line_expanded(2, 1));
+
+    state.toggle_cart_line_expansion(1, 1);
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Held, recalled, cleared and paid baskets must not reopen with a detail panel
+/// still attached to a product the next customer never bought.
+#[test]
+fn cart_line_details_close_with_the_basket_they_belong_to() {
+    let (mut state, path) = state("cart-expansion-lifecycle", Currency::UGX);
+
+    state.cart.push(line("First", 1, 340));
+    state.toggle_cart_line_expansion(1, 1);
+    state.clear_cart();
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    state.cart.push(line("Held", 1, 340));
+    state.toggle_cart_line_expansion(1, 1);
+    state.hold_cart();
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    state.cart.push(line("Second", 1, 500));
+    state.toggle_cart_line_expansion(1, 1);
+    state.recall_cart(0);
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    state.toggle_cart_line_expansion(1, 1);
+    state.start_payment();
+    state.payment.as_mut().expect("open").tendered = "400".to_owned();
+    state.confirm_payment();
+    assert!(!state.is_cart_line_expanded(1, 1));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Removing one line closes its detail only; a second line with the same product
+/// at a different pack size keeps its own expanded state.
+#[test]
+fn removing_a_line_closes_only_its_details() {
+    let (mut state, path) = state("cart-expansion-removal", Currency::UGX);
+    let mut boxed = line("Sugar box", 1, 3000);
+    boxed.product_id = 2;
+    boxed.unit_factor = 4;
+    state.cart = vec![line("Sugar", 1, 340), boxed];
+
+    state.toggle_cart_line_expansion(1, 1);
+    state.toggle_cart_line_expansion(2, 4);
+    state.remove_cart_line(0);
+
+    assert_eq!(state.cart.len(), 1);
+    assert!(!state.is_cart_line_expanded(1, 1));
+    assert!(state.is_cart_line_expanded(2, 4));
+
+    let _ = std::fs::remove_file(path);
+}

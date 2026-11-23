@@ -139,6 +139,9 @@ pub struct State {
     /// The cart line whose quantity is being set, if any. One editor at a time:
     /// the modal owns the screen while it is open.
     pub cart_quantity: Option<CartQuantity>,
+    /// The compact cart row showing its detail, keyed by product and pack size.
+    /// View state only: it is never persisted and never travels with a sale.
+    pub cart_expanded: Option<(i64, i64)>,
 
     /// Index into [`crate::modules::all`]. Also the activity-bar selection.
     pub module: usize,
@@ -442,6 +445,7 @@ impl State {
             customers,
             customer_editor: None,
             cart_quantity: None,
+            cart_expanded: None,
             module,
             sidebar_open,
             sell_view: SellView::default(),

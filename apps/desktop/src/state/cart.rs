@@ -372,10 +372,43 @@ impl State {
         self.cart.clear();
         self.payment = None;
         self.cart_quantity = None;
+        self.clear_cart_expansion();
         self.notice = None;
         // The next customer is a walk-in until the till is told otherwise.
         self.customer_mode = CustomerMode::Retail;
         self.customer = None;
+    }
+
+    /// Is this product and pack size's compact row showing its detail?
+    ///
+    /// The key is the line's identity, not its row number: coalescing and
+    /// removals can shift rows, and a view must never open the wrong product.
+    pub fn is_cart_line_expanded(&self, product_id: i64, unit_factor: i64) -> bool {
+        self.cart_expanded == Some((product_id, unit_factor))
+    }
+
+    /// Open one compact row, or close it if it is already open.
+    pub fn toggle_cart_line_expansion(&mut self, product_id: i64, unit_factor: i64) {
+        let key = (product_id, unit_factor);
+        self.cart_expanded = if self.cart_expanded == Some(key) {
+            None
+        } else {
+            Some(key)
+        };
+    }
+
+    pub fn clear_cart_expansion(&mut self) {
+        self.cart_expanded = None;
+    }
+
+    /// Remove one line, closing its detail if that was the line being viewed.
+    pub fn remove_cart_line(&mut self, index: usize) {
+        if let Some(line) = self.cart.get(index) {
+            if self.is_cart_line_expanded(line.product_id, line.unit_factor) {
+                self.cart_expanded = None;
+            }
+            self.cart.remove(index);
+        }
     }
 
     /// Switch the whole cart between retail and wholesale pricing.
@@ -389,15 +422,6 @@ impl State {
         for line in &mut self.cart {
             line.set_wholesale(mode == CustomerMode::Wholesale);
         }
-    }
-
-    /// The other mode, for a switch that has only two states.
-    pub fn toggle_customer_mode(&mut self) {
-        let mode = match self.customer_mode {
-            CustomerMode::Retail => CustomerMode::Wholesale,
-            CustomerMode::Wholesale => CustomerMode::Retail,
-        };
-        self.set_customer_mode(mode);
     }
 
     pub fn cart_count(&self) -> i64 {
@@ -622,6 +646,7 @@ impl State {
         match written {
             Ok(_) => {
                 self.cart.clear();
+                self.clear_cart_expansion();
                 // The sale is over, so its pricing terms are too: the next
                 // customer is a walk-in until the till is told otherwise.
                 self.customer_mode = CustomerMode::Retail;
@@ -656,6 +681,7 @@ impl State {
 
     /// Hold the current basket so another customer can be served.
     pub fn hold_cart(&mut self) {
+        self.clear_cart_expansion();
         if self.cart.is_empty() {
             return;
         }
@@ -680,6 +706,7 @@ impl State {
             return;
         }
         self.close_payment();
+        self.clear_cart_expansion();
         let parked = self.parked_carts.remove(index);
 
         // If the counter currently has items, park them instead of discarding.
