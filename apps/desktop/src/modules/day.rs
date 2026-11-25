@@ -392,11 +392,7 @@ pub(super) fn chart_caption(range: usize) -> Option<&'static str> {
 /// and the page prints it the way a person would, with the count that says
 /// whether the money came in one big sale or a dozen small ones.
 pub(super) fn method_label(method: &str, sales: i64) -> String {
-    let mut chars = method.chars();
-    let name: String = match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    };
+    let name = crate::state::payment_method_label(method);
     if sales == 1 {
         format!("{name} · 1 sale")
     } else {

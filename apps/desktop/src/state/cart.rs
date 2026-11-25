@@ -567,13 +567,40 @@ impl State {
         }
         self.notice = None;
         self.payment = Some(Payment {
+            tenders: Vec::new(),
+            method: "cash".to_owned(),
             tendered: String::new(),
+            reference: String::new(),
             error: None,
             focus: true,
         });
     }
 
-    /// Parse the cash received and write the sale.
+    /// What the tenders already taken add up to.
+    pub fn payment_paid_minor(&self) -> i64 {
+        self.payment
+            .as_ref()
+            .map(|payment| payment.tenders.iter().map(|t| t.amount_minor).sum())
+            .unwrap_or(0)
+    }
+
+    /// What is still owed after the tenders taken so far, never negative.
+    pub fn payment_remaining_minor(&self) -> i64 {
+        (self.due_minor() - self.payment_paid_minor()).max(0)
+    }
+
+    /// Undo the most recent tender. The panel shows the change readout for the
+    /// next attempt, so the error from the last one is cleared with it.
+    pub fn remove_last_tender(&mut self) {
+        if let Some(payment) = self.payment.as_mut() {
+            payment.tenders.pop();
+            payment.error = None;
+            payment.focus = true;
+        }
+    }
+
+    /// Take the tender in the amount field, and write the sale once the balance
+    /// reaches zero.
     ///
     /// Everything is checked before the first write: a rejected tender leaves
     /// the cart exactly as it was, because a cashier who mistyped 500 instead of
@@ -584,9 +611,22 @@ impl State {
         };
 
         let due_minor = self.due_minor();
+        let paid_minor = self.payment_paid_minor();
+        let remaining_minor = due_minor - paid_minor;
+
+        // A cart edited under the panel can leave the tenders already over the
+        // new total. Writing would fail; closing the sale is the honest read.
+        if remaining_minor <= 0 {
+            return self.finish_sale();
+        }
+
+        let method = payment.method.clone();
+        let is_cash = method.eq_ignore_ascii_case("cash");
         let tendered_text = payment.tendered.trim().to_owned();
-        let tendered_minor = if tendered_text.is_empty() {
-            due_minor
+        let reference = payment.reference.trim().to_owned();
+
+        let entered_minor = if tendered_text.is_empty() {
+            remaining_minor
         } else {
             match Money::parse(&tendered_text, self.currency) {
                 Ok(amount) => amount.minor(),
@@ -594,12 +634,73 @@ impl State {
             }
         };
 
-        if tendered_minor < due_minor {
+        if entered_minor <= 0 {
+            return self.payment_error("Enter an amount.");
+        }
+        if !is_cash && entered_minor > remaining_minor {
             return self.payment_error(format!(
-                "That is {} short.",
-                self.money(due_minor - tendered_minor)
+                "That is {} more than the balance.",
+                self.money(entered_minor - remaining_minor)
             ));
         }
+
+        // Cash settles up to the balance and gives the rest back; less than the
+        // balance is a part-payment, which is what a split sale is. Non-cash is
+        // exact, so it can never contribute more than the balance.
+        let amount_minor = entered_minor.min(remaining_minor);
+        let tendered_minor = if is_cash { entered_minor } else { amount_minor };
+        let reference = if is_cash || reference.is_empty() {
+            None
+        } else {
+            Some(reference)
+        };
+
+        if let Some(payment) = self.payment.as_mut() {
+            payment.tenders.push(Tender {
+                method,
+                amount_minor,
+                tendered_minor,
+                reference,
+            });
+            payment.tendered.clear();
+            payment.reference.clear();
+            payment.error = None;
+            payment.focus = true;
+        }
+
+        if self.payment_remaining_minor() == 0 {
+            self.finish_sale();
+        }
+    }
+
+    /// Write the sale from the tenders already taken.
+    ///
+    /// Kept apart from [`Self::confirm_payment`] because a split sale takes
+    /// several tenders before any money is written: the write happens once, on
+    /// the tender that clears the balance.
+    fn finish_sale(&mut self) {
+        // Own the tender data before the first mutable borrow: the terms borrow
+        // the strings, and `ensure_shift` needs the whole state.
+        let tenders: Vec<(String, i64, i64, Option<String>)> = {
+            let Some(payment) = self.payment.as_ref() else {
+                return;
+            };
+            if payment.tenders.is_empty() {
+                return;
+            }
+            payment
+                .tenders
+                .iter()
+                .map(|tender| {
+                    (
+                        tender.method.clone(),
+                        tender.amount_minor,
+                        tender.tendered_minor,
+                        tender.reference.clone(),
+                    )
+                })
+                .collect()
+        };
 
         let lines: Vec<SaleLine> = self
             .cart
@@ -614,15 +715,28 @@ impl State {
             })
             .collect();
 
-        // The drawer the cash is about to land in. Opened here, on the way into
+        // The drawer the money is about to land in. Opened here, on the way into
         // the first sale of the day, so nobody has to press "start shift"
         // before serving a customer.
         let shift_uid = self.ensure_shift();
 
+        let payment_lines: Vec<PaymentLine<'_>> = tenders
+            .iter()
+            .map(
+                |(method, amount_minor, tendered_minor, reference)| PaymentLine {
+                    method: method.as_str(),
+                    amount_minor: *amount_minor,
+                    tendered_minor: *tendered_minor,
+                    reference: reference.as_deref(),
+                },
+            )
+            .collect();
+
         let terms = SaleTerms {
             rounding_minor: self.cart_rounding_minor(),
             tax_minor: self.cart_tax_minor(),
-            tendered_minor,
+            tendered_minor: tenders.iter().map(|tender| tender.2).sum(),
+            payments: &payment_lines,
             discount_minor: self.cart_discount_minor(),
             discount_bp: self.effective_discount_bp(),
             price_mode: match self.customer_mode {

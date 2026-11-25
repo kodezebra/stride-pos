@@ -48,7 +48,9 @@ use ui_kit::theme::Theme;
 use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
-use crate::db::{Customer, PriceTier, Product, SaleLine, SaleTerms, StockItem, Supplier};
+use crate::db::{
+    Customer, PaymentLine, PriceTier, Product, SaleLine, SaleTerms, StockItem, Supplier,
+};
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
 
@@ -103,16 +105,80 @@ pub fn category_suggestions(categories: &[String], current: &str) -> Vec<String>
     names
 }
 
+/// One tender already taken in the payment panel.
+///
+/// `amount_minor` is what it contributes to the amount due; `tendered_minor` is
+/// what the customer handed over. They differ only when cash overpays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tender {
+    /// The stored key: `cash`, `mtn_momo`, `airtel_money`.
+    pub method: String,
+    pub amount_minor: i64,
+    pub tendered_minor: i64,
+    /// The phone-side transaction id, when the cashier recorded one.
+    pub reference: Option<String>,
+}
+
 /// The payment panel, open in the cart footer.
 ///
 /// Cash received is text, for the same reason a price is: it is mid-edit, and
 /// parsing on every keystroke would eat a half-typed `5000`. Empty means "the
-/// exact amount", which is what most cash sales are.
+/// whole balance", which is what most sales are.
 pub struct Payment {
+    /// Tenders taken so far, in the order they were taken. Empty until the
+    /// first Add; the sale is written when the sum reaches the amount due.
+    pub tenders: Vec<Tender>,
+    /// The method the next tender will use. `cash` unless the cashier changed
+    /// it.
+    pub method: String,
     pub tendered: String,
+    /// The phone-side transaction id being typed for a non-cash tender.
+    pub reference: String,
     pub error: Option<String>,
-    /// Put the cursor in the cash field on the first frame.
+    /// Put the cursor in the amount field on the first frame.
     pub focus: bool,
+}
+
+/// The tenders the till can record, in the order the panel offers them.
+///
+/// Mobile money is recorded, not processed: the cashier checks the customer's
+/// phone for the confirmation and then adds the row. The till has no way to
+/// know whether the network agreed, and the panel says so on screen.
+pub const PAYMENT_METHODS: &[(&str, &str)] = &[
+    ("cash", "Cash"),
+    ("mtn_momo", "MTN MoMo"),
+    ("airtel_money", "Airtel Money"),
+];
+
+/// The human name of a stored method key.
+///
+/// Unknown keys are title-cased with underscores turned into spaces, so a
+/// method synced from a newer peer still reads as words rather than a key.
+pub fn payment_method_label(method: &str) -> String {
+    if let Some((_, label)) = PAYMENT_METHODS
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(method))
+    {
+        return (*label).to_owned();
+    }
+    let mut words = method.split('_').filter(|word| !word.is_empty());
+    let mut label = String::new();
+    if let Some(first) = words.next() {
+        let mut chars = first.chars();
+        if let Some(ch) = chars.next() {
+            label.extend(ch.to_uppercase());
+            label.push_str(chars.as_str());
+        }
+        for word in words {
+            label.push(' ');
+            label.push_str(word);
+        }
+    }
+    if label.is_empty() {
+        method.to_owned()
+    } else {
+        label
+    }
 }
 
 /// How long an approval lasts. Long enough to finish the action that asked for

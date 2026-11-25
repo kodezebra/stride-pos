@@ -1844,6 +1844,145 @@ fn a_change_returns_in_the_sale_detail() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A split sale is one sale with several tenders: each is its own `payments`
+/// row, in the order the cashier took it, and the detail reads them back as a
+/// list rather than a combined string.
+#[test]
+fn a_split_sale_writes_one_payment_row_per_tender() {
+    let (store, path) = store("sale-split");
+
+    let sale = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[
+                PaymentLine {
+                    method: "cash",
+                    amount_minor: 4_000,
+                    tendered_minor: 5_000,
+                    reference: None,
+                },
+                PaymentLine {
+                    method: "mtn_momo",
+                    amount_minor: 6_000,
+                    tendered_minor: 6_000,
+                    reference: Some("MP240101.1234.A12345"),
+                },
+            ],
+            ..SaleTerms::default()
+        },
+    )
+    .expect("record");
+
+    let detail = sale_detail(&store, sale.id).expect("detail");
+    assert_eq!(detail.paid_minor, 10_000);
+    assert_eq!(detail.payments.len(), 2);
+
+    // The cash part overpaid and gave change; the mobile part was exact.
+    assert_eq!(detail.payments[0].method, "cash");
+    assert_eq!(detail.payments[0].amount_minor, 4_000);
+    assert_eq!(detail.payments[0].tendered_minor, 5_000);
+    assert_eq!(detail.payments[0].change_minor, 1_000);
+    assert_eq!(detail.payments[0].reference, None);
+
+    assert_eq!(detail.payments[1].method, "mtn_momo");
+    assert_eq!(detail.payments[1].amount_minor, 6_000);
+    assert_eq!(detail.payments[1].change_minor, 0);
+    assert_eq!(
+        detail.payments[1].reference.as_deref(),
+        Some("MP240101.1234.A12345")
+    );
+
+    assert_eq!(detail.tendered_minor, 11_000);
+    assert_eq!(detail.change_minor, 1_000);
+    assert_eq!(detail.method, "cash + mtn_momo");
+
+    // The report keeps each method on its own line rather than lumping the
+    // sale under the first one.
+    let methods = by_method(&store, 0, None);
+    let cash = methods
+        .iter()
+        .find(|total| total.method == "cash")
+        .expect("cash total");
+    assert_eq!(cash.amount_minor, 4_000);
+    let momo = methods
+        .iter()
+        .find(|total| total.method == "mtn_momo")
+        .expect("mobile total");
+    assert_eq!(momo.amount_minor, 6_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The per-tender rules are the ones the sync validator already enforces: cash
+/// may overpay, a mobile tender is exact, and the tenders must settle the whole
+/// sale. A split that breaks any of them writes nothing.
+#[test]
+fn a_split_sale_refuses_tenders_that_do_not_settle_exactly() {
+    let (store, path) = store("sale-split-refused");
+    let line = [SaleLine {
+        product_id: None,
+        name: "Sugar".to_owned(),
+        qty: 1,
+        unit_minor: 10_000,
+        unit_factor: 1,
+        unit_label: None,
+    }];
+
+    // The tenders add up to 9,000 against a 10,000 bill.
+    let error = record_sale(
+        &store,
+        &line,
+        &SaleTerms {
+            payments: &[PaymentLine {
+                method: "cash",
+                amount_minor: 9_000,
+                tendered_minor: 9_000,
+                reference: None,
+            }],
+            ..SaleTerms::default()
+        },
+    )
+    .expect_err("a sale that does not settle cannot be written");
+    assert!(
+        error.to_string().contains("payments sum to 9000"),
+        "{error}"
+    );
+
+    // A mobile tender cannot hand change back, so it cannot overshoot.
+    let error = record_sale(
+        &store,
+        &line,
+        &SaleTerms {
+            payments: &[PaymentLine {
+                method: "mtn_momo",
+                amount_minor: 10_000,
+                tendered_minor: 10_500,
+                reference: None,
+            }],
+            ..SaleTerms::default()
+        },
+    )
+    .expect_err("a mobile tender is exact");
+    assert!(
+        error
+            .to_string()
+            .contains("a non-cash payment must equal its amount"),
+        "{error}"
+    );
+
+    assert_eq!(totals(&store, 0, None), (0, 0));
+
+    let _ = std::fs::remove_file(path);
+}
+
 /// Cash, two sales, one of them rounded. The method total is what the drawer
 /// kept, so the rounded amount counts — not the pre-rounding total the
 /// customer's items added up to, and not the note that was handed over.

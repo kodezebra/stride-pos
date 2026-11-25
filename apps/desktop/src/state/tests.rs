@@ -534,10 +534,10 @@ fn an_empty_cash_field_means_the_exact_amount() {
     let _ = std::fs::remove_file(path);
 }
 
-/// A mistyped tender is the most common mistake at a till. It must cost one
-/// field, not the basket.
+/// A cash tender below the balance is a partial payment, not a mistake: the
+/// till takes it and leaves the rest of the balance open for the next tender.
 #[test]
-fn a_short_tender_keeps_the_cart_and_writes_nothing() {
+fn a_part_cash_tender_stays_open_and_adds_to_the_next() {
     let (mut state, path) = state("short", Currency::UGX);
     state.cart = vec![line("Sugar", 1, 340)];
 
@@ -546,15 +546,122 @@ fn a_short_tender_keeps_the_cart_and_writes_nothing() {
     state.confirm_payment();
 
     let payment = state.payment.as_ref().expect("still open");
-    assert_eq!(payment.error.as_deref(), Some("That is USh 100 short."));
+    assert_eq!(payment.error, None, "200 of 300 is a part payment");
+    assert_eq!(payment.tenders.len(), 1);
+    assert_eq!(payment.tenders[0].amount_minor, 200);
+    assert_eq!(state.payment_remaining_minor(), 100);
     assert_eq!(state.cart.len(), 1, "the basket is untouched");
     assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
 
-    // Correcting the field completes the sale.
-    state.payment.as_mut().expect("open").tendered = "500".to_owned();
+    // The rest completes it, and the sale carries both tenders.
+    state.payment.as_mut().expect("open").tendered = "100".to_owned();
     state.confirm_payment();
     assert!(state.payment.is_none());
     assert!(state.cart.is_empty());
+
+    let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+    let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+    assert_eq!(detail.payments.len(), 2);
+    assert_eq!(detail.payments[0].amount_minor, 200);
+    assert_eq!(detail.payments[1].amount_minor, 100);
+    assert_eq!(detail.paid_minor, 300);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Mobile money is recorded, not processed: the cashier adds the row after
+/// checking the customer's phone, and the till cannot verify it. The sale can
+/// still finish in cash, and the reference survives into the sale detail.
+#[test]
+fn a_mobile_tender_is_recorded_and_the_cash_clears_the_rest() {
+    let (mut state, path) = state("mobile-split", Currency::UGX);
+    state.cart = vec![line("Sugar", 1, 2_000)];
+
+    state.start_payment();
+    {
+        let payment = state.payment.as_mut().expect("open");
+        payment.method = "mtn_momo".to_owned();
+        payment.tendered = "1200".to_owned();
+        payment.reference = " MP123 ".to_owned();
+    }
+    state.confirm_payment();
+
+    let payment = state.payment.as_ref().expect("still open");
+    assert_eq!(payment.tenders.len(), 1);
+    assert_eq!(payment.tenders[0].method, "mtn_momo");
+    assert_eq!(payment.tenders[0].amount_minor, 1_200);
+    assert_eq!(payment.tenders[0].tendered_minor, 1_200);
+    assert_eq!(payment.tenders[0].reference.as_deref(), Some("MP123"));
+    assert_eq!(state.payment_remaining_minor(), 800);
+    assert_eq!(state.cart.len(), 1, "the basket is untouched");
+
+    // Cash clears the balance and writes the sale.
+    state.payment.as_mut().expect("open").method = "cash".to_owned();
+    state.confirm_payment();
+    assert!(state.payment.is_none());
+    assert!(state.cart.is_empty());
+
+    let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+    let detail = crate::db::sale_detail(&state.store, sale_id).expect("the sale was recorded");
+    assert_eq!(detail.payments.len(), 2);
+    assert_eq!(detail.payments[0].method, "mtn_momo");
+    assert_eq!(detail.payments[0].reference.as_deref(), Some("MP123"));
+    assert_eq!(detail.payments[1].method, "cash");
+    assert_eq!(detail.payments[1].amount_minor, 800);
+    assert_eq!(detail.paid_minor, 2_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A mobile tender has no change to give, so a figure above the balance is a
+/// typo the till names rather than a tender it silently trims.
+#[test]
+fn a_mobile_tender_cannot_exceed_the_balance() {
+    let (mut state, path) = state("mobile-overpay", Currency::UGX);
+    state.cart = vec![line("Sugar", 1, 2_000)];
+
+    state.start_payment();
+    {
+        let payment = state.payment.as_mut().expect("open");
+        payment.method = "mtn_momo".to_owned();
+        payment.tendered = "2500".to_owned();
+    }
+    state.confirm_payment();
+
+    let payment = state.payment.as_ref().expect("still open");
+    assert_eq!(
+        payment.error.as_deref(),
+        Some("That is USh 500 more than the balance.")
+    );
+    assert!(payment.tenders.is_empty());
+    assert_eq!(crate::db::totals(&state.store, 3, None), (0, 0));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The last tender is the one a mistyped figure belongs to, so undo takes it
+/// back without touching the basket or the tenders before it.
+#[test]
+fn undo_removes_only_the_last_tender() {
+    let (mut state, path) = state("tender-undo", Currency::UGX);
+    state.cart = vec![line("Sugar", 1, 2_000)];
+
+    state.start_payment();
+    state.payment.as_mut().expect("open").tendered = "1200".to_owned();
+    state.confirm_payment();
+    state.payment.as_mut().expect("open").tendered = "300".to_owned();
+    state.confirm_payment();
+    assert_eq!(state.payment_paid_minor(), 1_500);
+
+    state.remove_last_tender();
+    assert_eq!(state.payment_paid_minor(), 1_200);
+    assert_eq!(state.payment_remaining_minor(), 800);
+    assert_eq!(
+        state.payment.as_ref().expect("open").tenders.len(),
+        1,
+        "the first tender stays"
+    );
+    assert_eq!(state.cart.len(), 1);
 
     let _ = std::fs::remove_file(path);
 }

@@ -23,7 +23,7 @@ use ui_kit::theme;
 use ui_kit::tokens::{SPACING, TYPE};
 use ui_shell::egui;
 
-use crate::db::{DetailLine, SaleDetail};
+use crate::db::{DetailLine, PaidBy, SaleDetail};
 use crate::settings::ReceiptDetails;
 
 /// The paper around a sale: whose shop it is, how to reach them, and the lines
@@ -83,6 +83,13 @@ pub fn sample() -> SaleDetail {
         tax_minor: 0,
         paid_minor: 14_750,
         method: "cash".to_owned(),
+        payments: vec![PaidBy {
+            method: "cash".to_owned(),
+            amount_minor: 14_750,
+            tendered_minor: 20_000,
+            change_minor: 5_250,
+            reference: None,
+        }],
         tendered_minor: 20_000,
         change_minor: 5_250,
         lines: vec![
@@ -252,13 +259,32 @@ pub fn body(
         &amount(detail.paid_minor, currency),
         Weight::Strong,
     );
-    if detail.tendered_minor != 0 {
-        row(
-            ui,
-            &format!("Paid by {}", detail.method),
-            &amount(detail.tendered_minor, currency),
-            Weight::Plain,
-        );
+    if detail.payments.is_empty() {
+        // A sale written before the till recorded tenders separately still
+        // says what it always said.
+        if detail.tendered_minor != 0 {
+            row(
+                ui,
+                &format!("Paid by {}", detail.method),
+                &amount(detail.tendered_minor, currency),
+                Weight::Plain,
+            );
+        }
+    } else {
+        for payment in &detail.payments {
+            row(
+                ui,
+                &format!(
+                    "Paid by {}",
+                    crate::state::payment_method_label(&payment.method)
+                ),
+                &amount(payment.tendered_minor, currency),
+                Weight::Plain,
+            );
+            if let Some(reference) = &payment.reference {
+                row(ui, "Ref", reference, Weight::Plain);
+            }
+        }
     }
     if with_change && detail.change_minor != 0 {
         row(
@@ -372,12 +398,29 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
         &amount(detail.paid_minor, currency),
     ));
     out.push('\n');
-    if detail.tendered_minor != 0 {
-        out.push_str(&text_row(
-            &format!("Paid by {}", detail.method),
-            &amount(detail.tendered_minor, currency),
-        ));
-        out.push('\n');
+    if detail.payments.is_empty() {
+        if detail.tendered_minor != 0 {
+            out.push_str(&text_row(
+                &format!("Paid by {}", detail.method),
+                &amount(detail.tendered_minor, currency),
+            ));
+            out.push('\n');
+        }
+    } else {
+        for payment in &detail.payments {
+            out.push_str(&text_row(
+                &format!(
+                    "Paid by {}",
+                    crate::state::payment_method_label(&payment.method)
+                ),
+                &amount(payment.tendered_minor, currency),
+            ));
+            out.push('\n');
+            if let Some(reference) = &payment.reference {
+                out.push_str(&text_row("Ref", reference));
+                out.push('\n');
+            }
+        }
     }
     if detail.change_minor != 0 {
         out.push_str(&text_row("Change", &amount(detail.change_minor, currency)));
@@ -774,6 +817,13 @@ mod tests {
             tax_minor: 0,
             paid_minor: 12_500,
             method: "cash".to_owned(),
+            payments: vec![PaidBy {
+                method: "cash".to_owned(),
+                amount_minor: 12_500,
+                tendered_minor: 20_000,
+                change_minor: 7_500,
+                reference: None,
+            }],
             tendered_minor: 20_000,
             change_minor: 7_500,
             lines: vec![
@@ -828,7 +878,7 @@ mod tests {
         assert!(text.contains("7,500"), "{text}");
         assert!(text.contains("Total (UGX)"), "{text}");
         assert!(!text.contains("USh"), "{text}");
-        assert!(text.contains("Paid by cash"), "{text}");
+        assert!(text.contains("Paid by Cash"), "{text}");
         assert!(text.trim_end().ends_with("Thank you."), "{text}");
     }
 

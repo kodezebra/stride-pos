@@ -614,9 +614,12 @@ pub(super) fn sell_row(ui: &mut egui::Ui, name: &str, price: &str) -> egui::Resp
 /// The tender panel replaces the whole footer, so it needs its own reserve.
 /// The optional caption rows (discount, wholesale warning, cash rounding) are
 /// added only when they exist, keeping a plain cart exactly as tall as before.
-fn footer_reserve(summary: &CartSummary, tendering: bool) -> f32 {
+/// Once a tender is taken the panel adds a balance row and the "taken" strip,
+/// which are reserved from the tender count rather than guessed as a constant.
+fn footer_reserve(summary: &CartSummary, tenders: Option<usize>) -> f32 {
     const CART_FOOTER: f32 = 196.0;
-    const TENDER_FOOTER: f32 = 420.0;
+    // To pay, method row, amount field, quick notes, split row, action, back.
+    const TENDER_FOOTER: f32 = 470.0;
 
     let caption = TYPE.small * 1.8;
     let rounding = if summary.rounding_minor != 0 {
@@ -624,10 +627,12 @@ fn footer_reserve(summary: &CartSummary, tendering: bool) -> f32 {
     } else {
         0.0
     };
-    if tendering {
+    if let Some(taken) = tenders {
         // An error replaces the hint rather than stacking under it, so no
-        // extra reserve is needed here.
-        TENDER_FOOTER + rounding
+        // extra reserve is needed here. A taken tender adds the balance row
+        // and one wrapped strip line.
+        let taken_rows = if taken > 0 { caption * 2.0 } else { 0.0 };
+        TENDER_FOOTER + rounding + taken_rows
     } else {
         let discount = if summary.discount_minor > 0 {
             caption
@@ -767,7 +772,10 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
 
     // Reserve the footer first so the line list scrolls instead of pushing the
     // total off the pane. A till whose total can scroll away is broken.
-    let footer = footer_reserve(&summary, state.payment.is_some());
+    let footer = footer_reserve(
+        &summary,
+        state.payment.as_ref().map(|payment| payment.tenders.len()),
+    );
     let list_height = (ui.available_height() - footer).max(80.0);
 
     if state.cart.is_empty() {
@@ -1766,27 +1774,29 @@ mod tests {
     #[test]
     fn footer_reserve_only_adds_the_rows_that_exist() {
         let caption = TYPE.small * 1.8;
-        assert_eq!(footer_reserve(&summary(), false), 196.0);
+        assert_eq!(footer_reserve(&summary(), None), 196.0);
 
         let rounding = CartSummary {
             rounding_minor: 5,
             ..summary()
         };
-        assert_eq!(footer_reserve(&rounding, false), 196.0 + caption);
-        assert_eq!(footer_reserve(&rounding, true), 420.0 + caption);
+        assert_eq!(footer_reserve(&rounding, None), 196.0 + caption);
+        assert_eq!(footer_reserve(&rounding, Some(0)), 470.0 + caption);
+        // A taken tender adds the balance row and the taken strip.
+        assert_eq!(footer_reserve(&rounding, Some(1)), 470.0 + caption * 3.0);
 
         let discount = CartSummary {
             discount_minor: 100,
             ..summary()
         };
-        assert_eq!(footer_reserve(&discount, false), 196.0 + caption);
+        assert_eq!(footer_reserve(&discount, None), 196.0 + caption);
 
         let suppressed = CartSummary {
             suppressed: true,
             ..summary()
         };
-        assert_eq!(footer_reserve(&suppressed, false), 196.0 + caption);
-        assert_eq!(footer_reserve(&suppressed, true), 420.0);
+        assert_eq!(footer_reserve(&suppressed, None), 196.0 + caption);
+        assert_eq!(footer_reserve(&suppressed, Some(0)), 470.0);
     }
 
     #[test]
