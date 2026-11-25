@@ -1392,11 +1392,11 @@ impl Module for Settings {
             "Terminal" => {
                 shop_card(ui, state);
                 ui.add_space(SPACING.lg);
-                terminal_card(ui, state);
-                ui.add_space(SPACING.lg);
                 business_type_card(ui, state);
                 ui.add_space(SPACING.lg);
                 backup_card(ui, state);
+                ui.add_space(SPACING.lg);
+                terminal_card(ui, state);
             }
             "Scanner" => scanner_card(ui, state),
             "Staff" => {
