@@ -1050,8 +1050,8 @@ pub(super) fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
         components::caption(
             ui,
             "Picks which category names the product form offers as suggestions. \
-             It never inserts anything: the shop's own categories are the ones \
-             it has actually used, and any name can be added from the form.",
+             It never inserts anything on its own: add the suggested shelves to \
+             the catalog with the button below only if the shop wants them.",
         );
         ui.add_space(SPACING.md);
 
@@ -1114,6 +1114,35 @@ pub(super) fn business_type_card(ui: &mut egui::Ui, state: &mut State) {
             components::caption(ui, &format!("Saved: {current}."));
         } else {
             components::caption(ui, "No business type set. Category suggestions are off.");
+        }
+
+        // Adding shelves is a one-way write to the catalog, so it stays behind
+        // a button: the owner decides, and existing shelves are never renamed.
+        let has_suggestions = !dirty
+            && state
+                .settings
+                .business_type
+                .as_deref()
+                .is_some_and(|kind| !crate::category_seeds::seed_names(kind).is_empty());
+        if has_suggestions && actions::secondary_compact(ui, "Apply suggested categories").clicked()
+        {
+            match state.apply_suggested_categories() {
+                Ok(0) => {
+                    state.category_seed_notice =
+                        Some("All suggested categories are already in the catalog.".to_owned());
+                }
+                Ok(added) => {
+                    state.category_seed_notice =
+                        Some(format!("Added {added} suggested categories."));
+                }
+                Err(err) => {
+                    state.category_seed_notice = Some(format!("Could not add categories: {err:#}"));
+                }
+            }
+        }
+        if let Some(notice) = &state.category_seed_notice {
+            ui.add_space(SPACING.xs);
+            components::caption(ui, notice);
         }
     });
 }

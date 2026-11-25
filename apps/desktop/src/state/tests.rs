@@ -2031,3 +2031,60 @@ fn removing_a_line_closes_only_its_details() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// Choosing a business type only sets up suggestions; the shelves reach the
+/// catalog when the owner asks for them, and asking twice changes nothing.
+#[test]
+fn suggested_categories_are_added_only_on_request() {
+    let (mut state, path) = state("apply-suggestions", Currency::UGX);
+    state.business_draft = "Pharmacy".to_owned();
+    state.save_business_type();
+    assert!(
+        crate::db::categories_list(&state.store).is_empty(),
+        "a choice alone adds no shelves"
+    );
+
+    let seeds = crate::category_seeds::seed_names("pharmacy");
+    let added = state.apply_suggested_categories().expect("apply");
+    assert_eq!(added, seeds.len());
+    let stored = crate::db::categories_list(&state.store);
+    for name in &seeds {
+        assert!(stored.iter().any(|row| row.name.eq_ignore_ascii_case(name)));
+    }
+
+    assert_eq!(state.apply_suggested_categories().expect("apply twice"), 0);
+    assert_eq!(crate::db::categories_list(&state.store).len(), stored.len());
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A shelf the shop already created keeps its name and casing; applying the
+/// suggestions fills the gaps without duplicating it.
+#[test]
+fn applying_suggestions_keeps_a_shelf_the_shop_already_named() {
+    let (mut state, path) = state("apply-suggestions-existing", Currency::UGX);
+    let existing = "vitamins & supplements".to_owned();
+    crate::db::find_or_insert_category(&state.store, &existing).expect("seed shelf");
+    state.business_draft = "Pharmacy".to_owned();
+    state.save_business_type();
+
+    let seeds = crate::category_seeds::seed_names("pharmacy");
+    assert_eq!(
+        state.apply_suggested_categories().expect("apply"),
+        seeds.len() - 1
+    );
+    let stored = crate::db::categories_list(&state.store);
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|row| row.name.eq_ignore_ascii_case(&existing))
+            .count(),
+        1
+    );
+    assert!(
+        stored.iter().any(|row| row.name == existing),
+        "the shop's casing survives"
+    );
+
+    let _ = std::fs::remove_file(path);
+}

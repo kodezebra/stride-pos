@@ -146,6 +146,7 @@ impl State {
             if self.settings.business_type.is_some() {
                 self.settings.business_type = None;
                 self.settings_dirty = true;
+                self.category_seed_notice = None;
             }
             return;
         }
@@ -153,7 +154,36 @@ impl State {
             self.settings.business_type = Some(chosen.clone());
             self.business_draft = chosen;
             self.settings_dirty = true;
+            // The old type's result no longer describes this one.
+            self.category_seed_notice = None;
         }
+    }
+
+    /// Add the suggested categories for the saved business type to the
+    /// `categories` table. Nothing calls this but the explicit button in
+    /// Settings: choosing a type only changes product-form suggestions.
+    ///
+    /// Existing shelves are matched case-insensitively and left untouched, so
+    /// pressing the button twice is harmless. Returns the number of new rows.
+    pub fn apply_suggested_categories(&mut self) -> anyhow::Result<usize> {
+        let Some(business_type) = self.settings.business_type.clone() else {
+            return Ok(0);
+        };
+        let seeds = crate::category_seeds::seed_names(&business_type);
+        let existing = crate::db::categories_list(&self.store);
+        let missing: Vec<String> = seeds
+            .into_iter()
+            .filter(|seed| {
+                !existing
+                    .iter()
+                    .any(|row| row.name.eq_ignore_ascii_case(seed))
+            })
+            .collect();
+
+        for name in &missing {
+            crate::db::find_or_insert_category(&self.store, name)?;
+        }
+        Ok(missing.len())
     }
 
     pub fn sidebar_open(&self, module: usize) -> bool {
