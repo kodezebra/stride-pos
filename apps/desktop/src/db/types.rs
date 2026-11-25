@@ -115,6 +115,10 @@ pub struct SaleTerms<'a> {
     pub discount_minor: i64,
     /// The rate that produced it, in basis points.
     pub discount_bp: i64,
+    /// When `true`, the sale was recorded "on credit": the customer takes the
+    /// goods now and pays later. Zero tenders are allowed and `paid_minor`
+    /// reflects whatever cash was actually received (which may be zero).
+    pub is_on_credit: bool,
     /// `retail` or `wholesale`.
     pub price_mode: &'a str,
     /// The customer row, when one is still in the catalog.
@@ -136,6 +140,7 @@ impl Default for SaleTerms<'_> {
             payments: &[],
             discount_minor: 0,
             discount_bp: 0,
+            is_on_credit: false,
             price_mode: "retail",
             customer_id: None,
             customer_name: None,
@@ -829,10 +834,14 @@ pub struct SaleDetail {
     pub price_mode: String,
     /// The customer on the sale, as named at the time.
     pub customer_name: Option<String>,
+    /// The customer row, when one was attached at the time of sale.
+    pub customer_id: Option<i64>,
+    /// Whether this sale was sold on credit: goods taken now, paid later.
+    pub is_on_credit: bool,
     /// Cash rounding on top of `total` — `0` most of the time, and what the
     /// customer paid above the exact total otherwise.
     pub rounding_minor: i64,
-    /// `total + rounding`: what actually entered the drawer for this sale.
+    /// `total + rounding`: the full amount charged for this sale.
     pub paid_minor: i64,
     /// The tax the sale collected, included in `total_minor`. `0` when the
     /// till charges no tax.
@@ -847,7 +856,46 @@ pub struct SaleDetail {
     pub tendered_minor: i64,
     /// What went back, summed across payments.
     pub change_minor: i64,
+    /// What has actually been received against this sale so far: the sum of
+    /// `payments.amount_minor`. On a settled sale this equals `paid_minor`;
+    /// on a credit sale it can be less (or zero).
+    pub settled_minor: i64,
+    /// What is still owed: `paid_minor - settled_minor`, floored at zero.
+    /// Non-zero only while a credit sale is unsettled.
+    pub balance_minor: i64,
     pub lines: Vec<DetailLine>,
+}
+
+/// A payment taken later against a credit sale.
+///
+/// It carries its own drawer and cashier: the customer may come back on a
+/// different day, to a different till, and that money belongs to the shift
+/// that took it rather than the one that rang up the sale.
+pub struct CreditPayment<'a> {
+    pub sale_id: i64,
+    pub method: &'a str,
+    /// What this payment contributes to the balance.
+    pub amount_minor: i64,
+    /// What the customer handed over. Cash may overpay and give change.
+    pub tendered_minor: i64,
+    pub reference: Option<&'a str>,
+    pub shift_uid: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+}
+
+/// One credit sale still owed money, shown when a customer comes back to pay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreditSale {
+    pub id: i64,
+    pub receipt_no: Option<String>,
+    /// Local time, like the sales list shows.
+    pub created_at: String,
+    /// The full amount charged.
+    pub total_minor: i64,
+    /// What has been received so far.
+    pub settled_minor: i64,
+    /// What remains: `total_minor - settled_minor`.
+    pub balance_minor: i64,
 }
 
 /// One local day's totals — the trend behind the range.

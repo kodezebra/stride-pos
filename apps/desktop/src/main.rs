@@ -65,6 +65,36 @@ fn main() -> ExitCode {
         db::repair_suppliers(&store)?;
         store.migrate(db::MIGRATIONS)?;
 
+        // Ensure the `reference` column exists on the `payments` table.
+        // Some databases may be at user_version 21 without the column having been
+        // applied (e.g. the pragma was set without running the ALTER TABLE, or a
+        // migration was otherwise skipped). This is safe to run repeatedly because
+        // SQLite’s ALTER TABLE ADD COLUMN is a no-op if the column already exists;
+        // if it is missing, it will be added.
+        let _ = store
+            .conn()
+            .execute_batch("ALTER TABLE payments ADD COLUMN reference TEXT;");
+
+        // The credit flag was added after the payment reference. A till that
+        // already stamped its schema version can still be missing the column,
+        // so check the shape rather than trusting the version number.
+        let conn = store.conn();
+        let has_is_on_credit = conn
+            .prepare("PRAGMA table_info(sales)")
+            .map(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map(|rows| rows.flatten().any(|name| name == "is_on_credit"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !has_is_on_credit {
+            conn.execute_batch(
+                "ALTER TABLE sales ADD COLUMN is_on_credit INTEGER NOT NULL DEFAULT 0
+                     CHECK (is_on_credit IN (0, 1));",
+            )?;
+        }
+
         let settings_path = ctx.config_path("settings.json");
         let settings: settings::Settings = config::load_or_default(&settings_path)?;
         let theme = settings.theme();

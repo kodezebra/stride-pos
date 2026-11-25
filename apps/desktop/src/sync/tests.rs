@@ -139,6 +139,76 @@ fn a_sale_moves_to_a_peer_and_a_replay_does_nothing() {
     );
 }
 
+/// A credit sale can be paid off after it was first pushed. The later payment
+/// rides with the sale's next pull and must appear on the peer exactly once.
+#[test]
+fn a_later_credit_payment_reaches_a_peer_that_already_has_the_sale() {
+    let a = Fixture::new("credit-sync-a");
+    let b = Fixture::new("credit-sync-b");
+    seed_catalog(&a);
+    seed_catalog(&b);
+    let customer = db::save_customer(a.db(), None, "Mama Njeri", None, 0).expect("customer a");
+    db::save_customer(b.db(), None, "Mama Njeri", None, 0).expect("customer b");
+
+    let sale = db::record_sale(
+        a.db(),
+        &[SaleLine {
+            product_id: Some(10),
+            name: "Tea".to_owned(),
+            qty: 2,
+            unit_minor: 500,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            is_on_credit: true,
+            customer_id: Some(customer),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    let first = pulled(a.db());
+    ingest_sales(b.db(), &offer(vec![first])).expect("first ingest");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM payments"), 0);
+
+    db::record_credit_payment(
+        a.db(),
+        &db::CreditPayment {
+            sale_id: sale.id,
+            method: "cash",
+            amount_minor: 400,
+            tendered_minor: 400,
+            reference: None,
+            shift_uid: Some("shift-a"),
+            user_id: Some("alice"),
+        },
+    )
+    .expect("later payment");
+
+    let second = pulled(a.db());
+    ingest_sales(b.db(), &offer(vec![second])).expect("second ingest");
+    assert_eq!(
+        b.scalar::<i64>("SELECT COUNT(*) FROM payments"),
+        1,
+        "the peer learns about the payment"
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT SUM(amount_minor) FROM payments"),
+        400
+    );
+    assert_eq!(
+        b.scalar::<i64>("SELECT COUNT(*) FROM payments WHERE shift_uid = 'shift-a'"),
+        1,
+        "the payment keeps its own drawer attribution"
+    );
+
+    // A replay must not double-count it.
+    ingest_sales(b.db(), &offer(vec![pulled(a.db())])).expect("replay");
+    assert_eq!(b.scalar::<i64>("SELECT COUNT(*) FROM payments"), 1);
+}
+
 /// A pack crosses the wire as what it is: the factor is kept for the slip,
 /// and the receiving ledger moves a pack's worth of tablets, not one.
 #[test]

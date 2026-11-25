@@ -517,6 +517,122 @@ fn a_sale_empties_the_cart_and_closes_the_payment() {
     let _ = std::fs::remove_file(path);
 }
 
+/// Selecting "Sold on credit" and completing with the amount field empty must
+/// write a sale with no tenders at all — not a full cash tender that merely
+/// carries the flag.
+#[test]
+fn a_credit_checkout_writes_no_tender_and_keeps_the_balance() {
+    let (mut state, path) = state("credit-checkout", Currency::UGX);
+    let customer_id = crate::db::save_customer(&state.store, None, "Mama Njeri", None, 0)
+        .expect("a credit sale needs a customer");
+    state.customer = Some(crate::db::Customer {
+        id: customer_id,
+        name: "Mama Njeri".to_owned(),
+        phone: None,
+        discount_bp: 0,
+    });
+    state.cart = vec![line("Sugar", 1, 340), line("Soap", 2, 500)];
+
+    state.start_payment();
+    state.payment.as_mut().expect("open").is_on_credit = true;
+    state.confirm_payment();
+
+    assert!(state.payment.is_none(), "the panel closes with the sale");
+    assert!(state.cart.is_empty(), "the goods have gone out");
+
+    let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+    let detail = crate::db::sale_detail(&state.store, sale_id).expect("recorded sale");
+    assert!(detail.is_on_credit);
+    assert_eq!(detail.paid_minor, 1_300, "the full amount is still charged");
+    assert!(detail.payments.is_empty(), "nothing was collected yet");
+    assert_eq!(detail.settled_minor, 0);
+    assert_eq!(detail.balance_minor, 1_300);
+    // Sales value is still counted, but no cash reached the drawer.
+    assert_eq!(crate::db::totals(&state.store, 3, None), (1, 1_300));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A part-payment at checkout is still a completed credit sale: the goods go
+/// out and the remainder stays on the customer's balance.
+#[test]
+fn a_part_payment_still_completes_a_credit_checkout() {
+    let (mut state, path) = state("credit-part", Currency::UGX);
+    let customer_id = crate::db::save_customer(&state.store, None, "Mama Njeri", None, 0)
+        .expect("a credit sale needs a customer");
+    state.customer = Some(crate::db::Customer {
+        id: customer_id,
+        name: "Mama Njeri".to_owned(),
+        phone: None,
+        discount_bp: 0,
+    });
+    state.cart = vec![line("Sugar", 1, 300)];
+
+    state.start_payment();
+    {
+        let payment = state.payment.as_mut().expect("open");
+        payment.is_on_credit = true;
+        payment.tendered = "100".to_owned();
+    }
+    state.confirm_payment();
+
+    let sale_id = crate::db::sales(&state.store, 3, 10, None)[0].id;
+    let detail = crate::db::sale_detail(&state.store, sale_id).expect("recorded sale");
+    assert!(detail.is_on_credit);
+    assert_eq!(detail.settled_minor, 100);
+    assert_eq!(detail.balance_minor, 200);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Taking money later is taking money. With nobody signed in the till is
+/// locked, so settling must ask for an override instead of writing a payment.
+#[test]
+fn settling_a_credit_sale_needs_someone_signed_in() {
+    let (mut state, path) = state("credit-permission", Currency::UGX);
+    let customer_id =
+        crate::db::save_customer(&state.store, None, "Mama Njeri", None, 0).expect("customer");
+    let sale = crate::db::record_sale(
+        &state.store,
+        &[crate::db::SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 300,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &crate::db::SaleTerms {
+            is_on_credit: true,
+            customer_id: Some(customer_id),
+            customer_name: Some("Mama Njeri"),
+            ..crate::db::SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    state.customer = Some(crate::db::Customer {
+        id: customer_id,
+        name: "Mama Njeri".to_owned(),
+        phone: None,
+        discount_bp: 0,
+    });
+    state.refresh_credit_sales();
+    state.credit_tendered = "300".to_owned();
+    state.session = None;
+
+    state.record_credit_payment();
+
+    assert!(state.override_request.is_some(), "a manager must approve");
+    let detail = crate::db::sale_detail(&state.store, sale.id).expect("detail");
+    assert!(
+        detail.payments.is_empty(),
+        "nothing was written while locked"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn an_empty_cash_field_means_the_exact_amount() {
     let (mut state, path) = state("exact", Currency::UGX);

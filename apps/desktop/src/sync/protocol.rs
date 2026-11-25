@@ -76,6 +76,10 @@ pub struct SaleDto {
     pub rounding_minor: i64,
     #[serde(default)]
     pub tax_minor: i64,
+    /// `1` when the goods were taken now and paid for later. A peer that has
+    /// never heard of credit sends `0`, which is what every older sale was.
+    #[serde(default)]
+    pub is_on_credit: i64,
     /// The number on the paper at the origin. Absent from a peer too old to
     /// send one, and from a sale written before numbers carried a device.
     #[serde(default)]
@@ -118,6 +122,16 @@ pub struct PaymentDto {
     pub amount_minor: i64,
     pub tendered_minor: i64,
     pub change_minor: i64,
+    /// The drawer this tender filled. A later credit payment belongs to the
+    /// shift it was taken in, not to the sale it settles.
+    #[serde(default)]
+    pub shift_uid: Option<String>,
+    /// Who took this tender, which can differ from the original cashier.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// When the tender was taken at the origin.
+    #[serde(default)]
+    pub occurred_at: Option<String>,
 }
 
 /// One stock movement written by a sale. `delta` is validated against the
