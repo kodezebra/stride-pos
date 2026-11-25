@@ -311,6 +311,10 @@ pub struct State {
     /// The file the last [`State::file_notice`] is about, so the screen can
     /// offer the path for copying without parsing it back out of a sentence.
     pub file_path: Option<PathBuf>,
+    /// Result of the one-click "apply suggested categories" action, shown in
+    /// the business-type card. It reports a write the owner asked for, never
+    /// one the app did on its own.
+    pub category_seed_notice: Option<String>,
     /// A backup asked for but not yet written. Inline rather than a modal, for
     /// the same reason deleting a product asks in its row: the card is where
     /// the button was.
@@ -503,6 +507,7 @@ impl State {
             sale_open: None,
             notice: None,
             file_notice: None,
+            category_seed_notice: None,
             file_path: None,
             backup_confirm: false,
             auto_backup_error: None,

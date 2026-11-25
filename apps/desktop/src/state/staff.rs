@@ -159,6 +159,7 @@ impl State {
             self.notice = None;
             self.file_notice = None;
             self.file_path = None;
+            self.category_seed_notice = None;
             self.backup_confirm = false;
             // Opening the selling screen returns the cursor to the scan field, so
             // the next barcode lands in the cart without a click.
