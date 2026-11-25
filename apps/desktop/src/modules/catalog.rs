@@ -24,11 +24,18 @@ pub(super) fn categories_sidebar(ui: &mut egui::Ui, state: &mut State) {
     // Cloned because the click mutates `state.category` while the list is being
     // drawn from `state.categories`; both are fields of the same struct.
     let categories = state.categories.clone();
-    for category in &categories {
-        let selected = state.category.as_deref() == Some(category.as_str());
-        if regions::nav_item(ui, selected, category).clicked() {
-            state.category = Some(category.clone());
+    for shelf in &categories {
+        let selected = state.category.as_deref() == Some(shelf.name.as_str());
+        // The count rides in the label: `nav_item` fills the row, so a second
+        // widget beside it would be pushed off the sidebar. A shelf with zero
+        // products stays clickable — an empty shelf is still the shop's shelf.
+        let label = format!("{} ({})", shelf.name, shelf.count);
+        if regions::nav_item(ui, selected, &label).clicked() {
+            state.category = Some(shelf.name.clone());
         }
+    }
+    if categories.is_empty() {
+        components::caption(ui, "Categories appear as products are added.");
     }
 }
 
@@ -383,6 +390,11 @@ pub(super) fn product_row(
     can_manage: bool,
 ) -> Option<ProductAction> {
     let mut action = None;
+    // Cost is a buyer's fact: the shop pays it and the margin is decided here.
+    // Cashiers cannot see it, any more than they can move stock or change price.
+    let cost = can_manage
+        .then(|| cost_detail(product, state.currency))
+        .flatten();
 
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
@@ -402,6 +414,7 @@ pub(super) fn product_row(
                     stock,
                     &state.expiring,
                     state.expiry_warning_days(),
+                    cost.as_deref(),
                 )
             },
         );
@@ -488,6 +501,7 @@ pub(super) fn product_identity(
     stock: Option<&StockItem>,
     expiring: &[ExpiryBucket],
     warn_days: i64,
+    cost: Option<&str>,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.label(components::semibold(&product.name).size(TYPE.body));
@@ -583,6 +597,10 @@ pub(super) fn product_identity(
         detail.push_str(" · ");
         detail.push_str(barcode);
     }
+    if let Some(cost) = cost {
+        detail.push_str(" · ");
+        detail.push_str(cost);
+    }
     components::caption(ui, &detail);
 }
 
@@ -619,6 +637,24 @@ pub(super) fn stock_badge(ui: &egui::Ui, item: &StockItem) -> (Rgb, String) {
             ),
         )
     }
+}
+
+/// Last known cost and margin for a product, as the catalog says it.
+///
+/// Cost is stored in thousandths of a minor unit because a pack of 100 at
+/// 1,850 is 18.5 a tablet; round it the way receiving and sale lines do before
+/// showing it. A product nobody has bought has no cost at all — not a zero that
+/// would read as free goods.
+pub(super) fn cost_detail(product: &Product, currency: money::Currency) -> Option<String> {
+    let cost_milli = product.cost_milli?;
+    let cost_minor = (cost_milli + 500) / 1000;
+    let mut detail = format!("cost {}", Money::new(cost_minor, currency).format());
+    if product.price_minor > 0 {
+        let margin = ((product.price_minor - cost_minor) * 100 + product.price_minor / 2)
+            / product.price_minor;
+        detail.push_str(&format!(" · {margin}% margin"));
+    }
+    Some(detail)
 }
 
 /// Short label for the collapsed Pack & barcodes section.
@@ -698,14 +734,21 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let currency = state.currency;
     let can_track = state.permits(crate::auth::Permission::ManageInventory);
     let editing_id = state.product_editor.as_ref().and_then(|draft| draft.id);
-    // Suggested category names: categories the shop has already created, then
-    // the seed list for this till's business type. Case-insensitive
+    // The saved cost of the product being edited. New products have no cost
+    // until a delivery is received, and a cashier has no business seeing it.
+    let cost_note = editing_id
+        .filter(|_| can_track)
+        .and_then(|id| state.products.iter().find(|product| product.id == id))
+        .and_then(|product| cost_detail(product, currency));
+    // Suggested category names: the shelves already on screen, in the shop's
+    // order, then the seed list for this till's business type. Case-insensitive
     // de-duplication keeps "Vitamins" and "vitamins" as one shelf.
     let suggestions: Vec<String> = match state.product_editor.as_ref() {
         Some(draft) => {
-            let mut names: Vec<String> = crate::db::categories_list(&state.store)
+            let mut names: Vec<String> = state
+                .categories
                 .iter()
-                .map(|category| category.name.clone())
+                .map(|shelf| shelf.name.clone())
                 .collect();
             if let Some(business_type) = &state.settings.business_type {
                 for seed in category_seeds::seed_names(business_type) {
@@ -771,6 +814,9 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         // replacing it as they keep adjusting the pack price.
         if response.changed() {
             draft.note_price_typed();
+        }
+        if let Some(note) = &cost_note {
+            components::caption(ui, note);
         }
 
         ui.add_space(SPACING.md);

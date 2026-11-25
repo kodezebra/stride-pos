@@ -176,7 +176,10 @@ impl State {
         self.categories = crate::db::categories(&self.store);
 
         if let Some(selected) = &self.category
-            && !self.categories.iter().any(|category| category == selected)
+            && !self
+                .categories
+                .iter()
+                .any(|category| category.name == *selected)
         {
             self.category = None;
         }
@@ -529,11 +532,21 @@ impl State {
                 skipped += 1;
                 continue;
             }
+            // Import also creates the shelf, so the sidebar the products land
+            // on is the same shelf the product form offers. A failure here is
+            // not a reason to drop a good product: the text still names it.
+            let category_id = match crate::db::find_or_insert_category(&self.store, &row.category) {
+                Ok(id) => Some(id),
+                Err(error) => {
+                    tracing::warn!(error = %error, "could not resolve an imported category");
+                    None
+                }
+            };
             let fields = crate::db::ProductFields {
                 name: &row.name,
                 price_minor: row.price_minor,
                 category: &row.category,
-                category_id: None,
+                category_id,
                 barcode: row.barcode.as_deref(),
                 unit_label: &row.unit_label,
                 pack_size: row.pack_size,

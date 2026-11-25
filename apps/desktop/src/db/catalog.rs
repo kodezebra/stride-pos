@@ -104,28 +104,62 @@ fn breaks_by_product(store: &storage::Store) -> std::collections::HashMap<i64, V
     grouped
 }
 
-/// The categories in use, so the sidebar lists the shop's groups rather than a
-/// list the app invented.
-pub fn categories(store: &storage::Store) -> Vec<String> {
-    let mut statement = match store.conn().prepare(
-        "SELECT DISTINCT category FROM products
-         WHERE archived = 0 ORDER BY category COLLATE NOCASE",
-    ) {
-        Ok(statement) => statement,
-        Err(err) => {
-            tracing::warn!(error = %err, "categories prepare failed");
-            return Vec::new();
-        }
-    };
+/// The shelves the sidebars show, in the shop's order, with a live count.
+///
+/// The `categories` table is the source of the name and the order; the count
+/// comes from the denormalized name on each live product, so a product with no
+/// `category_id` still lands on the shelf its name says. Names that only exist
+/// on products — an older import, or a database from before the table — are
+/// appended rather than dropped. Hiding them would strand those products behind
+/// a search box.
+pub fn categories(store: &storage::Store) -> Vec<CategorySummary> {
+    let mut shelves = Vec::new();
 
-    let rows = statement.query_map([], |row| row.get::<_, String>(0));
-    match rows {
-        Ok(rows) => rows.filter_map(Result::ok).collect(),
-        Err(err) => {
-            tracing::warn!(error = %err, "categories query failed");
-            Vec::new()
-        }
+    let table = store.conn().prepare(
+        "SELECT c.name, c.sort_order,
+                (SELECT COUNT(*) FROM products p
+                  WHERE p.archived = 0 AND p.category = c.name COLLATE NOCASE)
+           FROM categories c
+          ORDER BY c.sort_order, c.name COLLATE NOCASE",
+    );
+    match table {
+        Ok(mut statement) => match statement.query_map([], |row| {
+            Ok(CategorySummary {
+                name: row.get(0)?,
+                sort_order: row.get(1)?,
+                count: row.get::<_, i64>(2)? as usize,
+            })
+        }) {
+            Ok(rows) => shelves.extend(rows.filter_map(Result::ok)),
+            Err(err) => tracing::warn!(error = %err, "categories query failed"),
+        },
+        Err(err) => tracing::warn!(error = %err, "categories prepare failed"),
     }
+
+    let extra = store.conn().prepare(
+        "SELECT p.category, COUNT(*)
+           FROM products p
+          WHERE p.archived = 0
+            AND NOT EXISTS (SELECT 1 FROM categories c
+                             WHERE c.name = p.category COLLATE NOCASE)
+          GROUP BY p.category COLLATE NOCASE
+          ORDER BY p.category COLLATE NOCASE",
+    );
+    match extra {
+        Ok(mut statement) => match statement.query_map([], |row| {
+            Ok(CategorySummary {
+                name: row.get(0)?,
+                sort_order: 0,
+                count: row.get::<_, i64>(1)? as usize,
+            })
+        }) {
+            Ok(rows) => shelves.extend(rows.filter_map(Result::ok)),
+            Err(err) => tracing::warn!(error = %err, "product-only categories query failed"),
+        },
+        Err(err) => tracing::warn!(error = %err, "product-only categories prepare failed"),
+    }
+
+    shelves
 }
 
 /// Every row in the `categories` table, by name.
@@ -168,6 +202,15 @@ pub fn categories_list(store: &storage::Store) -> Vec<Category> {
 /// "vitamins" are the same shelf, and a second product typed by hand should not
 /// create a duplicate.
 pub fn find_or_insert_category(store: &storage::Store, name: &str) -> anyhow::Result<i64> {
+    insert_category(store, name, 0)
+}
+
+/// The same lookup, with the place a new shelf takes in the sidebar.
+///
+/// A shelf the shop already has keeps its order: coming back through the form
+/// must not reshuffle the sidebars. The order is only written on the row that is
+/// actually new, which is how the suggested list can arrive pre-ordered.
+pub fn insert_category(store: &storage::Store, name: &str, sort_order: i64) -> anyhow::Result<i64> {
     let name = name.trim();
     anyhow::ensure!(!name.is_empty(), "a category needs a name");
 
@@ -182,8 +225,8 @@ pub fn find_or_insert_category(store: &storage::Store, name: &str) -> anyhow::Re
 
     // Insert it.
     store.conn().execute(
-        "INSERT INTO categories (name, sort_order) VALUES (?1, 0)",
-        [name],
+        "INSERT INTO categories (name, sort_order) VALUES (?1, ?2)",
+        (name, sort_order),
     )?;
     Ok(store.conn().last_insert_rowid())
 }

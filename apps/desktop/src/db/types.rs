@@ -348,6 +348,20 @@ pub struct Category {
     pub color: Option<String>,
 }
 
+/// A shelf as the sidebars show it: its name, its place, and how many live
+/// products sit on it.
+///
+/// The `categories` table owns the name and the order. A product whose text
+/// names a shelf the table has never seen is still shown: a CSV import can
+/// arrive with names no one has tapped into a form yet, and hiding those
+/// shelves would make their products reachable only by search.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CategorySummary {
+    pub name: String,
+    pub sort_order: i64,
+    pub count: usize,
+}
+
 /// The editable fields of a supplier, as the form holds them.
 ///
 /// One struct rather than six string arguments: the insert and update paths
