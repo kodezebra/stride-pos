@@ -79,6 +79,8 @@ pub fn sample() -> SaleDetail {
         discount_bp: 0,
         price_mode: "retail".to_owned(),
         customer_name: None,
+        customer_id: None,
+        is_on_credit: false,
         rounding_minor: 0,
         tax_minor: 0,
         paid_minor: 14_750,
@@ -92,6 +94,8 @@ pub fn sample() -> SaleDetail {
         }],
         tendered_minor: 20_000,
         change_minor: 5_250,
+        settled_minor: 14_750,
+        balance_minor: 0,
         lines: vec![
             DetailLine {
                 name: "Flat white".to_owned(),
@@ -294,6 +298,14 @@ pub fn body(
             Weight::Change,
         );
     }
+    if detail.is_on_credit && detail.balance_minor != 0 {
+        row(
+            ui,
+            "Balance due",
+            &amount(detail.balance_minor, currency),
+            Weight::Strong,
+        );
+    }
 
     ui.add_space(SPACING.sm);
     if let Some(policy) = non_empty(paper.return_policy) {
@@ -424,6 +436,13 @@ pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> Stri
     }
     if detail.change_minor != 0 {
         out.push_str(&text_row("Change", &amount(detail.change_minor, currency)));
+        out.push('\n');
+    }
+    if detail.is_on_credit && detail.balance_minor != 0 {
+        out.push_str(&text_row(
+            "Balance due",
+            &amount(detail.balance_minor, currency),
+        ));
         out.push('\n');
     }
 
@@ -813,6 +832,8 @@ mod tests {
             discount_bp: 0,
             price_mode: "retail".to_owned(),
             customer_name: None,
+            customer_id: None,
+            is_on_credit: false,
             rounding_minor: 100,
             tax_minor: 0,
             paid_minor: 12_500,
@@ -826,6 +847,8 @@ mod tests {
             }],
             tendered_minor: 20_000,
             change_minor: 7_500,
+            settled_minor: 12_500,
+            balance_minor: 0,
             lines: vec![
                 DetailLine {
                     name: "Flat white".to_owned(),

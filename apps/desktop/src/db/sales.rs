@@ -75,16 +75,26 @@ pub fn record_sale(
         .context("the amount due does not fit in 64 bits")?;
     anyhow::ensure!(paid_minor >= 0, "the amount due cannot be negative");
 
-    // Older callers still arrive with one cash figure in `tendered_minor`;
-    // the checkout now collects a list from the first tender. Making the legacy
-    // figure a one-row list keeps one write path and one set of rules.
+    // When the sale is on credit, zero tenders are allowed and the payment
+    // rows are optional. The outstanding balance is tracked as
+    // `total_minor - paid_minor` and the customer is billed later.
+    let is_credit = terms.is_on_credit;
+    anyhow::ensure!(
+        !is_credit || terms.customer_id.is_some(),
+        "a credit sale needs a customer to bill later"
+    );
+
     let single_cash = PaymentLine {
         method: "cash",
         amount_minor: paid_minor,
         tendered_minor: terms.tendered_minor,
         reference: None,
     };
-    let tenders: &[PaymentLine<'_>] = if terms.payments.is_empty() {
+    let tenders: &[PaymentLine<'_>] = if terms.payments.is_empty() && is_credit {
+        // No tenders on a credit sale: allow zero rows; the loop below will
+        // be skipped and no payment rows will be written.
+        &[]
+    } else if terms.payments.is_empty() {
         std::slice::from_ref(&single_cash)
     } else {
         terms.payments
@@ -135,10 +145,14 @@ pub fn record_sale(
             .checked_add(tender.tendered_minor)
             .context("the payments do not fit in 64 bits")?;
     }
-    anyhow::ensure!(
-        taken_minor == paid_minor,
-        "payments sum to {taken_minor}, not the amount due {paid_minor}"
-    );
+    // On a credit sale, zero tenders are valid; only require the sum when
+    // we actually have tenders (legacy single-cash path).
+    if !is_credit && taken_minor != paid_minor {
+        anyhow::ensure!(
+            false,
+            "payments sum to {taken_minor}, not the amount due {paid_minor}"
+        );
+    }
 
     // Read the install identity before opening the transaction: on an upgraded
     // database this may write `meta`, and the transaction's first write must be
@@ -160,8 +174,8 @@ pub fn record_sale(
         "INSERT INTO sales
              (total_minor, rounding_minor, tax_minor, discount_minor, discount_bp,
               price_mode, customer_id, customer_name, user_id, uid, origin_device,
-              change_seq, shift_uid, receipt_no)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              change_seq, shift_uid, receipt_no, is_on_credit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         (
             total_minor,
             terms.rounding_minor,
@@ -177,6 +191,7 @@ pub fn record_sale(
             change_seq,
             terms.shift_uid,
             receipt_no.as_str(),
+            i64::from(is_credit),
         ),
     )?;
     let id = transaction.last_insert_rowid();
@@ -264,8 +279,9 @@ pub fn record_sale(
         };
         transaction.execute(
             "INSERT INTO payments
-                 (sale_id, method, amount_minor, tendered_minor, change_minor, uid, reference)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (sale_id, method, amount_minor, tendered_minor, change_minor, uid, reference,
+                  shift_uid, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
             (
                 id,
                 method,
@@ -274,6 +290,8 @@ pub fn record_sale(
                 change,
                 payment_uid.as_str(),
                 tender.reference,
+                terms.shift_uid,
+                terms.user_id,
             ),
         )?;
     }
@@ -397,9 +415,12 @@ pub fn ensure_open_shift(
 /// drawer gained: the change was counted out of the same drawer.
 pub fn drawer_totals(store: &storage::Store, shift_uid: &str) -> DrawerTotals {
     match store.conn().query_row(
-        "SELECT COALESCE(SUM(p.amount_minor), 0), COUNT(DISTINCT s.id)
-         FROM sales s JOIN payments p ON p.sale_id = s.id
-         WHERE s.shift_uid = ?1",
+        // Attribute by the payment's own shift. A payment taken today against
+        // an older credit sale belongs in the drawer being counted now; before
+        // payments carried attribution it was silently filed with the old sale.
+        "SELECT COALESCE(SUM(p.amount_minor), 0), COUNT(DISTINCT p.sale_id)
+         FROM payments p JOIN sales s ON s.id = p.sale_id
+         WHERE COALESCE(p.shift_uid, s.shift_uid) = ?1",
         [shift_uid],
         |row| {
             Ok(DrawerTotals {
@@ -776,7 +797,8 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     let head = match conn.query_row(
         "SELECT s.total_minor, s.rounding_minor, s.tax_minor, \
          strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'), u.name, s.receipt_no, \
-         s.discount_minor, s.discount_bp, s.price_mode, s.customer_name
+         s.discount_minor, s.discount_bp, s.price_mode, s.customer_name, \
+         s.customer_id, s.is_on_credit
          FROM sales s LEFT JOIN users u ON u.id = s.user_id
          WHERE s.id = ?1",
         [id],
@@ -792,6 +814,8 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
                 row.get::<_, i64>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)? != 0,
             ))
         },
     ) {
@@ -839,6 +863,7 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     let mut payments = Vec::new();
     let mut tendered_minor = 0;
     let mut change_minor = 0;
+    let mut settled_minor = 0;
     if let Ok(mut statement) = conn.prepare(
         "SELECT method, amount_minor, tendered_minor, change_minor, reference
            FROM payments WHERE sale_id = ?1 ORDER BY id",
@@ -868,11 +893,14 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
                 });
                 tendered_minor += payment.2;
                 change_minor += payment.3;
+                settled_minor += payment.1;
             }
         }
     } else {
         tracing::warn!("payments prepare failed");
     };
+
+    let due_minor = head.0 + head.1;
 
     Some(SaleDetail {
         id,
@@ -884,9 +912,11 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
         discount_bp: head.7,
         price_mode: head.8,
         customer_name: head.9,
+        customer_id: head.10,
+        is_on_credit: head.11,
         rounding_minor: head.1,
         tax_minor: head.2,
-        paid_minor: head.0 + head.1,
+        paid_minor: due_minor,
         method: if method_parts.is_empty() {
             "-".to_owned()
         } else {
@@ -895,8 +925,145 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
         payments,
         tendered_minor,
         change_minor,
+        settled_minor,
+        balance_minor: (due_minor - settled_minor).max(0),
         lines,
     })
+}
+
+/// Credit sales a customer still owes on, newest first.
+///
+/// The balance is derived from the payment rows rather than stored: a payment
+/// taken later is just another append-only row against the same sale, so the
+/// figure cannot drift from what was actually received. The existing
+/// `sales_customer` index serves the lookup.
+pub fn credit_sales(store: &storage::Store, customer_id: i64) -> Vec<CreditSale> {
+    let conn = store.conn();
+    let mut statement = match conn.prepare(
+        "SELECT s.id, s.receipt_no,
+                strftime('%d/%m/%Y %H:%M', s.created_at, 'localtime'),
+                s.total_minor + s.rounding_minor,
+                COALESCE(SUM(p.amount_minor), 0)
+           FROM sales s LEFT JOIN payments p ON p.sale_id = s.id
+          WHERE s.customer_id = ?1 AND s.is_on_credit = 1
+          GROUP BY s.id
+         HAVING (s.total_minor + s.rounding_minor) > COALESCE(SUM(p.amount_minor), 0)
+          ORDER BY s.created_at DESC, s.id DESC",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "credit sales prepare failed");
+            return Vec::new();
+        }
+    };
+    let rows = match statement.query_map([customer_id], |row| {
+        let due = row.get::<_, i64>(3)?;
+        let settled = row.get::<_, i64>(4)?;
+        Ok(CreditSale {
+            id: row.get(0)?,
+            receipt_no: row.get(1)?,
+            created_at: row.get(2)?,
+            total_minor: due,
+            settled_minor: settled,
+            balance_minor: (due - settled).max(0),
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "credit sales query failed");
+            return Vec::new();
+        }
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Record a payment taken later against a credit sale.
+///
+/// This is what happens when a customer comes back with the money: another row
+/// in the append-only `payments` table, tied to the original sale by `sale_id`.
+/// Nothing is written unless the amount is positive, fits the outstanding
+/// balance, and obeys the same cash/non-cash rules as a tender at checkout.
+pub fn record_credit_payment(
+    store: &storage::Store,
+    payment: &CreditPayment<'_>,
+) -> anyhow::Result<()> {
+    let CreditPayment {
+        sale_id,
+        method,
+        amount_minor,
+        tendered_minor,
+        reference,
+        shift_uid,
+        user_id,
+    } = *payment;
+    let method = method.trim();
+    anyhow::ensure!(!method.is_empty(), "a payment needs a method");
+    anyhow::ensure!(amount_minor > 0, "a payment must be more than zero");
+    anyhow::ensure!(tendered_minor >= 0, "cash received cannot be negative");
+    if let Some(reference) = reference {
+        anyhow::ensure!(
+            reference.chars().count() <= 64,
+            "a payment reference is too long"
+        );
+    }
+    if method.eq_ignore_ascii_case("cash") {
+        anyhow::ensure!(
+            tendered_minor >= amount_minor,
+            "cash received is less than the amount it settles"
+        );
+    } else {
+        anyhow::ensure!(
+            tendered_minor == amount_minor,
+            "a non-cash payment must equal its amount"
+        );
+    }
+
+    let transaction = store.conn().unchecked_transaction()?;
+    // Later payments are append-only rows, so there is no sale row to carry a
+    // new change sequence; the cursor still moves so a peer knows to pull.
+    let _change_seq = bump_change_seq(&transaction)?;
+
+    let due: i64 = transaction.query_row(
+        "SELECT total_minor + rounding_minor FROM sales WHERE id = ?1 AND is_on_credit = 1",
+        [sale_id],
+        |row| row.get(0),
+    )?;
+    let settled: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(amount_minor), 0) FROM payments WHERE sale_id = ?1",
+        [sale_id],
+        |row| row.get(0),
+    )?;
+    let balance = due - settled;
+    anyhow::ensure!(
+        amount_minor <= balance,
+        "payment of {amount_minor} exceeds the outstanding balance of {balance}"
+    );
+
+    let payment_uid = uuid::Uuid::now_v7().to_string();
+    let change = if method.eq_ignore_ascii_case("cash") {
+        tendered_minor - amount_minor
+    } else {
+        0
+    };
+    transaction.execute(
+        "INSERT INTO payments
+             (sale_id, method, amount_minor, tendered_minor, change_minor, uid, reference,
+              shift_uid, user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
+        (
+            sale_id,
+            method,
+            amount_minor,
+            tendered_minor,
+            change,
+            payment_uid.as_str(),
+            reference,
+            shift_uid,
+            user_id,
+        ),
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 pub fn by_day(store: &storage::Store, range: usize, user: Option<&str>) -> Vec<DayTotal> {
@@ -1091,7 +1258,38 @@ pub fn by_person(store: &storage::Store, range: usize, user: Option<&str>) -> Ve
 /// here for the same reason it is missing from [`drawer_totals`] — there is no
 /// shift to attribute it to.
 pub fn drawer_by_person(store: &storage::Store, shift_uid: &str) -> Vec<PersonTotal> {
-    person_totals(store, "s.shift_uid = ?1", [shift_uid])
+    let sql = "SELECT COALESCE(u.name, 'No cashier'),
+                      COUNT(DISTINCT p.sale_id),
+                      COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount_minor ELSE 0 END), 0),
+                      COALESCE(SUM(p.amount_minor), 0)
+                 FROM payments p
+                 JOIN sales s ON s.id = p.sale_id
+                 LEFT JOIN users u ON u.id = COALESCE(p.user_id, s.user_id)
+                WHERE COALESCE(p.shift_uid, s.shift_uid) = ?1
+                GROUP BY COALESCE(p.user_id, s.user_id)
+                ORDER BY 3 DESC, 1 COLLATE NOCASE";
+    let mut statement = match store.conn().prepare(sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "drawer by person prepare failed");
+            return Vec::new();
+        }
+    };
+    let rows = match statement.query_map([shift_uid], |row| {
+        Ok(PersonTotal {
+            name: row.get(0)?,
+            sales: row.get(1)?,
+            cash_minor: row.get(2)?,
+            takings_minor: row.get(3)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "drawer by person query failed");
+            return Vec::new();
+        }
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 pub(super) fn person_totals<P: rusqlite::Params>(

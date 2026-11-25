@@ -4009,3 +4009,324 @@ fn a_customer_name_is_unique_while_live_and_freed_by_archiving() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// A sale sold on credit is written with no tenders and keeps the whole amount
+/// as its balance. The flag must survive the write: it is what makes the sale
+/// findable when the customer comes back with the money.
+#[test]
+fn a_credit_sale_is_marked_and_owes_the_whole_amount() {
+    let (store, path) = store("sale-credit-record");
+    let customer = save_customer(&store, None, "Mama Njeri", None, 0).expect("customer");
+
+    let sale = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[],
+            is_on_credit: true,
+            customer_id: Some(customer),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    let detail = sale_detail(&store, sale.id).expect("detail");
+    assert!(
+        detail.is_on_credit,
+        "the flag is stored, not just in memory"
+    );
+    assert_eq!(detail.customer_id, Some(customer));
+    assert_eq!(detail.settled_minor, 0);
+    assert_eq!(detail.balance_minor, 10_000);
+
+    let owed = credit_sales(&store, customer);
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].id, sale.id);
+    assert_eq!(owed[0].balance_minor, 10_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The customer comes back twice. Each payment is another row against the
+/// same sale, and the balance shrinks until there is nothing left to show.
+#[test]
+fn a_customer_pays_off_a_credit_sale_over_several_visits() {
+    let (store, path) = store("sale-credit-settle");
+    let customer = save_customer(&store, None, "Mama Njeri", None, 0).expect("customer");
+
+    let sale = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[],
+            is_on_credit: true,
+            customer_id: Some(customer),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    record_credit_payment(
+        &store,
+        &CreditPayment {
+            sale_id: sale.id,
+            method: "cash",
+            amount_minor: 4_000,
+            tendered_minor: 5_000,
+            reference: None,
+            shift_uid: Some("today"),
+            user_id: Some("cashier"),
+        },
+    )
+    .expect("first payment");
+    let detail = sale_detail(&store, sale.id).expect("detail");
+    assert_eq!(detail.settled_minor, 4_000);
+    assert_eq!(detail.balance_minor, 6_000, "cash change is not a payment");
+    assert_eq!(detail.change_minor, 1_000);
+    assert_eq!(credit_sales(&store, customer)[0].balance_minor, 6_000);
+
+    record_credit_payment(
+        &store,
+        &CreditPayment {
+            sale_id: sale.id,
+            method: "mtn_momo",
+            amount_minor: 6_000,
+            tendered_minor: 6_000,
+            reference: Some("TX123"),
+            shift_uid: Some("today"),
+            user_id: Some("cashier"),
+        },
+    )
+    .expect("second payment");
+    let detail = sale_detail(&store, sale.id).expect("detail");
+    assert_eq!(detail.settled_minor, 10_000);
+    assert_eq!(detail.balance_minor, 0);
+    assert!(
+        credit_sales(&store, customer).is_empty(),
+        "nothing left to settle"
+    );
+    assert_eq!(detail.payments.len(), 2, "both visits are on the receipt");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A later payment cannot take more than the customer owes, and a failed
+/// payment leaves no row behind.
+#[test]
+fn a_credit_payment_cannot_exceed_the_balance() {
+    let (store, path) = store("sale-credit-overpay");
+    let customer = save_customer(&store, None, "Mama Njeri", None, 0).expect("customer");
+    let sale = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[],
+            is_on_credit: true,
+            customer_id: Some(customer),
+            customer_name: Some("Mama Njeri"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    assert!(
+        record_credit_payment(
+            &store,
+            &CreditPayment {
+                sale_id: sale.id,
+                method: "cash",
+                amount_minor: 11_000,
+                tendered_minor: 11_000,
+                reference: None,
+                shift_uid: None,
+                user_id: None,
+            },
+        )
+        .is_err(),
+        "cannot collect more than the balance"
+    );
+    let detail = sale_detail(&store, sale.id).expect("detail");
+    assert_eq!(detail.payments.len(), 0, "a refused payment writes nothing");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Credit needs somebody to come back and pay. A walk-in cannot be found
+/// again, so the write is refused even if a caller sets the flag.
+#[test]
+fn a_walk_in_cannot_be_sold_on_credit() {
+    let (store, path) = store("sale-credit-walkin");
+    let result = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 1_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[],
+            is_on_credit: true,
+            customer_id: None,
+            ..SaleTerms::default()
+        },
+    );
+    assert!(result.is_err(), "there is nobody to bill later");
+    assert_eq!(crate::db::totals(&store, 3, None), (0, 0));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A payment taken today against yesterday's sale must land in today's drawer.
+/// Before payments carried their own shift, it was filed with the closed one.
+#[test]
+fn a_later_payment_counts_in_the_shift_that_took_it() {
+    let (store, path) = store("sale-credit-attribution");
+    let customer = save_customer(&store, None, "Mama Njeri", None, 0).expect("customer");
+    let sale = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[],
+            is_on_credit: true,
+            customer_id: Some(customer),
+            shift_uid: Some("yesterday"),
+            ..SaleTerms::default()
+        },
+    )
+    .expect("credit sale");
+
+    assert_eq!(drawer_totals(&store, "yesterday").cash_minor, 0);
+    record_credit_payment(
+        &store,
+        &CreditPayment {
+            sale_id: sale.id,
+            method: "cash",
+            amount_minor: 4_000,
+            tendered_minor: 4_000,
+            reference: None,
+            shift_uid: Some("today"),
+            user_id: Some("bob"),
+        },
+    )
+    .expect("later payment");
+
+    assert_eq!(
+        drawer_totals(&store, "today").cash_minor,
+        4_000,
+        "the money is in the drawer being counted"
+    );
+    assert_eq!(drawer_totals(&store, "yesterday").cash_minor, 0);
+
+    let people = drawer_by_person(&store, "today");
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].cash_minor, 4_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A till that already holds sales and payments must upgrade cleanly: the
+/// attribution columns are backfilled from the rows that were there before.
+#[test]
+fn migration_23_upgrades_an_existing_database() {
+    let path = std::env::temp_dir().join(format!("pos-migrate-23-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let mut store = storage::Store::open(&path).expect("open");
+        store.migrate(&MIGRATIONS[..22]).expect("migrate to 22");
+        store
+            .conn()
+            .execute(
+                "INSERT INTO sales (id, total_minor, uid, shift_uid, created_at)
+                 VALUES (1, 1_000, 'sale-uid', 'old-shift', '2026-01-01 10:00:00')",
+                [],
+            )
+            .expect("old sale");
+        store
+            .conn()
+            .execute(
+                "INSERT INTO payments
+                    (sale_id, method, amount_minor, tendered_minor, change_minor, uid)
+                 VALUES (1, 'cash', 1_000, 1_000, 0, 'pay-uid')",
+                [],
+            )
+            .expect("old payment");
+    }
+    {
+        let mut store = storage::Store::open(&path).expect("reopen");
+        store.migrate(MIGRATIONS).expect("migrate to latest");
+        let (shift, created): (Option<String>, Option<String>) = store
+            .conn()
+            .query_row(
+                "SELECT shift_uid, created_at FROM payments WHERE uid = 'pay-uid'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read backfilled payment");
+        assert_eq!(shift.as_deref(), Some("old-shift"));
+        assert!(created.is_some(), "the timestamp is taken from the sale");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A normal sale still refuses a short tender: the credit path must not leak
+/// into the legacy one.
+#[test]
+fn a_normal_sale_still_requires_the_full_tender() {
+    let (store, path) = store("sale-credit-legacy");
+    let result = record_sale(
+        &store,
+        &[SaleLine {
+            product_id: None,
+            name: "Sugar".to_owned(),
+            qty: 1,
+            unit_minor: 10_000,
+            unit_factor: 1,
+            unit_label: None,
+        }],
+        &SaleTerms {
+            payments: &[PaymentLine {
+                method: "cash",
+                amount_minor: 4_000,
+                tendered_minor: 4_000,
+                reference: None,
+            }],
+            ..SaleTerms::default()
+        },
+    );
+    assert!(result.is_err(), "a short tender is still a failed sale");
+
+    let _ = std::fs::remove_file(path);
+}

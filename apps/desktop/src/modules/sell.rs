@@ -761,6 +761,35 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             }
         });
     });
+
+    // A regular may still owe from an earlier credit sale. Keep the balance in
+    // the cart header, where the cashier already reads who this sale is for.
+    if state.customer.is_some() && !state.credit_sales.is_empty() && state.payment.is_none() {
+        let owed: i64 = state
+            .credit_sales
+            .iter()
+            .map(|sale| sale.balance_minor)
+            .sum();
+        ui.add_space(SPACING.xs);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.xs;
+            // Money still owed is not neutral information. The warning colour
+            // makes it read as a balance to deal with, next to the action for
+            // dealing with it.
+            ui.label(
+                egui::RichText::new(format!("Owes {}", state.money(owed)))
+                    .size(TYPE.body)
+                    .family(theme::semibold())
+                    .color(egui::Color32::from(palette.warning)),
+            );
+            if actions::secondary_compact(ui, "Settle")
+                .on_hover_text("Record a payment against an earlier credit sale")
+                .clicked()
+            {
+                state.open_credit_panel();
+            }
+        });
+    }
     ui.add_space(SPACING.sm);
     components::divider(ui);
     ui.add_space(SPACING.sm);
@@ -1678,6 +1707,125 @@ pub fn cart_quantity_modal(ctx: &egui::Context, state: &mut State) {
     }
     if cancel {
         state.close_cart_quantity();
+    }
+}
+
+/// Pay off an earlier credit sale, in the same form as the checkout tender
+/// panel: pick the sale, the method, and the amount the customer handed over.
+pub fn credit_settle_modal(ctx: &egui::Context, state: &mut State) {
+    if !state.credit_panel {
+        return;
+    }
+
+    let mut record = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_credit_settle")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.label(components::semibold("Settle credit sale").size(TYPE.heading));
+        if let Some(customer) = state.customer.as_ref() {
+            components::caption(ui, &customer.name.clone());
+        }
+        ui.add_space(SPACING.sm);
+
+        if state.credit_sales.is_empty() {
+            components::caption(ui, "This customer has no outstanding balance.");
+        } else {
+            components::field_label(ui, "Outstanding sales");
+            ui.add_space(SPACING.xs);
+            let mut choice = None;
+            for sale in &state.credit_sales {
+                let label = sale
+                    .receipt_no
+                    .clone()
+                    .unwrap_or_else(|| format!("#{}", sale.id));
+                let text = format!(
+                    "{label} · {} · owes {}",
+                    sale.created_at,
+                    state.money(sale.balance_minor)
+                );
+                let selected = state.credit_sale_id == Some(sale.id);
+                if ui.radio(selected, text).clicked() && !selected {
+                    choice = Some(sale.id);
+                }
+            }
+            if let Some(id) = choice {
+                state.credit_sale_id = Some(id);
+            }
+            ui.add_space(SPACING.sm);
+
+            components::field_label(ui, "Method");
+            ui.add_space(SPACING.xs);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+                for (key, label) in crate::state::PAYMENT_METHODS {
+                    let selected = state.credit_method.eq_ignore_ascii_case(key);
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(*label).size(TYPE.small),
+                        ))
+                        .clicked()
+                        && !selected
+                    {
+                        state.credit_method = (*key).to_owned();
+                    }
+                }
+            });
+
+            let is_cash = state.credit_method.eq_ignore_ascii_case("cash");
+            let hint = state
+                .credit_sale_id
+                .and_then(|id| state.credit_sales.iter().find(|sale| sale.id == id))
+                .map(|sale| sale.balance_minor)
+                .unwrap_or(0);
+            let hint_text = state.money(hint);
+            let currency_code = state.currency.code().to_owned();
+            components::field_label(ui, if is_cash { "Cash received" } else { "Amount" });
+            ui.add_space(SPACING.xs);
+            let width = ui.available_width();
+            prefixed_field(
+                ui,
+                &mut state.credit_tendered,
+                &currency_code,
+                &hint_text,
+                width,
+            );
+            if !is_cash {
+                ui.add_space(SPACING.xs);
+                components::field_label(ui, "Reference");
+                ui.add_space(SPACING.xs);
+                let width = ui.available_width();
+                text_field(ui, &mut state.credit_reference, "Transaction id", width);
+            }
+            if let Some(error) = &state.credit_error {
+                ui.add_space(SPACING.xs);
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(TYPE.small)
+                        .color(ui.visuals().error_fg_color),
+                );
+            }
+        }
+
+        ui.add_space(SPACING.sm);
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Record payment").clicked() {
+                record = true;
+            }
+            if actions::secondary(ui, "Close").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    if record {
+        state.record_credit_payment();
+    }
+    if cancel {
+        state.close_credit_panel();
     }
 }
 

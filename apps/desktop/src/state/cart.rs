@@ -477,12 +477,17 @@ impl State {
     pub fn set_customer(&mut self, customer: Option<Customer>) {
         let Some(customer) = customer else {
             self.customer = None;
+            self.credit_sales.clear();
+            self.credit_sale_id = None;
             return;
         };
         if customer.discount_bp > 0 && !self.permits(crate::auth::Permission::Discount) {
             return self.ask_override(crate::auth::Permission::Discount, None);
         }
         self.customer = Some(customer);
+        // A regular may be standing at the till with an old balance. Read it
+        // now so the "settle" affordance is visible before the basket is built.
+        self.refresh_credit_sales();
     }
 
     /// The cash adjustment for this cart: how far the exact total is from the
@@ -573,6 +578,7 @@ impl State {
             reference: String::new(),
             error: None,
             focus: true,
+            is_on_credit: false,
         });
     }
 
@@ -624,6 +630,41 @@ impl State {
         let is_cash = method.eq_ignore_ascii_case("cash");
         let tendered_text = payment.tendered.trim().to_owned();
         let reference = payment.reference.trim().to_owned();
+
+        // A credit sale completes with whatever was actually handed over,
+        // including nothing. The amount field is an optional part-payment, not
+        // a balance that has to be settled before the goods can leave.
+        if payment.is_on_credit {
+            if !tendered_text.is_empty() {
+                let entered_minor = match Money::parse(&tendered_text, self.currency) {
+                    Ok(amount) => amount.minor(),
+                    Err(error) => return self.payment_error(error.to_string()),
+                };
+                if entered_minor < 0 {
+                    return self.payment_error("Enter an amount.".to_owned());
+                }
+                let amount_minor = entered_minor.min(remaining_minor);
+                if amount_minor > 0 {
+                    let tendered_minor = if is_cash { entered_minor } else { amount_minor };
+                    let reference = if is_cash || reference.is_empty() {
+                        None
+                    } else {
+                        Some(reference)
+                    };
+                    if let Some(payment) = self.payment.as_mut() {
+                        payment.tenders.push(Tender {
+                            method,
+                            amount_minor,
+                            tendered_minor,
+                            reference,
+                        });
+                        payment.tendered.clear();
+                        payment.reference.clear();
+                    }
+                }
+            }
+            return self.finish_sale();
+        }
 
         let entered_minor = if tendered_text.is_empty() {
             remaining_minor
@@ -681,14 +722,27 @@ impl State {
     fn finish_sale(&mut self) {
         // Own the tender data before the first mutable borrow: the terms borrow
         // the strings, and `ensure_shift` needs the whole state.
-        let tenders: Vec<(String, i64, i64, Option<String>)> = {
-            let Some(payment) = self.payment.as_ref() else {
-                return;
-            };
-            if payment.tenders.is_empty() {
-                return;
-            }
+        let payment = self.payment.as_ref();
+
+        // When the sale is on credit, zero tenders are allowed: record the sale
+        // with whatever cash was actually received (may be zero). The outstanding
+        // balance is tracked as `total_minor - paid_minor`.
+        let is_credit = payment
+            .as_ref()
+            .is_some_and(|p| p.is_on_credit && self.customer.is_some());
+
+        let tenders: Vec<(String, i64, i64, Option<String>)> = if is_credit
+            && payment
+                .as_ref()
+                .map(|p| p.tenders.is_empty())
+                .unwrap_or(true)
+        {
+            // No tenders on a credit sale: empty list; record_sale will allow this.
+            Vec::new()
+        } else {
             payment
+                .as_ref()
+                .unwrap()
                 .tenders
                 .iter()
                 .map(|tender| {
@@ -739,6 +793,7 @@ impl State {
             payments: &payment_lines,
             discount_minor: self.cart_discount_minor(),
             discount_bp: self.effective_discount_bp(),
+            is_on_credit: is_credit,
             price_mode: match self.customer_mode {
                 CustomerMode::Retail => "retail",
                 CustomerMode::Wholesale => "wholesale",

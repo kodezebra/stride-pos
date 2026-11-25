@@ -289,7 +289,7 @@ pub fn pull_sales(
                     is_offline, user_id, total_minor, rounding_minor, tax_minor,
                     COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), ''),
                     receipt_no, discount_minor, discount_bp, price_mode,
-                    customer_id, customer_name
+                    customer_id, customer_name, is_on_credit
              FROM sales
              WHERE uid IS NOT NULL AND change_seq IS NOT NULL AND change_seq > ?1
              ORDER BY change_seq ASC
@@ -314,6 +314,7 @@ pub fn pull_sales(
                     price_mode: row.get(13)?,
                     customer_id: row.get(14)?,
                     customer_name: row.get(15)?,
+                    is_on_credit: row.get(16)?,
                     lines: Vec::new(),
                     payments: Vec::new(),
                     movements: Vec::new(),
@@ -353,7 +354,9 @@ pub fn pull_sales(
 
         pulled.sale.payments = {
             let mut statement = conn.prepare(
-                "SELECT uid, method, amount_minor, tendered_minor, change_minor
+                "SELECT uid, method, amount_minor, tendered_minor, change_minor,
+                        shift_uid, user_id,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', created_at)
                  FROM payments
                  WHERE sale_id = ?1 AND uid IS NOT NULL
                  ORDER BY id",
@@ -365,6 +368,9 @@ pub fn pull_sales(
                     amount_minor: row.get(2)?,
                     tendered_minor: row.get(3)?,
                     change_minor: row.get(4)?,
+                    shift_uid: row.get(5)?,
+                    user_id: row.get(6)?,
+                    occurred_at: row.get(7)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?

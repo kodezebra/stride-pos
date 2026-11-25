@@ -160,6 +160,20 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
 
     let is_cash = payment.method.eq_ignore_ascii_case("cash");
     ui.add_space(SPACING.sm);
+
+    // Sold-on-credit toggle: when checked, zero tenders are allowed and the
+    // sale is recorded with whatever cash was actually received (may be zero).
+    // A walk-in has nobody to bill later, so credit is not offered to one.
+    let has_customer = state.customer.is_some();
+    ui.add_enabled_ui(has_customer, |ui| {
+        ui.checkbox(&mut payment.is_on_credit, "Sold on credit")
+            .on_hover_text(if has_customer {
+                "Customer takes goods now, pays later. Zero tenders allowed."
+            } else {
+                "Select a customer before selling on credit"
+            });
+    });
+
     components::field_label(ui, if is_cash { "Cash received" } else { "Amount" });
     ui.add_space(SPACING.xs);
 
@@ -333,7 +347,9 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     };
 
     ui.add_space(SPACING.sm);
-    let label = if settles {
+    // On credit the goods go out whatever was handed over, so the button is
+    // always the finishing one — even when the amount is a part-payment.
+    let label = if settles || payment.is_on_credit {
         "Complete sale"
     } else {
         "Add payment"
@@ -544,6 +560,7 @@ mod tests {
             reference: String::new(),
             error: Some("Previous error".into()),
             focus: false,
+            is_on_credit: false,
         };
 
         // 1. First note on empty field sets the amount

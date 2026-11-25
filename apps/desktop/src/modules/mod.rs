@@ -55,6 +55,7 @@ use widgets::*;
 pub use catalog::{import_modal, product_editor_modal};
 pub use sales::sale_detail_modal;
 pub use sell::cart_quantity_modal;
+pub use sell::credit_settle_modal;
 pub use suppliers::{stock_history_modal, stock_move_modal, supplier_editor_modal, track_modal};
 
 // The export runs from the picker, which knows a directory and not a screen.

@@ -162,6 +162,10 @@ fn validate(sale: &SaleDto) -> Result<HashMap<i64, i64>> {
         "a sale is either retail or wholesale"
     );
     anyhow::ensure!(
+        sale.is_on_credit == 0 || sale.is_on_credit == 1,
+        "a sale is either on credit or not"
+    );
+    anyhow::ensure!(
         sale.total_minor == line_total - sale.discount_minor,
         "the total does not match the lines less the discount"
     );
@@ -209,17 +213,26 @@ fn validate(sale: &SaleDto) -> Result<HashMap<i64, i64>> {
             );
         }
     }
-    anyhow::ensure!(paid == due, "payments do not sum to total");
+    // A credit sale can arrive with nothing taken yet, or with only part of
+    // the balance paid at the origin. The rule that matters is that no more
+    // was collected than was due.
+    if sale.is_on_credit != 0 {
+        anyhow::ensure!(paid <= due, "credit payments exceed the total");
+    } else {
+        anyhow::ensure!(paid == due, "payments do not sum to total");
+    }
 
     if sale.is_offline == 1 {
         anyhow::ensure!(
-            sale.payments.len() == 1,
-            "an offline sale must have exactly one payment"
+            sale.payments.len() == if sale.is_on_credit != 0 { 0 } else { 1 },
+            "an offline sale must have one payment, or none when on credit"
         );
-        anyhow::ensure!(
-            sale.payments[0].method.trim().eq_ignore_ascii_case("cash"),
-            "an offline sale can only be cash"
-        );
+        if let Some(payment) = sale.payments.first() {
+            anyhow::ensure!(
+                payment.method.trim().eq_ignore_ascii_case("cash"),
+                "an offline sale can only be cash"
+            );
+        }
     }
 
     let mut movement_products = HashSet::new();
@@ -293,9 +306,9 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
              (uid, origin_device, is_offline, clock_skew, created_at,
               received_at, change_seq, user_id, total_minor, rounding_minor,
               tax_minor, receipt_no, discount_minor, discount_bp, price_mode,
-              customer_id, customer_name)
+              customer_id, customer_name, is_on_credit)
          VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11,
-                 ?12, ?13, ?14, ?15, ?16)
+                 ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT DO NOTHING",
         rusqlite::params![
             sale.uid.trim(),
@@ -316,12 +329,20 @@ fn apply_sale(store: &Store, sale: &SaleDto, expected: &HashMap<i64, i64>) -> Re
             sale.price_mode.trim(),
             customer_id,
             customer_name,
+            sale.is_on_credit,
         ],
     )?;
 
     if inserted == 0 {
-        // Another writer inserted the same uid between the early check and the
-        // write lock. It is the same sale; our cursor bump is harmless.
+        // The sale is already here. A credit sale can gain payment rows on a
+        // later visit, and those rows travel with the sale's next push. Take
+        // any the peer has not seen; the uid conflict keeps replays harmless.
+        let existing_id: i64 = transaction.query_row(
+            "SELECT id FROM sales WHERE uid = ?1",
+            [sale.uid.trim()],
+            |row| row.get(0),
+        )?;
+        apply_payments(&transaction, existing_id, sale)?;
         transaction.commit()?;
         return Ok(());
     }
@@ -396,8 +417,9 @@ fn apply_payments(
     for payment in &sale.payments {
         transaction.execute(
             "INSERT INTO payments
-                 (sale_id, method, amount_minor, tendered_minor, change_minor, uid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (sale_id, method, amount_minor, tendered_minor, change_minor, uid,
+                  shift_uid, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))
              ON CONFLICT DO NOTHING",
             rusqlite::params![
                 sale_id,
@@ -406,6 +428,9 @@ fn apply_payments(
                 payment.tendered_minor,
                 payment.change_minor,
                 payment.uid.trim(),
+                payment.shift_uid.as_deref(),
+                payment.user_id.as_deref(),
+                payment.occurred_at.as_deref(),
             ],
         )?;
     }

@@ -274,6 +274,9 @@ impl PosShell {
         // be paid for: the modal is drawn under payment so a shortcut cannot
         // leave a quantity editor floating over a sale in progress.
         crate::modules::cart_quantity_modal(ui.ctx(), &mut self.state);
+        // A regular paying off an earlier credit sale, after the basket is
+        // built but before the till hands the keys to a manager override.
+        crate::modules::credit_settle_modal(ui.ctx(), &mut self.state);
         // Paying is not a modal: it is the cart's footer. Drawn by the Sell
         // module itself, so there is nothing to show here — the only thing that
         // still owns the screen at this point is a manager's authority.

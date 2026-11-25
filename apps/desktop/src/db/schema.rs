@@ -780,4 +780,40 @@ pub const MIGRATIONS: &[Migration] = &[
             ALTER TABLE payments ADD COLUMN reference TEXT;
         "#,
     },
+    // A sale can be recorded "on credit": the customer takes the goods now and
+    // pays later. When `is_on_credit` is set, `record_sale` allows zero tenders
+    // and records the sale with `paid_minor` equal to whatever cash was actually
+    // received (which may be zero). The outstanding balance is tracked as
+    // `total_minor - paid_minor`.
+    Migration {
+        version: 22,
+        name: "sale_on_credit",
+        sql: r#"
+            ALTER TABLE sales ADD COLUMN is_on_credit INTEGER NOT NULL DEFAULT 0
+                CHECK (is_on_credit IN (0, 1));
+        "#,
+    },
+    // A payment taken later belongs to the shift and the cashier who took it,
+    // not to the sale being paid off. Without its own attribution the money
+    // would land in the drawer that has already been counted and closed.
+    Migration {
+        version: 23,
+        name: "payment_attribution",
+        sql: r#"
+            ALTER TABLE payments ADD COLUMN shift_uid TEXT;
+            ALTER TABLE payments ADD COLUMN user_id TEXT;
+            -- SQLite rejects a non-constant default in ADD COLUMN, so the
+            -- timestamp is nullable here and written by the insert itself.
+            ALTER TABLE payments ADD COLUMN created_at TEXT;
+            UPDATE payments
+               SET shift_uid = (SELECT shift_uid FROM sales WHERE sales.id = payments.sale_id),
+                   user_id   = (SELECT user_id FROM sales WHERE sales.id = payments.sale_id),
+                   created_at = COALESCE(
+                       (SELECT created_at FROM sales WHERE sales.id = payments.sale_id),
+                       datetime('now')
+                   );
+            CREATE INDEX IF NOT EXISTS payments_shift ON payments(shift_uid)
+                WHERE shift_uid IS NOT NULL;
+        "#,
+    },
 ];

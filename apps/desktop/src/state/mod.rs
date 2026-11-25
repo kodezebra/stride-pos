@@ -36,6 +36,8 @@ mod cart;
 
 pub use cart::*;
 
+mod credit;
+
 mod customers;
 
 pub use customers::*;
@@ -137,6 +139,10 @@ pub struct Payment {
     pub error: Option<String>,
     /// Put the cursor in the amount field on the first frame.
     pub focus: bool,
+    /// When `true`, the sale is recorded "on credit": zero tenders are allowed
+    /// and `paid_minor` reflects whatever cash was actually received (may be zero).
+    /// The outstanding balance is tracked as `total_minor - paid_minor`.
+    pub is_on_credit: bool,
 }
 
 /// The tenders the till can record, in the order the panel offers them.
@@ -347,6 +353,22 @@ pub struct State {
 
     /// The payment screen, when it is open.
     pub payment: Option<Payment>,
+
+    // ---- settling a credit sale --------------------------------------------
+    /// Outstanding credit sales for the customer currently at the till.
+    pub credit_sales: Vec<crate::db::CreditSale>,
+    /// Which of those sales the operator is paying off right now.
+    pub credit_sale_id: Option<i64>,
+    /// The amount being typed for a later payment.
+    pub credit_tendered: String,
+    /// The method being used for a later payment.
+    pub credit_method: String,
+    /// Phone-side transaction id, when the method is not cash.
+    pub credit_reference: String,
+    /// Why the last later payment failed.
+    pub credit_error: Option<String>,
+    /// Whether the settle panel is open.
+    pub credit_panel: bool,
 
     /// The drawer this till is accountable for: the open shift, or one counted
     /// earlier today. `None` before the first sale of the day, which is also
@@ -566,6 +588,13 @@ impl State {
             purchase_editor: None,
             purchase_view: None,
             payment: None,
+            credit_sales: Vec::new(),
+            credit_sale_id: None,
+            credit_tendered: String::new(),
+            credit_method: "cash".to_owned(),
+            credit_reference: String::new(),
+            credit_error: None,
+            credit_panel: false,
             drawer,
             drawer_count: String::new(),
             drawer_error: None,
