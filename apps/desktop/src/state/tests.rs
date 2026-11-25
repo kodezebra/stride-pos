@@ -1089,6 +1089,17 @@ fn an_import_saves_what_parses_and_counts_the_rest() {
         .find(|product| product.name == "Soap 250g")
         .expect("the well-formed row landed");
     assert_eq!(soap.barcode.as_deref(), Some("111"));
+    assert!(
+        soap.category_id.is_some(),
+        "an imported product points at a real shelf"
+    );
+    assert!(
+        state
+            .categories
+            .iter()
+            .any(|shelf| shelf.name == "Household"),
+        "an imported shelf is offered to the sidebars"
+    );
     assert_eq!(
         state.notice.as_deref(),
         Some("Imported 1 product, skipped 2.")
@@ -2274,6 +2285,11 @@ fn suggested_categories_are_added_only_on_request() {
     for name in &seeds {
         assert!(stored.iter().any(|row| row.name.eq_ignore_ascii_case(name)));
     }
+    assert_eq!(
+        stored.iter().map(|row| row.sort_order).collect::<Vec<_>>(),
+        (0..seeds.len() as i64).collect::<Vec<_>>(),
+        "the order in the seed file becomes the order of the shelves"
+    );
 
     assert_eq!(state.apply_suggested_categories().expect("apply twice"), 0);
     assert_eq!(crate::db::categories_list(&state.store).len(), stored.len());

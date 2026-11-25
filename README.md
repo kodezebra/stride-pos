@@ -32,15 +32,17 @@ payment mix, cash by person, and the latest sales; switch the range to 7 days,
 its lines.
 
 **Catalog** — the catalogue of what you sell, and what is on the shelf. Add a
-product, edit its price or category, give it a barcode. Everything here becomes
+product, edit its price or category, give it a barcode. Shelves appear in the
+shop's own order with a count of the products on each. Everything here becomes
 a key on the Sell screen. Stock is opt-in per product: choose a product, count
 it, and set the level that counts as low; from then on every sale subtracts
 automatically. Receiving, customer returns, waste and a physical count are
 recorded as movements, and each product keeps its own history. Stock is always
-the sum of those movements; deleting a product deletes its history, because the
-ledger is operational and not a financial record. The **Stock** filter above the
-categories shows all, low or out at a glance. Managers and the owner manage
-stock; cashiers work on Sell and Day only.
+the sum of those movements; removing a product hides it from the catalog while
+keeping what was sold, so an old receipt never changes. A manager also sees the
+last cost paid and the margin left at the current price. The **Stock** filter
+above the shelves shows all, low, out or expiring at a glance. Managers and the
+owner manage stock; cashiers work on Sell and Day only.
 
 **Suppliers** — who the shop buys from: name, contact, phone, email, address and
 notes. Search by any of them, and archive a supplier you no longer use without

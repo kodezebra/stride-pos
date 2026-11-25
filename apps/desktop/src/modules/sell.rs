@@ -147,8 +147,9 @@ pub(super) fn categories_bar(ui: &mut egui::Ui, state: &mut State) {
                 }
 
                 let categories = state.categories.clone();
-                for cat in &categories {
-                    let active = state.category.as_deref() == Some(cat.as_str());
+                for shelf in &categories {
+                    let cat = shelf.name.as_str();
+                    let active = state.category.as_deref() == Some(cat);
                     let mut text = egui::RichText::new(cat).size(TYPE.small);
                     if active {
                         text = text
@@ -166,8 +167,15 @@ pub(super) fn categories_bar(ui: &mut egui::Ui, state: &mut State) {
                         })
                         .stroke(egui::Stroke::new(1.0, palette.border))
                         .corner_radius(egui::CornerRadius::same(RADII.pill as u8));
-                    if ui.add(btn).clicked() {
-                        state.category = Some(cat.clone());
+                    // The count is a hover note, not another tile: the bar is
+                    // for reaching items at speed, and a number on every pill
+                    // would make the six the shop sells most harder to find.
+                    if ui
+                        .add(btn)
+                        .on_hover_text(format!("{} products on this shelf", shelf.count))
+                        .clicked()
+                    {
+                        state.category = Some(shelf.name.clone());
                     }
                 }
             });

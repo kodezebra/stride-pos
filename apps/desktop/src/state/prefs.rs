@@ -180,10 +180,14 @@ impl State {
             })
             .collect();
 
-        for name in &missing {
-            crate::db::find_or_insert_category(&self.store, name)?;
+        // The seed file is already in the order the shop expects on its
+        // shelves, so write that order onto the new rows. A shelf that already
+        // exists keeps its own place; `insert_category` leaves it alone.
+        let added = missing.len();
+        for (order, name) in missing.into_iter().enumerate() {
+            crate::db::insert_category(&self.store, &name, order as i64)?;
         }
-        Ok(missing.len())
+        Ok(added)
     }
 
     pub fn sidebar_open(&self, module: usize) -> bool {

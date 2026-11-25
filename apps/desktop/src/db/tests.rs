@@ -598,7 +598,12 @@ fn products_round_trip_and_stay_sorted_by_name() {
         ["Croissant", "Espresso", "Flat white"],
         "the list is by name, not by insertion order"
     );
-    assert_eq!(categories(&store), ["Bakery", "Coffee"]);
+    let listed = categories(&store);
+    let shelves: Vec<(&str, usize)> = listed
+        .iter()
+        .map(|shelf| (shelf.name.as_str(), shelf.count))
+        .collect();
+    assert_eq!(shelves, [("Bakery", 1), ("Coffee", 2)]);
 
     update_product(
         &store,
@@ -4327,6 +4332,43 @@ fn a_normal_sale_still_requires_the_full_tender() {
         },
     );
     assert!(result.is_err(), "a short tender is still a failed sale");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Shelves are the table's order, counts come from live products, and a shelf
+/// that only exists on a product is still offered to the sidebars.
+#[test]
+fn shelves_follow_saved_order_and_count_live_products() {
+    let (store, path) = store("shelf-order");
+
+    insert_category(&store, "Bakery", 5).expect("bakery");
+    insert_category(&store, "Drinks", 2).expect("drinks");
+    let same = insert_category(&store, "bakery", 99).expect("case-insensitive lookup");
+    let bakery: i64 = store
+        .conn()
+        .query_row(
+            "SELECT id FROM categories WHERE name = 'Bakery'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the original row");
+    assert_eq!(same, bakery, "a second spelling cannot add a shelf");
+
+    insert_product(&store, "Croissant", 1_000, "Bakery", Some(bakery), None).expect("croissant");
+    insert_product(&store, "Cola", 1_000, "Drinks", None, None).expect("cola");
+    insert_product(&store, "Mystery", 1_000, "Other", None, None).expect("product-only shelf");
+
+    let listed = categories(&store);
+    let shelves: Vec<(&str, usize)> = listed
+        .iter()
+        .map(|shelf| (shelf.name.as_str(), shelf.count))
+        .collect();
+    assert_eq!(
+        shelves,
+        [("Drinks", 1), ("Bakery", 1), ("Other", 1)],
+        "saved order first, then names the table never saw"
+    );
 
     let _ = std::fs::remove_file(path);
 }

@@ -51,7 +51,8 @@ use ui_kit::tokens::Rgb;
 use ui_shell::egui;
 
 use crate::db::{
-    Customer, PaymentLine, PriceTier, Product, SaleLine, SaleTerms, StockItem, Supplier,
+    CategorySummary, Customer, PaymentLine, PriceTier, Product, SaleLine, SaleTerms, StockItem,
+    Supplier,
 };
 use crate::scan::{ScanAction, ScanEvent, ScanStatus};
 use crate::settings::{ReceiptDetails, Settings};
@@ -285,8 +286,10 @@ pub struct State {
     /// in memory: a few hundred products are cheaper to filter than to query
     /// once per frame, and the grid redraws every frame.
     pub products: Vec<Product>,
-    /// The distinct categories currently in the catalog, for the sidebars.
-    pub categories: Vec<String>,
+    /// The shelves the sidebars show, in the shop's order, with live counts.
+    /// The first of the two category views in the database: this one is ordered
+    /// and counted for drawing, `categories_list` is the raw form/sync view.
+    pub categories: Vec<CategorySummary>,
     /// The product form, when it is open.
     pub product_editor: Option<ProductDraft>,
     /// The CSV import modal, when it is open. The typed-path fallback for a

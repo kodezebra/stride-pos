@@ -736,3 +736,27 @@ fn low_stock_action_hides_when_everything_is_handled() {
     );
     assert!(!none.has_low_stock_to_add());
 }
+
+/// The catalog shows the price the shop actually paid and what it leaves, but
+/// never invents a cost for a product nobody has received yet.
+#[test]
+fn cost_detail_shows_the_last_cost_and_the_margin_it_leaves() {
+    let mut item = product(1, "Tea", None);
+    assert_eq!(
+        cost_detail(&item, money::Currency::UGX),
+        None,
+        "an unreceived product has no cost"
+    );
+
+    item.price_minor = 3_000;
+    item.cost_milli = Some(1_850_000);
+    let detail = cost_detail(&item, money::Currency::UGX).expect("a received product has a cost");
+    assert!(
+        detail.contains("1850"),
+        "cost is money, not milli units: {detail}"
+    );
+    assert!(
+        detail.contains("38% margin"),
+        "margin is the share left: {detail}"
+    );
+}
