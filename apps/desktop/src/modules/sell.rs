@@ -284,12 +284,32 @@ impl Module for Sell {
     }
 
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
+        let area = ui.available_rect_before_wrap();
+        ui.allocate_ui_with_layout(
+            egui::vec2(area.width(), 100.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| sell_toolbar(ui, state),
+        );
+        ui.add_space(SPACING.sm);
+
+        let full = ui.available_rect_before_wrap();
+
+        // Paying owns the whole content area. The basket is frozen while the
+        // payment screen is up, so there is nothing behind it worth keeping
+        // on screen — and the money gets the room instead of squeezing the
+        // cart's item list into a few rows.
+        if state.payment.is_some() {
+            let summary = state.cart_summary();
+            crate::checkout::payment_screen(ui, state, &summary);
+            ui.advance_cursor_after_rect(full);
+            return;
+        }
+
         // Two columns, placed by rectangle rather than by accumulating widths.
         // The cart's right edge *is* the panel's right edge, so it cannot end up
         // one pixel too wide and clip its own totals — and it keeps a floor on a
         // 960 px window instead of squeezing the grid to nothing.
         let gap = SPACING.md;
-        let full = ui.available_rect_before_wrap();
         let cart_width = (full.width() * CART_SHARE).clamp(CART_MIN, CART_MAX);
         let cart_width = cart_width.min((full.width() - TILE_MIN - gap).max(CART_MIN));
 
@@ -644,11 +664,6 @@ fn footer_reserve(summary: &CartSummary, tenders: Option<usize>) -> f32 {
     }
 }
 
-/// Height of the cart header and its compact customer chip. The Hold and Clear
-/// buttons use the same compact height, so every control in the row shares a
-/// baseline.
-const CART_HEADER_HEIGHT: f32 = 36.0;
-
 /// Width of the chevron column on a cart line. The glyph is deliberately small;
 /// the whole 44 px row is still the click target, so shrinking the arrow costs
 /// no reach.
@@ -719,28 +734,11 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
             }
         }
 
-        // The customer chip used to own a full row. It now rides in this
-        // header, so the first cart line starts directly under the divider.
-        // The count stays only when the pane can afford it: on a narrow till
-        // it is the count that yields, never the price-mode badge.
-        let show_count = ui.available_width() >= 300.0;
-        if show_count {
-            components::caption(ui, &format!("{} item(s)", state.cart_count()));
-            ui.add_space(SPACING.xs);
-        }
+        // The customer and the price mode live in the toolbar above. Only the
+        // basket count and its actions belong in this header now.
+        components::caption(ui, &format!("{} item(s)", state.cart_count()));
 
         let has_actions = !state.cart.is_empty() && state.payment.is_none();
-        let action_width = if has_actions { 116.0 } else { 0.0 };
-        let chip_width = (ui.available_width() - action_width - SPACING.xs).clamp(96.0, 180.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(chip_width, CART_HEADER_HEIGHT),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.spacing_mut().button_padding = egui::vec2(SPACING.xs, 0.0);
-                customer_header(ui, state, chip_width);
-            },
-        );
-
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = SPACING.xs;
             ui.spacing_mut().button_padding = egui::vec2(SPACING.sm, 0.0);
@@ -1092,13 +1090,6 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     summary = state.cart_summary();
 
     ui.add_space(SPACING.sm);
-    // Paying is not a screen: the footer becomes the tender panel in place.
-    // The lines above stay visible, frozen, because the customer may still
-    // change their mind about one of them.
-    if state.payment.is_some() {
-        crate::checkout::tender(ui, state, &summary);
-        return;
-    }
     // The subtotal is the shelf price of everything in the basket; the total is
     // what the customer actually pays. Showing only the net would hide the
     // discount the cashier just granted, and showing only the gross would
@@ -1163,24 +1154,6 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
     if pay.clicked() {
         state.start_payment();
     }
-}
-
-/// The short, always-visible price mode on the customer chip.
-///
-/// The popup has words, but the chip has to read at a glance before the first
-/// item is scanned. Uppercase keeps it distinct from the customer's name.
-fn customer_header_badge(mode: CustomerMode) -> &'static str {
-    match mode {
-        CustomerMode::Retail => "RETAIL",
-        CustomerMode::Wholesale => "WHOLESALE",
-    }
-}
-
-/// The name shown on the header chip.
-fn customer_header_name(customer: Option<&crate::db::Customer>) -> String {
-    customer
-        .map(|customer| customer.name.clone())
-        .unwrap_or_else(|| "Walk-in".to_owned())
 }
 
 /// The words on a segmented mode choice. The chip uses shouty shorthand; here
@@ -1271,6 +1244,161 @@ fn customer_picker_row(
 /// focus. `Button::selectable` keeps Tab and Enter working, while the pale well
 /// behind them makes the pair read as one control rather than two unrelated
 /// buttons.
+/// The Sell toolbar: price mode on the left, customer search on the right.
+///
+/// Both are decisions about the whole basket, so they live above the two
+/// columns rather than inside the cart. The same strip is drawn on the payment
+/// screen, where it replaces the old customer chip in the form.
+pub(super) fn sell_toolbar(ui: &mut egui::Ui, state: &mut State) {
+    let palette = theme::current(ui.ctx());
+    let mut mode_choice = None;
+    let mut customer_choice: Option<Option<usize>> = None;
+    let mut menu_opened = false;
+    let search_id = egui::Id::new("sell.toolbar.customer.search");
+    let focus_id = egui::Id::new("sell.toolbar.customer.focus");
+
+    components::card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+
+            // Price mode is a property of the basket, not of one line.
+            ui.allocate_ui_with_layout(
+                egui::vec2(220.0, 58.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    components::caption(ui, "Price mode");
+                    ui.add_space(SPACING.xs);
+                    if let Some(mode) = customer_mode_segmented(ui, state.customer_mode, 200.0) {
+                        mode_choice = Some(mode);
+                    }
+                },
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACING.xs;
+                let label = state
+                    .customer
+                    .as_ref()
+                    .map(|customer| customer.name.clone())
+                    .unwrap_or_else(|| "Find a customer".to_owned());
+                let button = egui::Button::new(
+                    egui::RichText::new(label)
+                        .size(TYPE.body)
+                        .family(theme::semibold()),
+                )
+                .min_size(egui::vec2(220.0, 40.0))
+                .corner_radius(egui::CornerRadius::same(RADII.sm as u8))
+                .fill(egui::Color32::from(palette.surface_alt))
+                .stroke(egui::Stroke::new(1.0_f32, palette.border))
+                .right_text(
+                    Icon::CHEVRON_DOWN
+                        .image(CART_CHEVRON_GLYPH, egui::Color32::from(palette.text_muted)),
+                );
+
+                egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+                    menu_opened = true;
+                    ui.set_min_width(CUSTOMER_MENU_WIDTH);
+                    let mut search = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<String>(search_id).unwrap_or_default());
+                    let search_response = components::search_field_sized(
+                        ui,
+                        &mut search,
+                        "Search name or phone",
+                        CUSTOMER_MENU_WIDTH,
+                        40.0,
+                    );
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(search_id, search.clone()));
+                    if ui.ctx().data(|data| data.get_temp::<bool>(focus_id)) == Some(true) {
+                        search_response.request_focus();
+                        ui.ctx().data_mut(|data| data.insert_temp(focus_id, false));
+                    }
+
+                    ui.add_space(SPACING.xs);
+                    if customer_picker_row(
+                        ui,
+                        CUSTOMER_MENU_WIDTH,
+                        state.customer.is_none(),
+                        "Walk-in".to_owned(),
+                        "No named customer · retail price".to_owned(),
+                    )
+                    .clicked()
+                    {
+                        customer_choice = Some(None);
+                        ui.close();
+                    }
+
+                    if state.customers.is_empty() {
+                        components::caption(
+                            ui,
+                            "No regular customers yet. Add them in Shop → Customers.",
+                        );
+                    } else {
+                        let matches: Vec<(usize, &crate::db::Customer)> = state
+                            .customers
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, customer)| customer_matches_filter(customer, &search))
+                            .collect();
+                        if matches.is_empty() {
+                            components::caption(ui, "No customers match that search.");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(CUSTOMER_LIST_HEIGHT)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.set_min_width(CUSTOMER_MENU_WIDTH - 8.0);
+                                    for (index, customer) in matches {
+                                        let attached = state
+                                            .customer
+                                            .as_ref()
+                                            .is_some_and(|current| current.id == customer.id);
+                                        if customer_picker_row(
+                                            ui,
+                                            CUSTOMER_MENU_WIDTH - 8.0,
+                                            attached,
+                                            customer_picker_label(customer),
+                                            customer_picker_hover(customer),
+                                        )
+                                        .clicked()
+                                        {
+                                            customer_choice = Some(Some(index));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                        }
+                    }
+                });
+            });
+        });
+    });
+
+    if !menu_opened {
+        ui.ctx().data_mut(|data| {
+            data.remove_temp::<String>(search_id);
+            data.insert_temp(focus_id, true);
+        });
+    }
+
+    // Both actions need `&mut state`, so they wait until the menu is closed.
+    if let Some(mode) = mode_choice
+        && mode != state.customer_mode
+    {
+        if state.permits(crate::auth::Permission::Discount) {
+            state.set_customer_mode(mode);
+        } else {
+            state.ask_override(crate::auth::Permission::Discount, None);
+        }
+    }
+    match customer_choice {
+        Some(Some(index)) => state.set_customer(Some(state.customers[index].clone())),
+        Some(None) => state.set_customer(None),
+        None => {}
+    }
+}
+
 fn customer_mode_segmented(
     ui: &mut egui::Ui,
     selected: CustomerMode,
@@ -1337,228 +1465,6 @@ fn customer_mode_segmented(
     }
 
     choice
-}
-
-/// One header chip for the customer and the price ladder.
-///
-/// Both choices used to own a full row each, which pushed the first cart line
-/// down and made the basket look busier than it is. The badge stays outside the
-/// popup: mode changes reprice every line already in the basket, so the cashier
-/// must be able to read it without opening anything.
-///
-/// Choices are deferred until the popup closes because both `set_customer` and
-/// `set_customer_mode` need `&mut state`, while the menu body holds `&state`.
-fn customer_header(ui: &mut egui::Ui, state: &mut State, width: f32) {
-    let palette = theme::current(ui.ctx());
-    let wholesale = state.customer_mode == CustomerMode::Wholesale;
-    let badge = customer_header_badge(state.customer_mode);
-    let name = customer_header_name(state.customer.as_ref());
-
-    // Badge first: `Button::truncate` keeps the leading atoms and drops the
-    // later ones, so a long customer name can never hide the price mode. On a
-    // narrow pane the name is left out entirely and the tooltip carries it.
-    let show_name = width >= 180.0;
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        badge,
-        0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::new(TYPE.small, theme::semibold()),
-            color: egui::Color32::from(if wholesale {
-                palette.accent_ink()
-            } else {
-                palette.text_muted
-            }),
-            ..Default::default()
-        },
-    );
-    if show_name {
-        job.append(
-            "  ",
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
-                color: egui::Color32::from(palette.text),
-                ..Default::default()
-            },
-        );
-        job.append(
-            &name,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::new(TYPE.body, egui::FontFamily::Proportional),
-                color: egui::Color32::from(palette.text),
-                ..Default::default()
-            },
-        );
-    }
-
-    let button = egui::Button::new(job)
-        .truncate()
-        .min_size(egui::vec2(width, CART_HEADER_HEIGHT))
-        .fill(if wholesale {
-            egui::Color32::from(palette.accent_soft)
-        } else {
-            egui::Color32::from(palette.surface_alt)
-        })
-        .stroke(egui::Stroke::new(1.0_f32, palette.border))
-        .corner_radius(egui::CornerRadius::same(RADII.sm as u8))
-        .right_text(
-            Icon::CHEVRON_DOWN.image(CART_CHEVRON_GLYPH, egui::Color32::from(palette.text_muted)),
-        );
-
-    let mut customer_choice: Option<Option<usize>> = None;
-    let mut mode_choice: Option<CustomerMode> = None;
-    let mut menu_opened = false;
-
-    // The popup is a short-lived view, but a search box that forgets what was
-    // typed every frame is unusable. Keep the query in egui's temp store so it
-    // survives repaints while the menu is open, and reset it on close.
-    let search_id = egui::Id::new("sell.customer_popup.search");
-    let focus_id = egui::Id::new("sell.customer_popup.focus");
-
-    // While the tender panel owns the screen the basket is frozen, so both
-    // choices are too: repricing under a payment already on the counter is not
-    // a thing the cashier can mean.
-    let enabled =
-        ui.add_enabled_ui(!state.is_tendering(), |ui| {
-            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-                menu_opened = true;
-                ui.set_min_width(CUSTOMER_MENU_WIDTH);
-
-                let mut search = ui
-                    .ctx()
-                    .data(|data| data.get_temp::<String>(search_id).unwrap_or_default());
-                let search_response = components::search_field_sized(
-                    ui,
-                    &mut search,
-                    "Search name or phone",
-                    CUSTOMER_MENU_WIDTH,
-                    40.0,
-                );
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(search_id, search.clone()));
-
-                if ui.ctx().data(|data| data.get_temp::<bool>(focus_id)) == Some(true) {
-                    search_response.request_focus();
-                    ui.ctx().data_mut(|data| data.insert_temp(focus_id, false));
-                }
-
-                ui.add_space(SPACING.xs);
-                components::caption(ui, "Customer");
-                ui.add_space(SPACING.xs);
-                if customer_picker_row(
-                    ui,
-                    CUSTOMER_MENU_WIDTH,
-                    state.customer.is_none(),
-                    "Walk-in".to_owned(),
-                    "No named customer · retail price".to_owned(),
-                )
-                .clicked()
-                {
-                    customer_choice = Some(None);
-                    ui.close();
-                }
-
-                if state.customers.is_empty() {
-                    components::caption(
-                        ui,
-                        "No regular customers yet. Add them in Shop → Customers.",
-                    );
-                } else {
-                    let matches: Vec<(usize, &crate::db::Customer)> = state
-                        .customers
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, customer)| customer_matches_filter(customer, &search))
-                        .collect();
-
-                    if matches.is_empty() {
-                        components::caption(ui, "No customers match that search.");
-                        if ui
-                            .add(egui::Button::new("Clear search").min_size(egui::vec2(
-                                CUSTOMER_MENU_WIDTH,
-                                CUSTOMER_PICKER_ROW_HEIGHT,
-                            )))
-                            .clicked()
-                        {
-                            ui.ctx()
-                                .data_mut(|data| data.remove_temp::<String>(search_id));
-                            ui.ctx().data_mut(|data| data.insert_temp(focus_id, true));
-                        }
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(CUSTOMER_LIST_HEIGHT)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.set_min_width(CUSTOMER_MENU_WIDTH - 8.0);
-                                for (index, customer) in matches {
-                                    let attached = state
-                                        .customer
-                                        .as_ref()
-                                        .is_some_and(|current| current.id == customer.id);
-                                    if customer_picker_row(
-                                        ui,
-                                        CUSTOMER_MENU_WIDTH - 8.0,
-                                        attached,
-                                        customer_picker_label(customer),
-                                        customer_picker_hover(customer),
-                                    )
-                                    .clicked()
-                                    {
-                                        customer_choice = Some(Some(index));
-                                        ui.close();
-                                    }
-                                }
-                            });
-                    }
-                }
-
-                ui.add_space(SPACING.sm);
-                components::divider(ui);
-                ui.add_space(SPACING.sm);
-                components::caption(ui, "Price mode");
-                if let Some(mode) =
-                    customer_mode_segmented(ui, state.customer_mode, CUSTOMER_MENU_WIDTH)
-                {
-                    if mode != state.customer_mode {
-                        mode_choice = Some(mode);
-                    }
-                    ui.close();
-                }
-                components::caption(ui, "Wholesale uses the deepest quantity break.");
-            })
-        });
-
-    if !menu_opened {
-        ui.ctx().data_mut(|data| {
-            data.remove_temp::<String>(search_id);
-            data.insert_temp(focus_id, true);
-        });
-    }
-
-    enabled.inner.0.on_hover_text(format!(
-        "{} · {}\nClick to change customer or price mode",
-        name,
-        state.customer_mode.label()
-    ));
-
-    match customer_choice {
-        Some(Some(index)) => {
-            let customer = state.customers[index].clone();
-            state.set_customer(Some(customer));
-        }
-        Some(None) => state.set_customer(None),
-        None => {}
-    }
-
-    if let Some(mode) = mode_choice {
-        if state.permits(crate::auth::Permission::Discount) {
-            state.set_customer_mode(mode);
-        } else {
-            state.ask_override(crate::auth::Permission::Discount, None);
-        }
-    }
 }
 
 /// Whether `text` is wider than the space its label was given.
@@ -1945,24 +1851,6 @@ mod tests {
         };
         assert_eq!(footer_reserve(&suppressed, None), 196.0 + caption);
         assert_eq!(footer_reserve(&suppressed, Some(0)), 470.0);
-    }
-
-    #[test]
-    fn customer_header_badge_names_the_active_price_mode() {
-        assert_eq!(customer_header_badge(CustomerMode::Retail), "RETAIL");
-        assert_eq!(customer_header_badge(CustomerMode::Wholesale), "WHOLESALE");
-    }
-
-    #[test]
-    fn customer_header_name_uses_customer_or_walk_in() {
-        let customer = crate::db::Customer {
-            id: 1,
-            name: "Mama Njeri".to_owned(),
-            phone: None,
-            discount_bp: 0,
-        };
-        assert_eq!(customer_header_name(Some(&customer)), "Mama Njeri");
-        assert_eq!(customer_header_name(None), "Walk-in");
     }
 
     #[test]

@@ -1,15 +1,14 @@
-//! Cash in, change out, one sale written — inside the cart column.
+//! Cash in, change out, one sale written — on a screen of its own.
 //!
-//! Paying is not a screen. The cart's footer grows into the tender panel in
-//! place, so the amount the cashier was already reading does not move, and the
-//! product grid behind it dims but stays where it was. A till is operated by
-//! muscle memory; a modal that covers the workspace throws that memory away
-//! every single sale.
+//! Taking payment used to grow the cart's footer until the item list nearly
+//! vanished. The till now switches to a payment screen: the amount is large,
+//! the method buttons are easy to hit, and the tenders already taken are a
+//! short list on the right rather than another block of controls. Splitting a
+//! payment adds a row to that list; it does not push the item count off screen.
 //!
-//! One state, one panel. It asks what is due, what the customer handed over,
-//! and what comes back. Completing the sale closes the panel and empties the
-//! cart in the same frame, so the next customer starts from a clean till with
-//! no "new sale" button to press.
+//! Completing the sale closes the screen and empties the cart in the same
+//! frame, so the next customer starts from a clean till with no "new sale"
+//! button to press.
 //!
 //! The till takes one or more exact tenders. Cash can cover the remainder and
 //! take change; mobile money is recorded only, for the amounts the cashier has
@@ -24,47 +23,146 @@ use ui_shell::egui;
 use crate::actions;
 use crate::state::{self, CartSummary, State};
 
-/// Draw the tender panel into the cart column.
+/// The payment screen: a form on the left, the basket and tenders on the right.
 ///
-/// Called from the Sell module's cart, at the point where the totals and the
-/// Pay button would otherwise be. It owns the footer for as long as
-/// [`State::payment`] is set: the panel is the payment, not an overlay on it.
-pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
+/// The Sell workspace hands the whole content area to this function while a
+/// sale is being paid. Nothing behind it needs to stay visible — the basket is
+/// frozen by [`State::is_tendering`] anyway — so the money gets the room.
+pub fn payment_screen(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
+    if state.payment.is_none() {
+        return;
+    }
+
+    let full = ui.available_rect_before_wrap();
+    let gap = SPACING.md;
+    let side_width = (full.width() * 0.32).clamp(260.0, 340.0);
+    let form_width = (full.width() - side_width - gap).max(320.0);
+    let form_rect =
+        egui::Rect::from_min_max(full.min, egui::pos2(full.min.x + form_width, full.max.y));
+    let side_rect = egui::Rect::from_min_max(
+        egui::pos2(full.min.x + form_width + gap, full.min.y),
+        full.max,
+    );
+
+    let remove_last;
+    {
+        let mut form = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(form_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        payment_form(&mut form, state, summary);
+    }
+    // Completing a sale clears the payment and the basket in the same frame.
+    // Do not draw a right-hand panel for a sale that has already gone.
+    if state.payment.is_none() {
+        ui.advance_cursor_after_rect(full);
+        return;
+    }
+    {
+        let mut side = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(side_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        remove_last = order_panel(&mut side, state, summary);
+    }
+
+    if remove_last {
+        state.remove_last_tender();
+    }
+    ui.advance_cursor_after_rect(full);
+}
+
+/// The basket and the payments already taken, kept beside the form so a split
+/// sale reads as one list that grows instead of a form that grows.
+fn order_panel(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) -> bool {
+    let palette = theme::current(ui.ctx());
+    let mut undo = false;
+
+    components::card(ui, |ui| {
+        ui.label(components::semibold("This sale").size(TYPE.heading));
+        ui.add_space(SPACING.xs);
+        components::caption(ui, &format!("{} item(s)", state.cart_count()));
+        ui.add_space(SPACING.xs);
+        crate::modules::amount_row(ui, "Subtotal", &state.money(summary.gross_minor), false);
+        if summary.discount_minor > 0 {
+            let label = format!("Discount ({})", state::percent_text(summary.discount_bp));
+            crate::modules::amount_row(ui, &label, &state.money(-summary.discount_minor), false);
+        }
+        if summary.rounding_minor != 0 {
+            let label = if summary.rounding_minor < 0 {
+                "Rounded down"
+            } else {
+                "Rounded up"
+            };
+            crate::modules::amount_row(ui, label, &state.money(summary.rounding_minor), false);
+        }
+        crate::modules::amount_row(ui, "Total", &state.money(summary.due_minor), true);
+    });
+
+    ui.add_space(SPACING.md);
+    components::card(ui, |ui| {
+        ui.label(components::semibold("Payments taken").size(TYPE.heading));
+        ui.add_space(SPACING.xs);
+        let tenders: Vec<_> = state
+            .payment
+            .as_ref()
+            .map(|payment| payment.tenders.clone())
+            .unwrap_or_default();
+        if tenders.is_empty() {
+            components::caption(ui, "None yet. The first tender goes here.");
+        } else {
+            for (index, tender) in tenders.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACING.xs;
+                    ui.label(
+                        egui::RichText::new(format!("{}.", index + 1))
+                            .size(TYPE.small)
+                            .color(egui::Color32::from(palette.text_muted)),
+                    );
+                    ui.label(
+                        egui::RichText::new(state::payment_method_label(&tender.method))
+                            .size(TYPE.body),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(state.money(tender.amount_minor)).size(TYPE.body),
+                        );
+                    });
+                });
+            }
+            ui.add_space(SPACING.xs);
+            if actions::quiet(ui, "Undo last payment")
+                .on_hover_text("Remove the last tender")
+                .clicked()
+            {
+                undo = true;
+            }
+        }
+    });
+    undo
+}
+
+/// The amount, the method, and the action — the part the cashier actually
+/// operates. Kept as its own function so the screen can put it in a column.
+fn payment_form(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     if state.payment.is_none() {
         return;
     }
 
     // Read the amounts before borrowing the payment. They arrive in one
     // snapshot from the cart, so the amount due cannot disagree with the
-    // rounding line even if a quantity edit landed in the same frame.
+    // right-hand order panel drawn in the same frame.
     let currency = state.currency;
-    let rounding_minor = summary.rounding_minor;
     let due_minor = summary.due_minor;
-    let rounding = state.money(rounding_minor);
-    let due = state.money(due_minor);
 
     let paid_minor = state.payment_paid_minor();
     let remaining_minor = (due_minor - paid_minor).max(0);
     let remaining = state.money(remaining_minor);
-    // One compact read of what is already on the counter. The strip stays one
-    // wrapped line: the panel is the cart's footer and cannot grow with a
-    // tender count.
-    let taken: Vec<(String, String)> = state
-        .payment
-        .as_ref()
-        .map(|payment| {
-            payment
-                .tenders
-                .iter()
-                .map(|tender| {
-                    (
-                        crate::state::payment_method_label(&tender.method),
-                        state.money(tender.tendered_minor),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+
+    ui.label(components::semibold("Take payment").size(TYPE.heading));
+    ui.add_space(SPACING.md);
 
     // Everything below draws the form; the keys are routed by `shell`, so a
     // focused field and a bare counter top behave the same.
@@ -83,46 +181,25 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     let danger = egui::Color32::from(palette.danger);
     let mut add = false;
     let mut close = false;
-    let mut remove_last = false;
     let mut field_submitted = false;
 
-    // The caller has already put a gap between the lines and the footer.
-    components::divider(ui);
-    ui.add_space(SPACING.xs);
-
-    // The exact total, then what the drawer takes. The cashier already read
-    // these on the cart; they are repeated because the rounding line only
-    // matters at the moment money changes hands.
-    if rounding_minor != 0 {
-        let label = if rounding_minor < 0 {
-            "Rounded down"
+    // The number the cashier reads before anything else. On a split sale it is
+    // the balance, not the original total; the full total stays on the right.
+    components::caption(
+        ui,
+        if paid_minor > 0 {
+            "Remaining to pay"
         } else {
-            "Rounded up"
-        };
-        components::receipt_line(ui, label, &rounding);
-    }
-    crate::modules::amount_row(ui, "To pay", &due, true);
-
-    // A split sale keeps the balance in front of the cashier, and the tenders
-    // already taken as one line. The undo is on the strip because the last
-    // tender is the one a mistyped figure belongs to.
-    if !payment.tenders.is_empty() {
-        crate::modules::amount_row(ui, "Remaining", &remaining, false);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-            components::caption(ui, "Taken:");
-            for (label, amount) in &taken {
-                components::caption(ui, &format!("{amount} {label}"));
-            }
-            if actions::quiet(ui, "Undo")
-                .on_hover_text("Remove the last payment")
-                .clicked()
-            {
-                remove_last = true;
-            }
-        });
-    }
-    ui.add_space(SPACING.sm);
+            "To pay"
+        },
+    );
+    ui.label(
+        egui::RichText::new(&remaining)
+            .size(TYPE.total * 1.4)
+            .family(theme::semibold())
+            .color(egui::Color32::from(palette.accent_ink())),
+    );
+    ui.add_space(SPACING.md);
 
     // The method is a choice only when there is more than one; the row reads
     // left to right in the order the shop takes money.
@@ -393,9 +470,6 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         add = true;
     }
 
-    if remove_last {
-        state.remove_last_tender();
-    }
     if add {
         state.confirm_payment();
     } else if close {
