@@ -11,9 +11,9 @@
 //! cart in the same frame, so the next customer starts from a clean till with
 //! no "new sale" button to press.
 //!
-//! Cash only. The `payments` table already has a `method` column and mobile money
-//! is a new row rather than a migration, but a method picker with one method in
-//! it is a choice the cashier has to make for no reason.
+//! The till takes one or more exact tenders. Cash can cover the remainder and
+//! take change; mobile money is recorded only, for the amounts the cashier has
+//! confirmed with the customer, and never returns change.
 
 use money::Money;
 use ui_kit::components;
@@ -42,9 +42,29 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     let due_minor = summary.due_minor;
     let rounding = state.money(rounding_minor);
     let due = state.money(due_minor);
-    // The field carries the currency as a prefix, so its hint is the bare
-    // number: "UGX" and "USh 3000" together read as two currencies.
-    let due_hint = crate::state::plain_amount(due_minor, currency);
+
+    let paid_minor = state.payment_paid_minor();
+    let remaining_minor = (due_minor - paid_minor).max(0);
+    let remaining = state.money(remaining_minor);
+    // One compact read of what is already on the counter. The strip stays one
+    // wrapped line: the panel is the cart's footer and cannot grow with a
+    // tender count.
+    let taken: Vec<(String, String)> = state
+        .payment
+        .as_ref()
+        .map(|payment| {
+            payment
+                .tenders
+                .iter()
+                .map(|tender| {
+                    (
+                        crate::state::payment_method_label(&tender.method),
+                        state.money(tender.tendered_minor),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Everything below draws the form; the keys are routed by `shell`, so a
     // focused field and a bare counter top behave the same.
@@ -60,8 +80,10 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
 
     let palette = theme::current(ui.ctx());
     let success = egui::Color32::from(palette.success);
-    let mut complete = false;
+    let danger = egui::Color32::from(palette.danger);
+    let mut add = false;
     let mut close = false;
+    let mut remove_last = false;
     let mut field_submitted = false;
 
     // The caller has already put a gap between the lines and the footer.
@@ -80,17 +102,74 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         components::receipt_line(ui, label, &rounding);
     }
     crate::modules::amount_row(ui, "To pay", &due, true);
+
+    // A split sale keeps the balance in front of the cashier, and the tenders
+    // already taken as one line. The undo is on the strip because the last
+    // tender is the one a mistyped figure belongs to.
+    if !payment.tenders.is_empty() {
+        crate::modules::amount_row(ui, "Remaining", &remaining, false);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+            components::caption(ui, "Taken:");
+            for (label, amount) in &taken {
+                components::caption(ui, &format!("{amount} {label}"));
+            }
+            if actions::quiet(ui, "Undo")
+                .on_hover_text("Remove the last payment")
+                .clicked()
+            {
+                remove_last = true;
+            }
+        });
+    }
     ui.add_space(SPACING.sm);
 
-    components::field_label(ui, "Cash received");
+    // The method is a choice only when there is more than one; the row reads
+    // left to right in the order the shop takes money.
+    components::field_label(ui, "Method");
+    ui.add_space(SPACING.xs);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+        for (key, label) in state::PAYMENT_METHODS {
+            let selected = payment.method.eq_ignore_ascii_case(key);
+            let text = if selected {
+                egui::RichText::new(*label)
+                    .size(TYPE.small)
+                    .family(theme::semibold())
+                    .color(palette.accent_text)
+            } else {
+                egui::RichText::new(*label)
+                    .size(TYPE.small)
+                    .family(theme::semibold())
+            };
+            let mut button = egui::Button::new(text).min_size(egui::vec2(0.0, 36.0));
+            if selected {
+                button = button.fill(palette.accent).stroke(egui::Stroke::NONE);
+            }
+            if ui.add(button).clicked() && !selected {
+                payment.method = (*key).to_owned();
+                payment.tendered.clear();
+                payment.reference.clear();
+                payment.error = None;
+                // Hand the keyboard back to the amount: the next thing the
+                // cashier does is type or tap a note.
+                payment.focus = true;
+            }
+        }
+    });
+
+    let is_cash = payment.method.eq_ignore_ascii_case("cash");
+    ui.add_space(SPACING.sm);
+    components::field_label(ui, if is_cash { "Cash received" } else { "Amount" });
     ui.add_space(SPACING.xs);
 
     let mut edited = false;
+    let amount_hint = crate::state::plain_amount(remaining_minor, currency);
     let field = crate::modules::prefixed_field(
         ui,
         &mut payment.tendered,
         currency.code(),
-        &due_hint,
+        &amount_hint,
         ui.available_width(),
     );
     if payment.focus {
@@ -104,37 +183,94 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         field_submitted = true;
     }
 
-    // Exact first, then the notes that can actually cover the bill. A chip
-    // smaller than the total can only make the drawer come up short, so it is
-    // not offered. Four is the strip's limit: past that it stops being a
-    // shortcut and becomes the currency.
+    if is_cash {
+        // Exact first, then the notes that can actually cover the balance. A
+        // chip smaller than what is left can only make the drawer come up
+        // short, so it is not offered.
+        ui.add_space(SPACING.xs);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
+            if remaining_minor > 0 {
+                for &amount in &quick_amounts(currency, remaining_minor) {
+                    let exact_amount = amount == remaining_minor;
+                    let label = if exact_amount {
+                        "Exact".to_owned()
+                    } else {
+                        Money::new(amount, currency).format()
+                    };
+                    let btn = egui::Button::new(
+                        egui::RichText::new(&label)
+                            .size(TYPE.small)
+                            .family(theme::semibold()),
+                    )
+                    .min_size(egui::vec2(0.0, 44.0));
+
+                    let hint = if exact_amount {
+                        format!("Tender the exact {remaining}")
+                    } else {
+                        format!("Tender {label}")
+                    };
+                    if ui.add(btn).on_hover_text(hint).clicked() {
+                        apply_denomination(payment, amount, remaining_minor, currency);
+                        edited = true;
+                        // Hand the keyboard back to the amount: the next thing a
+                        // cashier does is type, not click again.
+                        field.request_focus();
+                    }
+                }
+            }
+        });
+    } else {
+        // Mobile money is recorded, not processed. The sentence is on screen
+        // because the till cannot check the network, and the cashier is the
+        // one holding the customer's confirmation.
+        ui.add_space(SPACING.sm);
+        components::caption(ui, "Record only — confirm the customer's phone, then add.");
+        ui.add_space(SPACING.xs);
+        let reference = crate::modules::text_field(
+            ui,
+            &mut payment.reference,
+            "Transaction ID (optional)",
+            ui.available_width(),
+        );
+        if reference.changed() {
+            edited = true;
+        }
+        if reference.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            field_submitted = true;
+        }
+    }
+
+    // An even split is the common case behind a split tender: two or three
+    // people paying one share each. The chip fills the amount field with one
+    // share whatever the method; Add still records it, so the cashier sees
+    // every tender and a mobile share stays exact.
     ui.add_space(SPACING.xs);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(SPACING.xs, SPACING.xs);
-        for &amount in &quick_amounts(currency, due_minor) {
-            let exact_amount = amount == due_minor;
-            let label = if exact_amount {
-                "Exact".to_owned()
-            } else {
-                Money::new(amount, currency).format()
-            };
+        components::caption(ui, "Split evenly");
+        for parts in 2..=4 {
+            let share = split_share(due_minor, remaining_minor, parts);
+            if share <= 0 {
+                continue;
+            }
             let btn = egui::Button::new(
-                egui::RichText::new(&label)
+                egui::RichText::new(parts.to_string())
                     .size(TYPE.small)
                     .family(theme::semibold()),
             )
-            .min_size(egui::vec2(0.0, 44.0));
-
-            let hint = if exact_amount {
-                format!("Tender the exact {due}")
-            } else {
-                format!("Tender {label}")
-            };
-            if ui.add(btn).on_hover_text(hint).clicked() {
-                apply_denomination(payment, amount, due_minor, currency);
+            .min_size(egui::vec2(34.0, 30.0));
+            if ui
+                .add(btn)
+                .on_hover_text(format!(
+                    "Set this payment to one of {parts} shares ({})",
+                    Money::new(share, currency).format()
+                ))
+                .clicked()
+            {
+                payment.tendered = crate::state::plain_amount(share, currency);
+                payment.error = None;
                 edited = true;
-                // Hand the keyboard back to the amount: the next thing a
-                // cashier does is type, not click again.
                 field.request_focus();
             }
         }
@@ -146,35 +282,38 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
     }
 
     // The change updates as the cashier types: it is the number they read out,
-    // and waiting for Complete to show it invites a second count.
+    // and waiting for Complete to show it invites a second count. A non-cash
+    // tender is exact, so it has no short or change line to draw.
     let tendered = if payment.tendered.trim().is_empty() {
-        Some(due_minor)
+        Some(remaining_minor)
     } else {
         Money::parse(payment.tendered.trim(), currency)
             .ok()
             .map(|amount| amount.minor())
     };
 
-    ui.add_space(SPACING.xs);
-    match tendered {
-        Some(tendered) if tendered < due_minor => {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Short by {}",
-                    Money::new(due_minor - tendered, currency).format()
-                ))
-                .size(TYPE.small)
-                .color(egui::Color32::from(palette.danger)),
-            );
-        }
-        Some(tendered) => change_row(
-            ui,
-            &Money::new(tendered - due_minor, currency).format(),
-            success,
-        ),
-        // Mid-typing text that is not yet an amount is not an error.
-        None => {
-            ui.label(egui::RichText::new(" ").size(TYPE.small));
+    if is_cash {
+        ui.add_space(SPACING.xs);
+        match tendered {
+            Some(tendered) if tendered < remaining_minor => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Short by {}",
+                        Money::new(remaining_minor - tendered, currency).format()
+                    ))
+                    .size(TYPE.small)
+                    .color(danger),
+                );
+            }
+            Some(tendered) => change_row(
+                ui,
+                &Money::new(tendered - remaining_minor, currency).format(),
+                success,
+            ),
+            // Mid-typing text that is not yet an amount is not an error.
+            None => {
+                ui.label(egui::RichText::new(" ").size(TYPE.small));
+            }
         }
     }
 
@@ -187,11 +326,17 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         );
     }
 
+    let settles = match tendered {
+        Some(amount) if is_cash => amount >= remaining_minor,
+        Some(amount) => amount == remaining_minor,
+        None => false,
+    };
+
     ui.add_space(SPACING.sm);
-    let label = if tendered.is_some_and(|t| t >= due_minor) {
+    let label = if settles {
         "Complete sale"
     } else {
-        "Cash is short"
+        "Add payment"
     };
     let complete_btn = ui.add_sized(
         [ui.available_width(), 52.0],
@@ -206,12 +351,12 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         .corner_radius(egui::CornerRadius::same(ui_kit::tokens::RADII.sm as u8)),
     );
     if complete_btn.clicked() {
-        complete = true;
+        add = true;
     }
 
     // "Cancel" would read as cancelling the sale. The basket is intact; this
     // only returns to it. Same row as the key hint, because the two are the
-    // same thought: nothing here is committed until Complete.
+    // same thought: nothing here is committed until the sale writes.
     ui.horizontal(|ui| {
         if actions::quiet(ui, "Back to cart")
             .on_hover_text("Escape")
@@ -223,16 +368,19 @@ pub fn tender(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
         // panel is the cart's footer and has a fixed height to stay inside.
         if payment.error.is_none() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                components::caption(ui, "Enter pays · Esc back");
+                components::caption(ui, "Enter adds · Esc back");
             });
         }
     });
 
     if (!opening && ui.input(|i| i.key_pressed(egui::Key::Enter))) || field_submitted {
-        complete = true;
+        add = true;
     }
 
-    if complete {
+    if remove_last {
+        state.remove_last_tender();
+    }
+    if add {
         state.confirm_payment();
     } else if close {
         state.close_payment();
@@ -290,7 +438,7 @@ fn quick_amounts(currency: money::Currency, due_minor: i64) -> Vec<i64> {
 fn apply_denomination(
     payment: &mut state::Payment,
     denom: i64,
-    due_minor: i64,
+    remaining_minor: i64,
     currency: money::Currency,
 ) {
     let current_minor = if payment.tendered.trim().is_empty() {
@@ -301,7 +449,7 @@ fn apply_denomination(
             .unwrap_or(0)
     };
 
-    let next_minor = if current_minor == 0 || current_minor >= due_minor {
+    let next_minor = if current_minor == 0 || current_minor >= remaining_minor {
         denom
     } else {
         current_minor.saturating_add(denom)
@@ -309,6 +457,25 @@ fn apply_denomination(
 
     payment.tendered = state::plain_amount(next_minor, currency);
     payment.error = None;
+}
+
+/// One share of a sale split evenly between `parts` people.
+///
+/// The share is read from the whole bill, not from the shrinking balance, so
+/// pressing "3" three times gives three equal shares. Integer division can
+/// leave a unit or two over; when only that remainder is left, the share is the
+/// remainder, so the last person settles the sale rather than leaving a balance
+/// no tender can clear.
+fn split_share(due_minor: i64, remaining_minor: i64, parts: i64) -> i64 {
+    if parts <= 1 {
+        return remaining_minor;
+    }
+    let share = due_minor / parts;
+    if share <= 0 || remaining_minor < share.saturating_mul(2) {
+        remaining_minor
+    } else {
+        share
+    }
 }
 
 /// The number the cashier hands back, at the size of the total.
@@ -371,7 +538,10 @@ mod tests {
     #[test]
     fn denomination_clicks_accumulate_when_short_and_replace_when_sufficient() {
         let mut payment = state::Payment {
+            tenders: Vec::new(),
+            method: "cash".to_owned(),
             tendered: String::new(),
+            reference: String::new(),
             error: Some("Previous error".into()),
             focus: false,
         };
@@ -397,5 +567,23 @@ mod tests {
         assert_eq!(payment.tendered, "20.00");
         apply_denomination(&mut payment, 5_000, 1_500, Currency::USD); // replace with $50.00
         assert_eq!(payment.tendered, "50.00");
+    }
+
+    #[test]
+    fn split_shares_divide_the_bill_and_leave_the_remainder_to_the_last() {
+        assert_eq!(split_share(10_000, 10_000, 2), 5_000);
+        assert_eq!(split_share(10_000, 5_000, 2), 5_000);
+
+        // Three shares of 10,000: 3,333 twice, then the 3,334 remainder.
+        assert_eq!(split_share(10_000, 10_000, 3), 3_333);
+        assert_eq!(split_share(10_000, 6_667, 3), 3_333);
+        assert_eq!(split_share(10_000, 3_334, 3), 3_334);
+
+        // A balance smaller than a share is tendered whole.
+        assert_eq!(split_share(10_000, 100, 4), 100);
+
+        // A bill too small to split still yields the whole balance.
+        assert_eq!(split_share(1, 1, 4), 1);
+        assert_eq!(split_share(0, 0, 3), 0);
     }
 }

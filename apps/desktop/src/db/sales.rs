@@ -74,11 +74,71 @@ pub fn record_sale(
         .checked_add(terms.rounding_minor)
         .context("the amount due does not fit in 64 bits")?;
     anyhow::ensure!(paid_minor >= 0, "the amount due cannot be negative");
+
+    // Older callers still arrive with one cash figure in `tendered_minor`;
+    // the checkout now collects a list from the first tender. Making the legacy
+    // figure a one-row list keeps one write path and one set of rules.
+    let single_cash = PaymentLine {
+        method: "cash",
+        amount_minor: paid_minor,
+        tendered_minor: terms.tendered_minor,
+        reference: None,
+    };
+    let tenders: &[PaymentLine<'_>] = if terms.payments.is_empty() {
+        std::slice::from_ref(&single_cash)
+    } else {
+        terms.payments
+    };
+
+    let mut taken_minor = 0_i64;
+    let mut tendered_minor = 0_i64;
+    let mut change_minor = 0_i64;
+    for tender in tenders {
+        let method = tender.method.trim();
+        anyhow::ensure!(!method.is_empty(), "a payment needs a method");
+        anyhow::ensure!(tender.amount_minor >= 0, "a payment cannot be negative");
+        anyhow::ensure!(
+            tender.tendered_minor >= 0,
+            "cash received cannot be negative"
+        );
+
+        if method.eq_ignore_ascii_case("cash") {
+            // Cash may overpay and produce change; it may never settle less
+            // than it claims, because that would mean a tender contributed
+            // money the drawer never saw.
+            anyhow::ensure!(
+                tender.tendered_minor >= tender.amount_minor,
+                "cash received is less than the amount it settles"
+            );
+            change_minor = change_minor
+                .checked_add(tender.tendered_minor - tender.amount_minor)
+                .context("the change does not fit in 64 bits")?;
+        } else {
+            // A mobile-money row is exact: the customer approved a figure on
+            // their phone, and the till hands nothing back against it.
+            anyhow::ensure!(
+                tender.tendered_minor == tender.amount_minor,
+                "a non-cash payment must equal its amount"
+            );
+            if let Some(reference) = tender.reference {
+                anyhow::ensure!(
+                    reference.chars().count() <= 64,
+                    "a payment reference is too long"
+                );
+            }
+        }
+
+        taken_minor = taken_minor
+            .checked_add(tender.amount_minor)
+            .context("the payments do not fit in 64 bits")?;
+        tendered_minor = tendered_minor
+            .checked_add(tender.tendered_minor)
+            .context("the payments do not fit in 64 bits")?;
+    }
     anyhow::ensure!(
-        terms.tendered_minor >= paid_minor,
-        "cash received is less than the amount due"
+        taken_minor == paid_minor,
+        "payments sum to {taken_minor}, not the amount due {paid_minor}"
     );
-    let change_minor = terms.tendered_minor - paid_minor;
 
     // Read the install identity before opening the transaction: on an upgraded
     // database this may write `meta`, and the transaction's first write must be
@@ -191,19 +251,32 @@ pub fn record_sale(
         }
     }
 
-    let payment_uid = uuid::Uuid::now_v7().to_string();
-    transaction.execute(
-        "INSERT INTO payments
-             (sale_id, method, amount_minor, tendered_minor, change_minor, uid)
-         VALUES (?1, 'cash', ?2, ?3, ?4, ?5)",
-        (
-            id,
-            paid_minor,
-            terms.tendered_minor,
-            change_minor,
-            payment_uid.as_str(),
-        ),
-    )?;
+    // One row per tender. The rows are append-only and carry a `uid` so sync
+    // replays them exactly once; the order they are written in is the order
+    // the cashier took them.
+    for tender in tenders {
+        let payment_uid = uuid::Uuid::now_v7().to_string();
+        let method = tender.method.trim();
+        let change = if method.eq_ignore_ascii_case("cash") {
+            tender.tendered_minor - tender.amount_minor
+        } else {
+            0
+        };
+        transaction.execute(
+            "INSERT INTO payments
+                 (sale_id, method, amount_minor, tendered_minor, change_minor, uid, reference)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                id,
+                method,
+                tender.amount_minor,
+                tender.tendered_minor,
+                change,
+                payment_uid.as_str(),
+                tender.reference,
+            ),
+        )?;
+    }
 
     transaction.commit()?;
 
@@ -217,7 +290,7 @@ pub fn record_sale(
         discount_bp: terms.discount_bp,
         price_mode: terms.price_mode.to_owned(),
         customer_name: terms.customer_name.map(str::to_owned),
-        tendered_minor: terms.tendered_minor,
+        tendered_minor,
         change_minor,
     })
 }
@@ -760,26 +833,41 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
     };
 
     // Payments are summed in Rust rather than `SUM`-ed in SQL because a sale
-    // settled across two methods must show both, not one pile. Today the till
-    // writes one cash row per sale, so the loop runs once and is ready for the
-    // day a second method lands.
-    let mut method_parts = Vec::new();
+    // settled across two methods must show both, not one pile. Each row is a
+    // tender, in the order the cashier took it.
+    let mut method_parts: Vec<String> = Vec::new();
+    let mut payments = Vec::new();
     let mut tendered_minor = 0;
     let mut change_minor = 0;
-    if let Ok(mut statement) =
-        conn.prepare("SELECT method, tendered_minor, change_minor FROM payments WHERE sale_id = ?1")
-    {
+    if let Ok(mut statement) = conn.prepare(
+        "SELECT method, amount_minor, tendered_minor, change_minor, reference
+           FROM payments WHERE sale_id = ?1 ORDER BY id",
+    ) {
         if let Ok(rows) = statement.query_map([id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         }) {
             for payment in rows.filter_map(Result::ok) {
-                method_parts.push(payment.0);
-                tendered_minor += payment.1;
-                change_minor += payment.2;
+                if !method_parts
+                    .iter()
+                    .any(|method| method.eq_ignore_ascii_case(&payment.0))
+                {
+                    method_parts.push(payment.0.clone());
+                }
+                payments.push(PaidBy {
+                    method: payment.0,
+                    amount_minor: payment.1,
+                    tendered_minor: payment.2,
+                    change_minor: payment.3,
+                    reference: payment.4,
+                });
+                tendered_minor += payment.2;
+                change_minor += payment.3;
             }
         }
     } else {
@@ -804,6 +892,7 @@ pub fn sale_detail(store: &storage::Store, id: i64) -> Option<SaleDetail> {
         } else {
             method_parts.join(" + ")
         },
+        payments,
         tendered_minor,
         change_minor,
         lines,

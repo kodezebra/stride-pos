@@ -768,4 +768,16 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON sales (customer_id) WHERE customer_id IS NOT NULL;
         "#,
     },
+    // A till that took a mobile-money tender can record the transaction id the
+    // customer's phone shows. It is the only handle a shop has when a payment
+    // is later disputed, and it costs nothing on a cash sale to leave it NULL.
+    // The till never verifies the id; it is a note on the sale, not a receipt
+    // from the network.
+    Migration {
+        version: 21,
+        name: "payment_reference",
+        sql: r#"
+            ALTER TABLE payments ADD COLUMN reference TEXT;
+        "#,
+    },
 ];

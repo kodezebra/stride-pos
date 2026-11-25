@@ -77,6 +77,24 @@ pub struct SaleLine {
     pub unit_label: Option<String>,
 }
 
+/// One tender as the checkout collected it, on its way into `payments`.
+///
+/// `amount_minor` is what the tender settles; `tendered_minor` is what the
+/// customer handed over. They differ only for cash that overpaid and produced
+/// change: a 20,000 note against a 12,400 bill settles 12,400 and returns
+/// 7,600. A mobile-money tender is exact, so the two are equal and change is 0.
+pub struct PaymentLine<'a> {
+    /// The stored key: `cash`, `mtn_momo`, `airtel_money`.
+    pub method: &'a str,
+    /// What this tender contributes towards the amount due.
+    pub amount_minor: i64,
+    /// What the customer handed over. Equals `amount_minor` unless this is a
+    /// cash tender that overpaid.
+    pub tendered_minor: i64,
+    /// The phone-side transaction id, when the cashier recorded one.
+    pub reference: Option<&'a str>,
+}
+
 /// The money and attribution of one sale, as the checkout collected it.
 ///
 /// A struct rather than positional arguments because five of these are `i64`
@@ -87,8 +105,12 @@ pub struct SaleTerms<'a> {
     pub rounding_minor: i64,
     /// The tax collected, included in the net total.
     pub tax_minor: i64,
-    /// Cash handed over.
+    /// Cash handed over, for a sale paid in one cash tender. Ignored when
+    /// `payments` is non-empty, which is how the till now pays.
     pub tendered_minor: i64,
+    /// Every tender, in the order it was taken. Empty means the legacy single
+    /// cash sale: `tendered_minor` is then the whole of it.
+    pub payments: &'a [PaymentLine<'a>],
     /// The basket discount taken off the lines.
     pub discount_minor: i64,
     /// The rate that produced it, in basis points.
@@ -111,6 +133,7 @@ impl Default for SaleTerms<'_> {
             rounding_minor: 0,
             tax_minor: 0,
             tendered_minor: 0,
+            payments: &[],
             discount_minor: 0,
             discount_bp: 0,
             price_mode: "retail",
@@ -758,16 +781,32 @@ pub struct DetailLine {
     pub unit_label: Option<String>,
 }
 
+/// One tender as the sale detail reads it back: what was handed over, under
+/// which method, and what came back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaidBy {
+    /// The stored key: `cash`, `mtn_momo`, `airtel_money`.
+    pub method: String,
+    /// What this tender contributed towards the amount due.
+    pub amount_minor: i64,
+    /// What the customer handed over.
+    pub tendered_minor: i64,
+    /// What came back from this tender. Only cash can produce change.
+    pub change_minor: i64,
+    /// The phone-side transaction id, when one was recorded.
+    pub reference: Option<String>,
+}
+
 /// The whole record of one sale: its lines, its money, and who took it.
 ///
 /// The list answers "how much came in"; this answers "what exactly was for
 /// that" — the receipt a customer might come back about, or the discrepancy an
 /// owner is looking for at the end of a shift.
 ///
-/// Problems `IO`: today the till pays cash only, so `method` is always cash.
-/// Payments are already summed in Rust (not `SUM` in SQL) because a split
-/// payment — part cash, part something else one day — must read honestly, and
-/// each row's method tells the story; a combined string handles both.
+/// Problems `IO`: a tender is recorded, never verified — the cashier confirms
+/// the customer's phone before adding a mobile-money row, and the till cannot
+/// know whether the network agreed. Payments are summed in Rust (not `SUM` in
+/// SQL) so a split sale shows each method and its amount honestly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaleDetail {
     pub id: i64,
@@ -798,9 +837,13 @@ pub struct SaleDetail {
     /// The tax the sale collected, included in `total_minor`. `0` when the
     /// till charges no tax.
     pub tax_minor: i64,
-    /// " + "-joined payment methods. One sale; one day, "cash + mobile".
+    /// " + "-joined payment methods, one per distinct method. One sale; one
+    /// day, "cash + mobile".
     pub method: String,
-    /// What was handed over, summed across payments. Cash only today.
+    /// Every tender in the order it was taken, so a receipt can print each
+    /// method and its own amount rather than one combined figure.
+    pub payments: Vec<PaidBy>,
+    /// What was handed over, summed across payments.
     pub tendered_minor: i64,
     /// What went back, summed across payments.
     pub change_minor: i64,
