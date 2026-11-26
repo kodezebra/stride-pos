@@ -113,7 +113,7 @@ pub fn pair(
     let db = state.db.lock().map_err(err)?;
     let conn = db.conn();
     let tx = conn.unchecked_transaction().map_err(err)?;
-    db::replace_catalog(&tx, &snapshot).map_err(err)?;
+    db::write_catalog(&tx, &snapshot).map_err(err)?;
     db::set_meta(&tx, "host", &endpoint.host).map_err(err)?;
     db::set_meta(&tx, "port", &port.to_string()).map_err(err)?;
     db::set_meta(&tx, "token", &token).map_err(err)?;

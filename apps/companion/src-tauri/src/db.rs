@@ -65,8 +65,8 @@ fn meta_i64(conn: &Connection, key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-pub fn replace_catalog(conn: &Connection, snapshot: &CatalogSnapshot) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+/// Write a catalog into a connection that is already inside a transaction.
+pub(crate) fn write_catalog(tx: &Connection, snapshot: &CatalogSnapshot) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM products; DELETE FROM categories; DELETE FROM staff; DELETE FROM customers;",
     )?;
@@ -129,20 +129,15 @@ pub fn replace_catalog(conn: &Connection, snapshot: &CatalogSnapshot) -> Result<
         }
     }
 
-    set_meta(&tx, "catalog_version", &snapshot.version.to_string())?;
-    set_meta(&tx, "currency", &snapshot.currency)?;
+    set_meta(tx, "catalog_version", &snapshot.version.to_string())?;
+    set_meta(tx, "currency", &snapshot.currency)?;
     set_meta(
-        &tx,
+        tx,
         "cash_step",
         &snapshot.cash_step_minor.max(1).to_string(),
     )?;
-    set_meta(
-        &tx,
-        "tax_bp",
-        &(snapshot.tax_rate_percent * 100).to_string(),
-    )?;
-    set_meta(&tx, "last_sync", &now_string())?;
-    tx.commit()?;
+    set_meta(tx, "tax_bp", &(snapshot.tax_rate_percent * 100).to_string())?;
+    set_meta(tx, "last_sync", &now_string())?;
     Ok(())
 }
 
