@@ -1,0 +1,71 @@
+/*
+ * Ported from stride-libs ui-kit/tokens.rs and apps/desktop/src/theme.rs.
+ * Keep values in sync with those files; see PARITY.md (to be added).
+ */
+
+:root {
+  /* Stride POS light palette — Artisanal Coffee & Boutique Retail */
+  --bg: #f5f5f4;
+  --surface: #ffffff;
+  --surface-alt: #e7e5e4;
+  --text: #1c1917;
+  --text-muted: #6e665d;
+  --accent: #c2410c;
+  --accent-text: #ffffff;
+  --accent-soft: #f6e4dd;
+  --border: #d6d3ce;
+  --border-strong: #7a7168;
+  --danger: #c0392b;
+  --success: #4d7c0f;
+  --warning: #b45309;
+
+  /* Spacing scale: 4 / 8 / 12 / 16 / 24 */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
+  /* Radii: controls / cards / dialogs / pills */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Type scale, in CSS px (egui points map 1:1 at 96 DPI) */
+  --type-small: 12px;
+  --type-status: 13.5px;
+  --type-body: 15px;
+  --type-button: 15px;
+  --type-heading: 20px;
+  --type-kpi: 28px;
+  --type-total: 32px;
+  --type-receipt: 13px;
+
+  /* Chrome geometry */
+  --rail-width: 64px;
+  --status-height: 36px;
+  --nav-row: 52px;
+  --touch: 48px;
+  --touch-lg: 56px;
+
+  --font-proportional: 'Open Sans', system-ui, -apple-system, sans-serif;
+  --font-numeric: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+}
+
+[data-theme='dark'] {
+  /* Stride POS dark palette — Scandinavian FinTech */
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-alt: #334155;
+  --text: #f8fafc;
+  --text-muted: #94a3b8;
+  --accent: #ff6b00;
+  --accent-text: #0f172a;
+  --accent-soft: #463530;
+  --border: #334155;
+  --border-strong: #64748b;
+  --danger: #f87171;
+  --success: #34d399;
+  --warning: #f59e0b;
+}
