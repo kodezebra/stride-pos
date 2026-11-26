@@ -377,6 +377,7 @@ pub(super) enum ProductAction {
     AskDelete(i64),
     Delete(i64),
     CancelDelete,
+    ToggleSelect(i64),
     MoveStock { id: i64, name: String, on_hand: i64 },
     Restock(i64),
     StockHistory { id: i64, name: String },
@@ -408,6 +409,7 @@ pub(super) fn product_row(
     state: &State,
     deleting: bool,
     can_manage: bool,
+    selected: bool,
 ) -> Option<ProductAction> {
     let mut action = None;
     // Cost is a buyer's fact: the shop pays it and the margin is decided here.
@@ -419,11 +421,26 @@ pub(super) fn product_row(
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
 
+        // A checkbox leads the row so a tick stays with its product, away from
+        // the icon cluster on the right. Both reserves are fixed so the price
+        // column never drifts when a row gains stock or a selection.
+        let mut tick = selected;
+        let checkbox = ui.toggle_value(&mut tick, "").on_hover_text(if selected {
+            "Untick — remove from the selection"
+        } else {
+            "Tick to restock this product with others"
+        });
+        if checkbox.clicked() {
+            action = Some(ProductAction::ToggleSelect(product.id));
+        }
+        ui.add_space(SPACING.xs);
+
         // Keep the name clear of the price and row actions. Five 44-point
         // buttons are the widest case (a tracked product), and the reserve is
         // fixed so the price column does not move when a row gains stock.
         const ACTIONS_WIDTH: f32 = 404.0;
-        let text_width = (ui.available_width() - ACTIONS_WIDTH).max(120.0);
+        const CHECK_WIDTH: f32 = 28.0;
+        let text_width = (ui.available_width() - ACTIONS_WIDTH - CHECK_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
             egui::vec2(text_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
@@ -1285,6 +1302,9 @@ impl Module for Products {
         let label = format!("Archived ({})", state.archived.len());
         if regions::nav_item(ui, state.show_archived, &label).clicked() {
             state.show_archived = !state.show_archived;
+            // Ticks belong to the list they were made on; the archive has no
+            // rows to tick and no bulk action to spend them.
+            state.clear_product_selection();
         }
     }
 
@@ -1330,10 +1350,14 @@ impl Module for Products {
         let can_restock =
             !state.show_archived && state.permits(crate::auth::Permission::ManageInventory);
         let can_track = can_restock && untracked > 0;
+        let selected_count = state.selected_products.len();
+        let can_bulk = can_restock && selected_count > 0;
 
         let mut new = false;
         let mut track = false;
         let mut restock_low = false;
+        let mut restock_selected = false;
+        let mut clear_selection = false;
         let mut import = false;
         let mut update = false;
         let mut template = false;
@@ -1365,6 +1389,17 @@ impl Module for Products {
                         .clicked()
                 {
                     restock_low = true;
+                }
+                if can_bulk {
+                    if actions::secondary_compact(ui, &format!("Restock {selected_count} selected"))
+                        .on_hover_text("Add the ticked products to one restock list")
+                        .clicked()
+                    {
+                        restock_selected = true;
+                    }
+                    if actions::quiet_compact(ui, "Clear").clicked() {
+                        clear_selection = true;
+                    }
                 }
                 // Import and both exports are setup actions, not everyday ones.
                 // One menu keeps them a click away without letting four
@@ -1438,6 +1473,12 @@ impl Module for Products {
         }
         if restock_low {
             state.restock_low_stock();
+        }
+        if restock_selected {
+            state.restock_selected();
+        }
+        if clear_selection {
+            state.clear_product_selection();
         }
         if import {
             state.start_import_picker(crate::state::ImportMode::Add);
@@ -1633,8 +1674,9 @@ impl Module for Products {
                 let product = &state.products[product_index];
                 let stock = stock_item(&state.stock, product.id);
                 let deleting = state.product_delete == Some(product.id);
+                let selected = state.selected_products.contains(&product.id);
                 if let Some(row_action) =
-                    product_row(ui, product, stock, state, deleting, can_manage)
+                    product_row(ui, product, stock, state, deleting, can_manage, selected)
                 {
                     action = Some(row_action);
                 }
@@ -1651,6 +1693,7 @@ impl Module for Products {
             Some(ProductAction::AskDelete(id)) => state.product_delete = Some(id),
             Some(ProductAction::Delete(id)) => state.delete_product(id),
             Some(ProductAction::CancelDelete) => state.product_delete = None,
+            Some(ProductAction::ToggleSelect(id)) => state.toggle_product_selection(id),
             Some(ProductAction::Restock(id)) => state.restock_product(id),
             Some(ProductAction::MoveStock { id, name, on_hand }) => {
                 state.start_stock_move(id, &name, on_hand, StockKind::Receive);

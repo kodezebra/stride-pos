@@ -161,6 +161,9 @@ impl State {
             self.file_path = None;
             self.category_seed_notice = None;
             self.backup_confirm = false;
+            // A tick is a choice about the page it was made on. Keeping it
+            // across a module change would bring a hidden selection back later.
+            self.selected_products.clear();
             // Opening the selling screen returns the cursor to the scan field, so
             // the next barcode lands in the cart without a click.
             if module == crate::modules::SELL {

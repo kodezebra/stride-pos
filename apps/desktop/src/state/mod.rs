@@ -319,6 +319,9 @@ pub struct State {
     /// A product the operator asked to delete, waiting for confirmation. Inline
     /// in the row rather than a modal: the row is where the mistake would be.
     pub product_delete: Option<i64>,
+    /// Products ticked in the catalog for a bulk action. Transient: changing
+    /// module or running the action clears it, so a later visit starts clean.
+    pub selected_products: Vec<i64>,
 
     /// The supplier directory, read once and re-read after every write. Like the
     /// catalog it is small enough to filter in memory.
@@ -587,6 +590,7 @@ impl State {
             import_dir: None,
             export_dir: None,
             product_delete: None,
+            selected_products: Vec::new(),
             suppliers,
             supplier_search: String::new(),
             show_archived_suppliers: false,

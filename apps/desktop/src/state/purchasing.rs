@@ -186,6 +186,64 @@ impl State {
         });
     }
 
+    /// Add every ticked catalog row to the restock list in one act.
+    ///
+    /// Untracked rows and rows already on the plan are counted, not guessed at:
+    /// a shop that ticks eight things should hear "added six, skipped two"
+    /// rather than wonder why the list is short. The selection is spent by the
+    /// action, and the page changes so the result is immediately visible.
+    pub fn restock_selected(&mut self) {
+        let picked = std::mem::take(&mut self.selected_products);
+        if picked.is_empty() {
+            return;
+        }
+        let mut added = Vec::new();
+        let mut skipped = 0;
+        for id in picked {
+            let tracked = self.stock.iter().any(|item| item.product_id == id);
+            let already = self
+                .purchase_editor
+                .as_ref()
+                .is_some_and(|draft| draft.lines.iter().any(|line| line.product_id == id));
+            if tracked && !already {
+                added.push(id);
+            } else {
+                skipped += 1;
+            }
+        }
+        if added.is_empty() {
+            self.notice = Some(format!(
+                "Nothing was added: {skipped} selected {} already on the list or untracked.",
+                if skipped == 1 {
+                    "product is"
+                } else {
+                    "products are"
+                }
+            ));
+            return;
+        }
+        if self.purchase_editor.is_none() {
+            self.start_purchase();
+        }
+        for id in &added {
+            self.purchase_add_product(*id);
+        }
+        self.select(crate::modules::PURCHASES);
+        let noun = if added.len() == 1 {
+            "product"
+        } else {
+            "products"
+        };
+        self.notice = Some(if skipped == 0 {
+            format!("Added {} {noun} to the restock list.", added.len())
+        } else {
+            format!(
+                "Added {} {noun} to the restock list, skipped {skipped}.",
+                added.len()
+            )
+        });
+    }
+
     /// Start (or extend) a restock list with everything below its warning line.
     ///
     /// The toolbar's bulk path to the same list the row button feeds. An open
