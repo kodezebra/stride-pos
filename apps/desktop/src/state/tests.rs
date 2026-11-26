@@ -2573,3 +2573,78 @@ fn restocking_an_untracked_product_explains_what_is_missing() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// Ticking rows builds one list in one act. Untracked rows are counted, not
+/// silently skipped, and the ticks are spent by the action.
+#[test]
+fn a_bulk_restock_adds_every_ticked_product_it_can() {
+    let (mut state, path) = state("multi-restock", Currency::UGX);
+    let a = state.products[0].id;
+    seed_product(&state.store, "Soap", 500, Some("6001"));
+    seed_product(&state.store, "Rice", 1_000, Some("6002"));
+    state.reload_products();
+    let ids: Vec<i64> = state.products.iter().map(|product| product.id).collect();
+    let b = ids
+        .iter()
+        .copied()
+        .find(|&id| id != a)
+        .expect("second product");
+    let untracked = ids
+        .iter()
+        .copied()
+        .find(|&id| id != a && id != b)
+        .expect("third product");
+    crate::db::track_product(&state.store, a, 2, 5, Some(20), None).expect("track a");
+    crate::db::track_product(&state.store, b, 2, 5, Some(20), None).expect("track b");
+    state.reload_stock();
+
+    state.toggle_product_selection(a);
+    state.toggle_product_selection(b);
+    state.toggle_product_selection(untracked);
+    assert_eq!(state.selected_products.len(), 3);
+    state.toggle_product_selection(untracked);
+    assert_eq!(state.selected_products.len(), 2, "a second click unticks");
+
+    state.restock_selected();
+    assert!(
+        state.selected_products.is_empty(),
+        "the action spends the ticks"
+    );
+    assert_eq!(state.module, crate::modules::PURCHASES);
+    let draft = state.purchase_editor.as_ref().expect("a list was started");
+    assert_eq!(draft.lines.len(), 2);
+    assert!(
+        state
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Added 2 products"))
+    );
+
+    // Tick one already on the list: it is counted rather than doubled.
+    state.toggle_product_selection(a);
+    state.restock_selected();
+    assert!(state.purchase_editor.as_ref().expect("list").lines.len() == 2);
+    assert!(
+        state
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Nothing was added"))
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A tick describes the page it was made on, not a lasting state of the shop.
+#[test]
+fn a_selection_is_cleared_when_leaving_the_page() {
+    let (mut state, path) = state("selection-leave", Currency::UGX);
+    let id = state.products[0].id;
+    state.toggle_product_selection(id);
+    assert_eq!(state.selected_products.len(), 1);
+
+    state.select(crate::modules::PURCHASES);
+    state.select(crate::modules::SELL);
+    assert!(state.selected_products.is_empty());
+
+    let _ = std::fs::remove_file(path);
+}

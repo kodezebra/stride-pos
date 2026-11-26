@@ -510,6 +510,21 @@ impl State {
 
     /// Put the reason on the form and return `None`, so every validation exit
     /// from `write_product` says "not saved" with one expression.
+    /// Tick or untick a catalog row for a bulk action. Order is kept so the
+    /// operator can see what they chose; membership is checked linearly because
+    /// a selection is a handful of rows, not a query.
+    pub fn toggle_product_selection(&mut self, id: i64) {
+        if let Some(index) = self.selected_products.iter().position(|&item| item == id) {
+            self.selected_products.remove(index);
+        } else {
+            self.selected_products.push(id);
+        }
+    }
+
+    pub fn clear_product_selection(&mut self) {
+        self.selected_products.clear();
+    }
+
     /// Bring a removed product back, or explain why its old code now belongs
     /// to somebody else. The archive stays open on failure so the operator can
     /// see the row they were trying to restore.
