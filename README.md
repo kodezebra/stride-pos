@@ -39,7 +39,9 @@ it, and set the level that counts as low; from then on every sale subtracts
 automatically. Receiving, customer returns, waste and a physical count are
 recorded as movements, and each product keeps its own history. Stock is always
 the sum of those movements; removing a product hides it from the catalog while
-keeping what was sold, so an old receipt never changes. A manager also sees the
+keeping what was sold, so an old receipt never changes. Removed products stay
+in the **Archived** list at the bottom of the sidebar and can be restored. A
+manager also sees the
 last cost paid and the margin left at the current price. The **Stock** filter
 above the shelves shows all, low, out or expiring at a glance. Managers and the
 owner manage stock; cashiers work on Sell and Day only.

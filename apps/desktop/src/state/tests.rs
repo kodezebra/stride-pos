@@ -2427,3 +2427,73 @@ fn an_import_records_skus_and_refuses_a_duplicate() {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(csv);
 }
+
+/// Saving a new product yields its id, so the form can open the count for the
+/// row it just wrote instead of sending the shop back through the catalog.
+#[test]
+fn a_new_product_can_go_straight_to_counting() {
+    let (mut state, path) = state("save-and-track", Currency::UGX);
+
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("form");
+        draft.name = "Milk 1L".to_owned();
+        draft.price = "1500".to_owned();
+        draft.category = "Dairy".to_owned();
+    }
+    let id = state.write_product().expect("saved");
+    assert!(state.product_editor.is_none(), "the form closed");
+    state.start_tracking_for(id);
+    assert_eq!(
+        state
+            .stock_editor
+            .as_ref()
+            .and_then(|draft| draft.product_id),
+        Some(id),
+        "the count is for the product just saved"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Removing a product hides it but keeps the row; bringing it back restores
+/// the catalog. A code reused while it was away blocks the restore.
+#[test]
+fn an_archived_product_can_be_restored_unless_its_code_was_reused() {
+    let (mut state, path) = state("restore", Currency::UGX);
+    seed_product(&state.store, "Soap", 500, Some("6001"));
+    state.reload_products();
+    let soap = state
+        .products
+        .iter()
+        .find(|item| item.name == "Soap")
+        .expect("seeded");
+    let id = soap.id;
+
+    state.delete_product(id);
+    assert!(state.archived.iter().any(|item| item.id == id));
+    assert!(!state.products.iter().any(|item| item.id == id));
+
+    state.restore_product(id);
+    assert!(state.products.iter().any(|item| item.id == id), "restored");
+    assert!(state.archived.is_empty(), "no longer in the archive");
+
+    state.delete_product(id);
+    seed_product(&state.store, "New soap", 700, Some("6001"));
+    state.reload_products();
+    state.show_archived = true;
+    state.restore_product(id);
+    assert!(
+        state
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("barcode")),
+        "the reused code is named in the reason"
+    );
+    assert!(
+        state.archived.iter().any(|item| item.id == id),
+        "still hidden"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
