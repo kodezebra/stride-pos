@@ -2497,3 +2497,79 @@ fn an_archived_product_can_be_restored_unless_its_code_was_reused() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// The catalog row's restock button plans a trip rather than moving stock, and
+/// shows the list it changed so a click can never look like it did nothing.
+#[test]
+fn a_catalog_row_adds_a_product_to_the_restock_list() {
+    let (mut state, path) = state("restock-row", Currency::UGX);
+    let id = state.products[0].id;
+    crate::db::track_product(&state.store, id, 2, 5, Some(20), None).expect("track");
+    state.reload_stock();
+
+    state.restock_product(id);
+    assert_eq!(state.module, crate::modules::PURCHASES);
+    let draft = state.purchase_editor.as_ref().expect("a list was started");
+    assert_eq!(draft.lines.len(), 1);
+    assert_eq!(draft.lines[0].product_id, id);
+    assert_eq!(draft.lines[0].qty, "1", "one product is a one-unit line");
+    assert!(
+        state.notice.as_deref().is_some_and(|n| n.contains("Added")),
+        "the receipt survives the page change"
+    );
+
+    state.restock_product(id);
+    assert_eq!(
+        state.purchase_editor.as_ref().expect("list").lines.len(),
+        1,
+        "a second press does not double the line"
+    );
+    assert!(
+        state
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("already"))
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The toolbar's bulk path fills the same list from the warning lines.
+#[test]
+fn restock_low_starts_a_list_from_low_products() {
+    let (mut state, path) = state("restock-low", Currency::UGX);
+    let id = state.products[0].id;
+    crate::db::track_product(&state.store, id, 2, 5, Some(20), None).expect("track");
+    state.reload_stock();
+
+    state.restock_low_stock();
+    assert_eq!(state.module, crate::modules::PURCHASES);
+    let draft = state.purchase_editor.as_ref().expect("a list was started");
+    assert_eq!(draft.lines.len(), 1);
+    assert_eq!(draft.lines[0].product_id, id);
+    assert_eq!(
+        draft.lines[0].qty, "18",
+        "target 20 less the 2 on the shelf"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// An untracked product has no cost or pack to order, so the button explains
+/// the way in instead of opening an empty plan.
+#[test]
+fn restocking_an_untracked_product_explains_what_is_missing() {
+    let (mut state, path) = state("restock-untracked", Currency::UGX);
+    let id = state.products[0].id;
+
+    state.restock_product(id);
+    assert!(state.purchase_editor.is_none(), "no empty list was opened");
+    assert!(
+        state
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Track this product"))
+    );
+
+    let _ = std::fs::remove_file(path);
+}

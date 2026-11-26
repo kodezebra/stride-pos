@@ -148,6 +148,62 @@ impl State {
         draft.error = None;
     }
 
+    /// Add a product to the restock list from the catalog row.
+    ///
+    /// A row is a single product, so it never makes sense to write stock here:
+    /// the shop is planning a trip, and receiving stays a separate act on the
+    /// Restock page. Starting the list if none is open and moving to that page
+    /// means the button's result is always visible — the action cannot look as
+    /// though it did nothing.
+    pub fn restock_product(&mut self, product_id: i64) {
+        let name = self
+            .stock
+            .iter()
+            .find(|item| item.product_id == product_id)
+            .map(|item| item.name.clone());
+        let Some(name) = name else {
+            self.notice = Some("Track this product before adding it to a restock list.".to_owned());
+            return;
+        };
+
+        if self.purchase_editor.is_none() {
+            self.start_purchase();
+        }
+        let already = self
+            .purchase_editor
+            .as_ref()
+            .is_some_and(|draft| draft.lines.iter().any(|line| line.product_id == product_id));
+        if !already {
+            self.purchase_add_product(product_id);
+        }
+        // `select` clears the old page's notice, so the receipt for this click
+        // is written after the move.
+        self.select(crate::modules::PURCHASES);
+        self.notice = Some(if already {
+            format!("{name} is already on the restock list.")
+        } else {
+            format!("Added {name} to the restock list.")
+        });
+    }
+
+    /// Start (or extend) a restock list with everything below its warning line.
+    ///
+    /// The toolbar's bulk path to the same list the row button feeds. An open
+    /// plan is kept and filled rather than thrown away, so a half-built trip
+    /// never disappears because somebody took the shortcut.
+    pub fn restock_low_stock(&mut self) {
+        if !self.stock.iter().any(|item| item.needs_restock()) {
+            self.notice = Some("Nothing is low, and nothing is already on its way.".to_owned());
+            return;
+        }
+        if self.purchase_editor.is_none() {
+            self.start_purchase();
+        }
+        self.purchase_add_low_stock();
+        self.select(crate::modules::PURCHASES);
+        self.notice = Some("Added low products to the restock list.".to_owned());
+    }
+
     /// Fill the plan with everything at or below its warning line.
     ///
     /// The quantity aims at the product's target minus what is on the shelf and
