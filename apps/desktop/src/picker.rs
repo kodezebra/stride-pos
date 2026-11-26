@@ -431,7 +431,9 @@ pub fn picker_modal(ctx: &egui::Context, state: &mut State) {
         state.picker = None;
     } else if type_path {
         state.picker = None;
-        state.start_import();
+        // Keep the question the picker was opened for: "type a path" is the
+        // same import by another route, not a switch back to adding rows.
+        state.start_csv(state.import_mode);
     } else if template {
         // The picker is already a folder chooser when it is exporting; reuse it
         // rather than opening the import modal only to close it again.

@@ -72,6 +72,7 @@ fn seed_product(store: &storage::Store, name: &str, price: i64, barcode: Option<
             category: "Test",
             category_id: None,
             barcode,
+            sku: None,
             unit_label: "unit",
             pack_size: 1,
             pack_price_minor: None,
@@ -98,6 +99,7 @@ fn seed_pack(
             category: "Test",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size,
             pack_price_minor: pack_price,
@@ -118,6 +120,7 @@ fn seed_ladder(store: &storage::Store, name: &str, price: i64, tiers: &[PriceTie
             category: "Test",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 1,
             pack_price_minor: None,
@@ -840,6 +843,7 @@ fn an_unnamed_category_lands_in_general() {
         category: "   ".to_owned(),
         category_id: None,
         barcode: String::new(),
+        sku: String::new(),
         unit_label: "unit".to_owned(),
         pack_size: "1".to_owned(),
         pack_price: String::new(),
@@ -1077,7 +1081,7 @@ fn an_import_saves_what_parses_and_counts_the_rest() {
 
     let csv = std::env::temp_dir().join(format!("pos-import-{}.csv", std::process::id()));
     std::fs::write(&csv, "name,category,price,barcode\nSoap 250g,Household,1200,111\nSoap lite,Household,free\nMilo tin,Pantry,9000,111").expect("write csv");
-    state.start_import();
+    state.start_csv(ImportMode::Add);
     state.import.as_mut().expect("open").path = csv.display().to_string();
     state.import_products();
 
@@ -1157,7 +1161,7 @@ fn an_import_that_lands_nothing_keeps_the_modal_and_gives_the_reason() {
 
     let csv = std::env::temp_dir().join(format!("pos-import-empty-{}.csv", std::process::id()));
     std::fs::write(&csv, "name,category,price\n").expect("write csv");
-    state.start_import();
+    state.start_csv(ImportMode::Add);
     state.import.as_mut().expect("open").path = csv.display().to_string();
     state.import_products();
 
@@ -1603,6 +1607,7 @@ fn wholesale_leaves_a_pack_at_its_pack_price() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(40_000),
@@ -1704,6 +1709,7 @@ fn a_pack_line_ignores_the_loose_ladder() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(40_000),
@@ -2326,4 +2332,98 @@ fn applying_suggestions_keeps_a_shelf_the_shop_already_named() {
     );
 
     let _ = std::fs::remove_file(path);
+}
+
+/// An update file changes the rows it names and nothing else: no new products,
+/// no invented stock, no lost code when the cell is blank.
+#[test]
+fn a_csv_update_finds_products_by_code_and_keeps_their_identity() {
+    let (mut state, path) = state("csv-update", Currency::UGX);
+
+    // One product with a shop code, one with only a barcode.
+    let first = state.products[0].clone();
+    state.edit_product(&first);
+    state.product_editor.as_mut().expect("form").sku = "TEA-100".to_owned();
+    state.save_product();
+    seed_product(&state.store, "Soap", 500, Some("6001"));
+    state.reload_products();
+
+    let csv = std::env::temp_dir().join(format!("pos-update-{}.csv", std::process::id()));
+    std::fs::write(
+        &csv,
+        "name,category,price,barcode,sku\n\
+         Tea,Drinks,150,,TEA-100\n\
+         Soap,Cleaning,900,6001,\n\
+         Ghost,Nowhere,10,,NOPE\n",
+    )
+    .expect("write csv");
+
+    state.start_csv(ImportMode::Update);
+    state.import.as_mut().expect("open").path = csv.display().to_string();
+    state.import_products();
+
+    assert_eq!(
+        state.notice.as_deref(),
+        Some("Updated 2 products, skipped 1."),
+        "the unknown code is counted, not silently dropped"
+    );
+    assert_eq!(state.products.len(), 2, "an update never adds a row");
+    let tea = state
+        .products
+        .iter()
+        .find(|item| item.name == "Tea")
+        .expect("the coded product was updated");
+    assert_eq!(tea.price_minor, 150);
+    assert_eq!(tea.category, "Drinks");
+    assert_eq!(
+        tea.sku.as_deref(),
+        Some("TEA-100"),
+        "a blank SKU keeps the old one"
+    );
+    let soap = state
+        .products
+        .iter()
+        .find(|item| item.name == "Soap")
+        .expect("the barcode fallback found its product");
+    assert_eq!(soap.price_minor, 900);
+    assert_eq!(soap.barcode.as_deref(), Some("6001"));
+    assert_eq!(soap.sku, None, "an update does not invent a shop code");
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(csv);
+}
+
+/// Add mode still adds, but it records the shop code and refuses a second row
+/// that claims one already in the catalog.
+#[test]
+fn an_import_records_skus_and_refuses_a_duplicate() {
+    let (mut state, path) = state("csv-sku", Currency::UGX);
+    let csv = std::env::temp_dir().join(format!("pos-sku-import-{}.csv", std::process::id()));
+    std::fs::write(
+        &csv,
+        "name,category,price,sku\n\
+         Tea,Drinks,3000,TEA-100\n\
+         Tea again,Drinks,3100,TEA-100\n",
+    )
+    .expect("write csv");
+
+    state.start_csv(ImportMode::Add);
+    state.import.as_mut().expect("open").path = csv.display().to_string();
+    state.import_products();
+
+    assert_eq!(
+        state.notice.as_deref(),
+        Some("Imported 1 product, skipped 1.")
+    );
+    assert_eq!(
+        state
+            .products
+            .iter()
+            .filter(|item| item.sku.as_deref() == Some("TEA-100"))
+            .count(),
+        1
+    );
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(csv);
 }

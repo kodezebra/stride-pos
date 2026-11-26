@@ -816,4 +816,13 @@ pub const MIGRATIONS: &[Migration] = &[
                 WHERE shift_uid IS NOT NULL;
         "#,
     },
+    // Migrations 1–23 shipped inline. New ones live as SQL files under
+    // `apps/desktop/migrations/` in the catalog band (2000–2999): an inline
+    // migration below 2000 would be skipped by a database that already took
+    // this one, so all future work stays in the band.
+    Migration {
+        version: 2000,
+        name: "product_sku",
+        sql: include_str!("../../migrations/2000_product_sku.sql"),
+    },
 ];

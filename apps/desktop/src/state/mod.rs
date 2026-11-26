@@ -295,6 +295,10 @@ pub struct State {
     /// The CSV import modal, when it is open. The typed-path fallback for a
     /// file whose location is already known.
     pub import: Option<ImportDraft>,
+    /// Which import the next file chooser answer is for. Kept here rather than
+    /// in the picker's purpose so the system dialog and the in-app picker ask
+    /// the same question without either learning about catalog semantics.
+    pub import_mode: ImportMode,
     /// The file chooser, when an import or an export is choosing a location.
     /// Only one picker exists: closing it returns to whichever screen asked.
     /// The system's chooser runs outside the app (`dialog.rs`) and only lands
@@ -569,6 +573,7 @@ impl State {
             categories,
             product_editor: None,
             import: None,
+            import_mode: ImportMode::Add,
             picker: None,
             dialog: crate::dialog::Chooser::new(),
             import_dir: None,

@@ -509,8 +509,8 @@ fn a_catalog_snapshot_upserts_and_archives_without_losing_history() {
     seed_catalog(&a);
     a.execute(
         "INSERT INTO products
-             (id, name, price_minor, category, category_id, tracked)
-         VALUES (20, 'Coffee', 700, 'Drinks', 1, 1)",
+             (id, name, price_minor, category, category_id, tracked, sku)
+         VALUES (20, 'Coffee', 700, 'Drinks', 1, 1, 'COFF-200')",
     );
 
     let first = db::catalog_snapshot(a.db(), 0).expect("snapshot");
@@ -522,6 +522,11 @@ fn a_catalog_snapshot_upserts_and_archives_without_losing_history() {
     assert_eq!(
         b.scalar::<String>("SELECT value FROM meta WHERE key = 'currency'"),
         "UGX"
+    );
+    assert_eq!(
+        b.scalar::<String>("SELECT sku FROM products WHERE id = 20"),
+        "COFF-200",
+        "the shop code reaches the replica with the product"
     );
 
     db::record_stock_movement(b.db(), 20, 10, StockKind::Receive, "delivery", None, None)

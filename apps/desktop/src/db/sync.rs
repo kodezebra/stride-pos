@@ -424,7 +424,7 @@ pub fn catalog_snapshot(
 
     let products = {
         let mut statement = store.conn().prepare(
-            "SELECT id, name, price_minor, barcode, category, category_id,
+            "SELECT id, name, price_minor, barcode, sku, category, category_id,
                     tracked, archived, unit_label, pack_size,
                     pack_price_minor, pack_barcode
              FROM products
@@ -436,14 +436,15 @@ pub fn catalog_snapshot(
                 name: row.get(1)?,
                 price_minor: row.get(2)?,
                 barcode: row.get(3)?,
-                category: row.get(4)?,
-                category_id: row.get(5)?,
-                tracked: row.get(6)?,
-                archived: row.get(7)?,
-                unit_label: row.get(8)?,
-                pack_size: row.get(9)?,
-                pack_price_minor: row.get(10)?,
-                pack_barcode: row.get(11)?,
+                sku: row.get(4)?,
+                category: row.get(5)?,
+                category_id: row.get(6)?,
+                tracked: row.get(7)?,
+                archived: row.get(8)?,
+                unit_label: row.get(9)?,
+                pack_size: row.get(10)?,
+                pack_price_minor: row.get(11)?,
+                pack_barcode: row.get(12)?,
                 price_breaks: Vec::new(),
             })
         })?;
@@ -616,6 +617,7 @@ pub fn apply_catalog_snapshot(
 
     let mut product_ids = std::collections::HashSet::new();
     let mut barcodes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut skus: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The ladder is cleaned once, here, and the cleaned copy is what gets
     // written. A peer that sends rungs out of order is sorted, not rejected;
     // a peer that sends a climbing ladder is rejected, because honouring it
@@ -668,6 +670,17 @@ pub fn apply_catalog_snapshot(
             );
         }
         if product.archived == 0 {
+            if let Some(sku) = product
+                .sku
+                .as_deref()
+                .map(str::trim)
+                .filter(|sku| !sku.is_empty())
+            {
+                anyhow::ensure!(
+                    skus.insert(sku.to_lowercase()),
+                    "the catalog puts shop code {sku} on two active products"
+                );
+            }
             for barcode in [product.barcode.as_deref(), product.pack_barcode.as_deref()]
                 .into_iter()
                 .flatten()
@@ -769,13 +782,13 @@ pub fn apply_catalog_snapshot(
         )?;
     }
 
-    // Two products may swap barcodes in one snapshot. Clearing the barcodes of
-    // every product in the snapshot first avoids a transient unique-index
-    // conflict that has nothing to do with the final state. Both columns are
-    // cleared, because a pack code may take a loose code's place.
+    // Two products may swap barcodes or shop codes in one snapshot. Clearing
+    // every code in the snapshot first avoids a transient unique-index conflict
+    // that has nothing to do with the final state. Both barcode columns are
+    // cleared because a pack code may take a loose code's place.
     for product in &snapshot.products {
         transaction.execute(
-            "UPDATE products SET barcode = NULL, pack_barcode = NULL WHERE id = ?1",
+            "UPDATE products SET barcode = NULL, pack_barcode = NULL, sku = NULL WHERE id = ?1",
             [product.id],
         )?;
     }
@@ -791,18 +804,24 @@ pub fn apply_catalog_snapshot(
             .as_deref()
             .map(str::trim)
             .filter(|barcode| !barcode.is_empty());
+        let sku = product
+            .sku
+            .as_deref()
+            .map(str::trim)
+            .filter(|sku| !sku.is_empty());
         transaction.execute(
             "INSERT INTO products
-                 (id, name, price_minor, category, category_id, barcode,
+                 (id, name, price_minor, category, category_id, barcode, sku,
                   tracked, archived, unit_label, pack_size, pack_price_minor,
                   pack_barcode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  price_minor = excluded.price_minor,
                  category = excluded.category,
                  category_id = excluded.category_id,
                  barcode = excluded.barcode,
+                 sku = excluded.sku,
                  tracked = excluded.tracked,
                  archived = excluded.archived,
                  unit_label = excluded.unit_label,
@@ -816,6 +835,7 @@ pub fn apply_catalog_snapshot(
                 product.category.trim(),
                 product.category_id,
                 barcode,
+                sku,
                 product.tracked,
                 product.archived,
                 product.unit_label.trim(),

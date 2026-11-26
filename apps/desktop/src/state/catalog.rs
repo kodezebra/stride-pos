@@ -20,6 +20,8 @@ pub struct ProductDraft {
     #[allow(dead_code)]
     pub category_id: Option<i64>,
     pub barcode: String,
+    /// The shop's own code, as typed. Blank means no code yet.
+    pub sku: String,
     /// What one base unit is called: `tablet`, `sachet`, `unit`.
     pub unit_label: String,
     /// How many base units one sealed pack holds, as typed.
@@ -82,6 +84,7 @@ impl ProductDraft {
             category,
             category_id,
             barcode: String::new(),
+            sku: String::new(),
             unit_label: "unit".to_owned(),
             pack_size: "1".to_owned(),
             pack_price: String::new(),
@@ -154,6 +157,14 @@ impl ProductDraft {
     }
 }
 
+/// What a CSV file is for: new rows, or prices and details for rows already
+/// in the catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportMode {
+    Add,
+    Update,
+}
+
 /// The CSV import, open as a modal over the app.
 ///
 /// The path is typed or pasted rather than picked from a dialog: importing is
@@ -161,6 +172,7 @@ impl ProductDraft {
 /// worth what it costs a till this small. Rows that cannot be read are
 /// skipped and counted; the summary line is the receipt for the import.
 pub struct ImportDraft {
+    pub mode: ImportMode,
     pub path: String,
     pub error: Option<String>,
 }
@@ -264,6 +276,7 @@ impl State {
             category: product.category.clone(),
             category_id: product.category_id,
             barcode: product.barcode.clone().unwrap_or_default(),
+            sku: product.sku.clone().unwrap_or_default(),
             unit_label: product.unit_label.clone(),
             pack_size: product.pack_size.to_string(),
             pack_price: product
@@ -308,6 +321,7 @@ impl State {
         let name = draft.name.trim().to_owned();
         let category = draft.category.trim().to_owned();
         let barcode = draft.barcode.trim().to_owned();
+        let sku = draft.sku.trim().to_owned();
         let price_text = draft.price.trim().to_owned();
         let unit_label = draft.unit_label.trim().to_owned();
         let pack_size = draft.parsed_pack_size();
@@ -389,6 +403,7 @@ impl State {
         }
 
         let barcode = (!barcode.is_empty()).then_some(barcode);
+        let sku = (!sku.is_empty()).then_some(sku);
         let pack_barcode = (pack_size > 1 && !pack_barcode.is_empty()).then_some(pack_barcode);
         for code in [barcode.as_deref(), pack_barcode.as_deref()]
             .into_iter()
@@ -398,6 +413,11 @@ impl State {
                 return self.editor_error("Another product already uses that barcode.");
             }
         }
+        if let Some(sku) = sku.as_deref()
+            && crate::db::sku_taken(&self.store, sku, id)
+        {
+            return self.editor_error("Another product already uses that shop code.");
+        }
 
         let fields = crate::db::ProductFields {
             name: &name,
@@ -405,6 +425,7 @@ impl State {
             category: &category,
             category_id,
             barcode: barcode.as_deref(),
+            sku: sku.as_deref(),
             unit_label: &unit_label,
             pack_size,
             pack_price_minor,
@@ -487,22 +508,18 @@ impl State {
         }
     }
 
-    /// Add products from a CSV file, as listed in the import draft.
+    /// Add or update products from a CSV file, as listed in the import draft.
     ///
-    /// Everything the parser accepts is written; anything else — a row the
-    /// file spells wrongly, a barcode another product already uses — is
-    /// skipped and counted. One bad line must not stop the other hundreds,
-    /// and a partial import is honest as long as the summary says what it is:
-    /// the modal closes on what landed, and the counts name what did not.
+    /// Everything the parser accepts is attempted; anything else — a row the
+    /// file spells wrongly, a barcode another product already uses, an update
+    /// that names no product — is skipped and counted. One bad line must not
+    /// stop the other hundreds, and a partial run is honest because the summary
+    /// says what landed and what did not.
     pub fn import_products(&mut self) {
-        let Some(path) = self
-            .import
-            .as_ref()
-            .map(|draft| draft.path.trim().to_owned())
-        else {
+        let Some(draft) = self.import.as_ref() else {
             return;
         };
-
+        let (mode, path) = (draft.mode, draft.path.trim().to_owned());
         if path.is_empty() {
             return self.import_error("Type or paste the file's path first.");
         }
@@ -517,17 +534,63 @@ impl State {
         };
 
         let (rows, errors) = crate::import::parse(&text, self.currency);
+        let mut reasons = errors;
         let mut added = 0;
-        let mut skipped = errors.len();
+        let mut updated = 0;
+        let mut skipped = reasons.len();
+        // One read for the whole update file, rather than a query per row.
+        let catalog = if mode == ImportMode::Update {
+            crate::db::products(&self.store)
+        } else {
+            Vec::new()
+        };
 
         for row in rows {
+            // An update names a product by its own code first, falling back to
+            // a barcode for a catalog that has no codes yet. Add mode always
+            // writes a new row and never looks for a match.
+            let target = if mode == ImportMode::Update {
+                let found = crate::db::find_by_code(
+                    &self.store,
+                    row.sku.as_deref(),
+                    row.barcode.as_deref(),
+                );
+                if found.is_none() {
+                    reasons.push("a row named no live product by SKU or barcode".to_owned());
+                    skipped += 1;
+                    continue;
+                }
+                found
+            } else {
+                None
+            };
+
+            // A blank code or barcode cell in an update keeps the product's
+            // old one. In add mode there is nothing to keep, so blank is none.
+            let previous = target.and_then(|id| catalog.iter().find(|item| item.id == id));
+            let sku = row
+                .sku
+                .clone()
+                .or_else(|| previous.and_then(|p| p.sku.clone()));
+            let barcode = row
+                .barcode
+                .clone()
+                .or_else(|| previous.and_then(|p| p.barcode.clone()));
+
             // Both barcode columns share one namespace: checking only the loose
             // one would let a pack code collide with another product's code.
-            let codes = [row.barcode.as_deref(), row.pack_barcode.as_deref()];
+            // In an update, the product itself is not a collision.
+            let codes = [barcode.as_deref(), row.pack_barcode.as_deref()];
             if codes
                 .into_iter()
                 .flatten()
-                .any(|code| crate::db::barcode_taken(&self.store, code, None))
+                .any(|code| crate::db::barcode_taken(&self.store, code, target))
+            {
+                skipped += 1;
+                continue;
+            }
+            if let Some(code) = sku.as_deref()
+                && crate::db::sku_taken(&self.store, code, target)
             {
                 skipped += 1;
                 continue;
@@ -547,36 +610,62 @@ impl State {
                 price_minor: row.price_minor,
                 category: &row.category,
                 category_id,
-                barcode: row.barcode.as_deref(),
+                barcode: barcode.as_deref(),
+                sku: sku.as_deref(),
                 unit_label: &row.unit_label,
                 pack_size: row.pack_size,
                 pack_price_minor: row.pack_price_minor,
                 pack_barcode: row.pack_barcode.as_deref(),
                 tiers: &row.tiers,
             };
-            if let Err(error) = crate::db::insert_product(&self.store, &fields) {
-                // The catalog's own rejects count like the file's: a row the
-                // till cannot take does not stop the others.
-                tracing::warn!(error = %error, "a CSV row could not be saved");
-                skipped += 1;
-            } else {
-                added += 1;
+            let result = match target {
+                Some(id) => crate::db::update_product(&self.store, id, &fields).map(|()| id),
+                None => crate::db::insert_product(&self.store, &fields),
+            };
+            match result {
+                Ok(_) => {
+                    if target.is_some() {
+                        updated += 1;
+                    } else {
+                        added += 1;
+                    }
+                }
+                Err(error) => {
+                    // The catalog's own rejects count like the file's: a row the
+                    // till cannot take does not stop the others.
+                    tracing::warn!(error = %error, "a CSV row could not be saved");
+                    skipped += 1;
+                }
             }
         }
 
-        if added == 0 {
-            let message = match errors.first() {
-                Some(error) => format!("Nothing was imported. {error}"),
-                None => "Nothing was imported: the file has no products in it.".to_owned(),
+        let (done, verb, title, nothing) = match mode {
+            ImportMode::Add => (
+                added,
+                "Imported",
+                "Nothing was imported.",
+                "Nothing was imported: the file has no products in it.",
+            ),
+            ImportMode::Update => (
+                updated,
+                "Updated",
+                "Nothing was updated.",
+                "Nothing was updated: no row named a live product.",
+            ),
+        };
+        if done == 0 {
+            let message = match reasons.first() {
+                Some(error) => format!("{title} {error}"),
+                None => nothing.to_owned(),
             };
             return self.import_error(message);
         }
 
-        let noun = if added == 1 { "product" } else { "products" };
+        let noun = if done == 1 { "product" } else { "products" };
         let summary = if skipped == 0 {
-            format!("Imported {added} {noun}.")
+            format!("{verb} {done} {noun}.")
         } else {
-            format!("Imported {added} {noun}, skipped {skipped}.")
+            format!("{verb} {done} {noun}, skipped {skipped}.")
         };
         self.import = None;
         self.reload_products();
@@ -589,20 +678,21 @@ impl State {
         }
     }
 
-    /// Open the typed-path fallback for the CSV import.
-    ///
-    /// The normal route is [`State::start_import_picker`]; this stays for a
-    /// path pasted from an email, and is what the picker offers when a folder
-    /// cannot be read.
-    pub fn start_import(&mut self) {
+    /// Open the typed-path fallback for whichever import the operator chose,
+    /// including the one offered by the in-app file picker. A path pasted from
+    /// an email reaches the catalog this way.
+    pub(crate) fn start_csv(&mut self, mode: ImportMode) {
+        self.import_mode = mode;
         self.import = Some(ImportDraft {
+            mode,
             path: String::new(),
             error: None,
         });
     }
 
     /// Ask for the CSV to import, in the computer's own file chooser.
-    pub fn start_import_picker(&mut self) {
+    pub fn start_import_picker(&mut self, mode: ImportMode) {
+        self.import_mode = mode;
         self.ask_for_path(crate::picker::Purpose::Import);
     }
 
@@ -686,6 +776,7 @@ impl State {
             crate::picker::Purpose::Import => {
                 self.import_dir = path.parent().map(PathBuf::from);
                 self.import = Some(ImportDraft {
+                    mode: self.import_mode,
                     path: path.display().to_string(),
                     error: None,
                 });

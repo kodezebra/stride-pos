@@ -32,9 +32,9 @@ payment mix, cash by person, and the latest sales; switch the range to 7 days,
 its lines.
 
 **Catalog** — the catalogue of what you sell, and what is on the shelf. Add a
-product, edit its price or category, give it a barcode. Shelves appear in the
-shop's own order with a count of the products on each. Everything here becomes
-a key on the Sell screen. Stock is opt-in per product: choose a product, count
+product, edit its price or category, give it a barcode and a shop code of your
+own. Shelves appear in the shop's own order with a count of the products on
+each. Everything here becomes a key on the Sell screen. Stock is opt-in per product: choose a product, count
 it, and set the level that counts as low; from then on every sale subtracts
 automatically. Receiving, customer returns, waste and a physical count are
 recorded as movements, and each product keeps its own history. Stock is always
@@ -125,8 +125,10 @@ directory, track stock, and plan a restocking trip: build a cart, take the cash,
 and the sale is recorded with the name of whoever took it, on Day.
 
 - payments are cash only — mobile money and cards come later
-- the catalogue can be typed in or imported from a CSV
-  (`name, category, price, barcode`); stock counts are not imported
+- the catalogue can be typed in or imported from a CSV (`name, category,
+  price, barcode, sku`); a second CSV can update existing products, matching
+  first on the shop code and then on the barcode. Stock and cost are never
+  written by a file
 - receipts can be previewed but not printed
 - void, refund and discount have permissions but no screen yet
 - purchases record a unit cost and profit appears in Trends once sales
