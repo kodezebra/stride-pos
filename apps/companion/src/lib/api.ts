@@ -1,4 +1,4 @@
-import type { Catalog, NewSale, Sale, Status } from './types';
+import type { Catalog, NewSale, Sale, Status, SyncResult } from './types';
 
 declare global {
   interface Window {
@@ -87,17 +87,32 @@ async function mock<T>(command: string, args?: Record<string, unknown>): Promise
       refreshPending();
       return structuredClone(sale) as T;
     }
+    case 'pair': {
+      demoStatus = { ...demoStatus, paired: true, offline: false };
+      return demoCatalog.version as T;
+    }
     case 'sync_now': {
-      const accepted = demoSales.filter((sale) => sale.status === 'pending').length;
-      demoSales = demoSales.map((sale) =>
-        sale.status === 'pending' ? { ...sale, status: 'synced' as const } : sale
-      );
+      let accepted = 0;
+      let held = 0;
+      demoSales = demoSales.map((sale) => {
+        if (sale.status !== 'pending') return sale;
+        if (sale.tender === 'cash') {
+          accepted += 1;
+          return { ...sale, status: 'synced' as const };
+        }
+        held += 1;
+        return {
+          ...sale,
+          status: 'held' as const,
+          held_reason: `${sale.tender.replace('_', ' ')} must be confirmed on the main till`
+        };
+      });
       demoStatus = {
         ...demoStatus,
         last_sync: new Date().toISOString(),
-        pending: 0
+        pending: demoSales.filter((sale) => sale.status === 'pending').length
       };
-      return { accepted, rejected: 0 } as T;
+      return { accepted, rejected: 0, held } as T;
     }
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -116,4 +131,6 @@ export const getStatus = () => call<Status>('get_status');
 export const getCatalog = () => call<Catalog>('get_catalog');
 export const getSales = () => call<Sale[]>('get_sales');
 export const recordSale = (sale: NewSale) => call<Sale>('record_sale', { sale });
-export const syncNow = () => call<{ accepted: number; rejected: number }>('sync_now');
+export const pairTill = (host: string, port: number, token: string) =>
+  call<number>('pair', { host, port, token });
+export const syncNow = () => call<SyncResult>('sync_now');

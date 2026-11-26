@@ -47,7 +47,11 @@
       </div>
     </div>
 
-    <a class="btn btn-primary wide" href="/sell">Start selling</a>
+    {#if session.status?.paired === false}
+      <a class="btn btn-primary wide" href="/pair">Connect to till</a>
+    {:else}
+      <a class="btn btn-primary wide" href="/sell">Start selling</a>
+    {/if}
   </section>
 
   <button class="card queue-link" onclick={() => goto('/queue')}>

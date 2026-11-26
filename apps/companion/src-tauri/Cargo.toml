@@ -1,16 +1,16 @@
 [package]
 name = "companion"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Stride Companion - offline backup till"
+authors = ["Stride"]
 edition = "2024"
+rust-version = "1.95"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# This app owns its own lockfile and build. It is deliberately detached from the
+# POS workspace so everything stays under apps/companion.
+[workspace]
 
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "companion_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -22,9 +22,22 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+directories = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v7"] }
 
+# Shared plumbing, pinned to the same snapshot the desktop uses.
+storage = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
+lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
 
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
 [profile.release]
 codegen-units = 1
 lto = true

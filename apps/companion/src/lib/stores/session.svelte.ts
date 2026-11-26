@@ -1,5 +1,5 @@
-import { getCatalog, getSales, getStatus, recordSale, syncNow } from '$lib/api';
-import type { Catalog, NewSale, Sale, Status } from '$lib/types';
+import { getCatalog, getSales, getStatus, pairTill, recordSale, syncNow } from '$lib/api';
+import type { Catalog, NewSale, Sale, Status, SyncResult } from '$lib/types';
 
 class SessionStore {
   status = $state<Status | null>(null);
@@ -19,6 +19,12 @@ class SessionStore {
     this.loaded = true;
   }
 
+  async pair(host: string, port: number, token: string): Promise<number> {
+    const version = await pairTill(host, port, token);
+    await this.load();
+    return version;
+  }
+
   async sell(input: Omit<NewSale, 'cashier'>): Promise<Sale> {
     const sale = await recordSale({ ...input, cashier: this.cashier });
     this.sales = [sale, ...this.sales];
@@ -28,7 +34,7 @@ class SessionStore {
     return sale;
   }
 
-  async sync(): Promise<{ accepted: number; rejected: number }> {
+  async sync(): Promise<SyncResult> {
     const result = await syncNow();
     await this.load();
     return result;

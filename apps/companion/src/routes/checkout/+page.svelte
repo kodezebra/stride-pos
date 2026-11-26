@@ -76,7 +76,8 @@
       lines: cart.lines.map((line) => ({
         name: line.product.name,
         qty: line.qty,
-        unit_minor: line.unit_minor
+        unit_minor: line.unit_minor,
+        product_id: line.product.id
       }))
     });
     cart.clear();

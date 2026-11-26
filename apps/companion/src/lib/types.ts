@@ -47,6 +47,7 @@ export type SaleLine = {
   name: string;
   qty: number;
   unit_minor: number;
+  product_id?: string;
 };
 
 export type Sale = {
@@ -57,8 +58,9 @@ export type Sale = {
   reference?: string;
   customer_id?: string;
   cashier: string;
-  status: 'pending' | 'synced';
+  status: 'pending' | 'synced' | 'held';
   unverified: boolean;
+  held_reason?: string;
   lines: SaleLine[];
 };
 
@@ -68,7 +70,13 @@ export type Status = {
   catalog_version: number;
   last_sync: string;
   pending: number;
-  battery: number;
+  battery?: number;
+};
+
+export type SyncResult = {
+  accepted: number;
+  rejected: number;
+  held: number;
 };
 
 export type NewSale = {

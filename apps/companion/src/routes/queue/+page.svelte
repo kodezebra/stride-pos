@@ -4,11 +4,12 @@
   import { session } from '$lib/stores/session.svelte';
 
   let busy = $state(false);
-  let summary = $state<{ accepted: number; rejected: number } | null>(null);
+  let summary = $state<{ accepted: number; rejected: number; held: number } | null>(null);
 
   const currency = $derived(session.catalog?.currency ?? 'UGX');
   const pending = $derived(session.sales.filter((sale) => sale.status === 'pending').length);
   const synced = $derived(session.sales.filter((sale) => sale.status === 'synced').length);
+  const held = $derived(session.sales.filter((sale) => sale.status === 'held').length);
 
   function time(value: string): string {
     return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -34,7 +35,7 @@
   {#if summary}
     <section class="card summary" role="status">
       <strong>Sync complete</strong>
-      <span>{summary.accepted} accepted · {summary.rejected} rejected</span>
+      <span>{summary.accepted} accepted · {summary.rejected} rejected · {summary.held} held for review</span>
       <span class="muted small">Catalog updated to v{session.catalog?.version ?? '—'}</span>
     </section>
   {/if}
@@ -47,6 +48,10 @@
     <div class="card count">
       <span class="eyebrow">Synced</span>
       <strong>{synced}</strong>
+    </div>
+    <div class="card count">
+      <span class="eyebrow">Held</span>
+      <strong>{held}</strong>
     </div>
   </div>
 
@@ -62,10 +67,13 @@
             <span class="flag">Recorded, not verified</span>
           {/if}
         </div>
-        <span class="status" class:synced={sale.status === 'synced'}>
-          {sale.status === 'pending' ? '● Queued' : '✓ Synced'}
+        <span class="status" class:synced={sale.status === 'synced'} class:held={sale.status === 'held'}>
+          {sale.status === 'pending' ? '● Queued' : sale.status === 'held' ? '⚠ Held' : '✓ Synced'}
         </span>
       </div>
+      {#if sale.held_reason}
+        <p class="muted small reason">{sale.held_reason}</p>
+      {/if}
     {:else}
       <p class="muted">No sales yet. Start with a scan.</p>
     {/each}
@@ -107,8 +115,8 @@
 
   .counts {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-md);
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm);
     margin-top: var(--space-lg);
   }
 
@@ -165,6 +173,14 @@
 
   .status.synced {
     color: var(--success);
+  }
+
+  .status.held {
+    color: var(--warning);
+  }
+
+  .reason {
+    padding: 0 0 var(--space-md);
   }
 
   .wide {

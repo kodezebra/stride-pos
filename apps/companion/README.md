@@ -20,8 +20,33 @@ src/                       SvelteKit SPA (one codebase, three breakpoints)
   lib/stores/              Cart and session (Svelte 5 runes)
   lib/theme/tokens.css     Ported desktop tokens
   lib/components/          Status strip, bottom nav, cart sheet
-src-tauri/                 Tauri shell (template stage — no commands yet)
+src-tauri/                 Tauri shell + Rust core (SQLite, LAN protocol)
+  src/db.rs                Own application_id, migrations, local sales outbox
+  src/protocol.rs          Desktop wire shapes (catalog, ping, push)
+  src/commands.rs          get_status/get_catalog/get_sales/record_sale/pair/sync_now
+  migrations/001_init.sql  Companion schema (catalog cache + sales + lines)
+  Cargo.lock               Committed; CI builds --locked
 static/fonts/              Desktop font files + OFL licences
+```
+
+## Rust core
+
+The Tauri backend owns all persistence and network access. It uses `storage` and `lan-http`
+from `stride-libs` at the same pinned rev as the desktop. Sales are stored locally first with a
+UUIDv7 id and origin device, so a dead desktop or OS kill cannot lose them.
+
+`sync_now` pushes only what the till's ingest accepts: single-cash-tender offline sales.
+Mobile-money and credit sales are **held** locally with a reason, never silently dropped and
+never sent to an endpoint that would reject them. Held sales are shown on the Queue screen for
+confirmation on the main till.
+
+Verify the core:
+
+```sh
+cd src-tauri
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
 ```
 
 ## Test in a browser first (fastest)
@@ -41,6 +66,8 @@ Use the browser's device toolbar (e.g. 390 × 844) to check the phone layout. In
 - Drag/expand the cart, then **Take payment**.
 - `Checkout` → enter a cash tender on the keypad, or switch to mobile money and add a reference.
 - `Queue` → the sale is `● Queued`; press **Sync now** → it becomes `✓ Synced`.
+- Record a mobile-money or credit sale, then **Sync now** → it becomes `⚠ Held` with the reason.
+- `/pair` demonstrates the pairing form (the browser mock accepts any 10-character code).
 
 The camera area is a placeholder in the browser; real barcode decoding arrives with the Tauri
 Android build.
