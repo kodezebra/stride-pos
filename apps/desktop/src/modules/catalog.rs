@@ -226,6 +226,19 @@ pub(super) fn visible_products(
         .collect()
 }
 
+/// Indices of the archived products the archive view shows.
+///
+/// Only search applies here: a category or stock facet describes the live
+/// catalog, and an archived row has no stock to facet on.
+pub(super) fn visible_archived(archived: &[Product], needle: &str) -> Vec<usize> {
+    archived
+        .iter()
+        .enumerate()
+        .filter(|(_, product)| matches(product, None, needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The ledger row for a product, if the shop counts it.
 ///
 /// `db::stock` only returns tracked products, so a missing row means "not
@@ -858,10 +871,10 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                 });
         });
 
-        // An existing, untracked product can start tracking here without
-        // sending the operator back to Inventory. The button saves the edit
-        // first, so a count is never attached to stale details.
-        if editing_id.is_some() && !draft.tracked && can_track {
+        // A product that is not counted yet can start tracking here, whether
+        // it is new or already on the shelf. The button saves the details
+        // first, so a count is never attached to a half-written product.
+        if !draft.tracked && can_track {
             ui.add_space(SPACING.md);
             components::field_label(ui, "Stock");
             ui.add_space(SPACING.xs);
@@ -1044,15 +1057,13 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     }
 
     // Applied outside the borrow of `state.product_editor`: saving reads the
-    // catalog and writes the store, which needs the whole state. Tracking the
-    // edited product saves first and only opens the count form if that save
-    // succeeded; a rejected edit keeps its error and stays on screen.
+    // catalog and writes the store, which needs the whole state. Tracking
+    // saves first and only opens the count form with the saved row's id — a
+    // new product has no id until now — so a rejected edit keeps its error
+    // and stays on screen.
     if track {
-        if let Some(id) = editing_id {
-            state.save_product();
-            if state.product_editor.is_none() {
-                state.start_tracking_for(id);
-            }
+        if let Some(id) = state.write_product() {
+            state.start_tracking_for(id);
         }
     } else if save {
         state.save_product();
@@ -1166,6 +1177,71 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
         state.import = None;
     }
 }
+/// The archive: rows the shop removed, with a way back.
+///
+/// A separate view rather than a fifth stock filter because an archived row
+/// has no ledger to count and no shelf to facet. The search box above still
+/// works, so a shop with a hundred removed lines can find one by code.
+fn archived_view(ui: &mut egui::Ui, state: &mut State) {
+    file_feedback(ui, state);
+    if let Some(notice) = state.notice.as_deref() {
+        components::caption(ui, notice);
+    }
+    let needle = state.catalog_search.trim().to_lowercase();
+    let visible = visible_archived(&state.archived, &needle);
+
+    if state.archived.is_empty() {
+        components::empty_state_card(
+            ui,
+            "Nothing is archived",
+            "Products you remove are kept here, with a way to bring them back.",
+            160.0,
+        );
+        return;
+    }
+    if visible.is_empty() {
+        components::empty_state_card(
+            ui,
+            "Nothing matches",
+            "Clear the search to see the archived products.",
+            160.0,
+        );
+        return;
+    }
+
+    let mut restore = None;
+    components::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        components::section_title(ui, "Archived products");
+        components::caption(
+            ui,
+            "These rows are off the till but keep their history. Restoring one puts it \
+             back on the catalog with its price and code.",
+        );
+        for &index in &visible {
+            let product = &state.archived[index];
+            ui.horizontal(|ui| {
+                ui.set_min_height(44.0);
+                ui.label(components::semibold(&product.name).size(TYPE.body));
+                components::caption(ui, &product.category);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if actions::secondary_compact(ui, "Restore")
+                        .on_hover_text("Put this product back on the catalog.")
+                        .clicked()
+                    {
+                        restore = Some(product.id);
+                    }
+                    ui.label(components::numeric(state.money(product.price_minor)));
+                });
+            });
+            components::divider(ui);
+        }
+    });
+    if let Some(id) = restore {
+        state.restore_product(id);
+    }
+}
+
 impl Module for Products {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         // Stock is a second facet, not a second screen. The old Stock tab asked
@@ -1192,6 +1268,16 @@ impl Module for Products {
         // in the same place as on every other list.
         ui.add_space(SPACING.md);
         categories_sidebar(ui, state);
+
+        // A removed product is not a stock state, so it sits below the shelves
+        // rather than as a fifth filter on the same list. The count keeps the
+        // way back visible without making the archive the shop's default view.
+        ui.add_space(SPACING.md);
+        components::divider(ui);
+        let label = format!("Archived ({})", state.archived.len());
+        if regions::nav_item(ui, state.show_archived, &label).clicked() {
+            state.show_archived = !state.show_archived;
+        }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, state: &mut State) {
@@ -1203,22 +1289,28 @@ impl Module for Products {
 
         // The count only appears while a filter is on. With no filter every row
         // is on screen, so "48 of 48" would be a number the reader already knows.
-        let filtered = !state.catalog_search.trim().is_empty()
-            || state.category.is_some()
-            || state.stock_filter != 0;
-        let count = filtered.then(|| {
-            let needle = state.catalog_search.trim().to_lowercase();
-            let visible = visible_catalog(
-                &state.products,
-                &state.stock,
-                &state.expiring,
-                state.expiry_warning_days(),
-                state.category.as_deref(),
-                &needle,
-                state.stock_filter,
-            );
-            format!("{} of {}", visible.len(), state.products.len())
-        });
+        let needle = state.catalog_search.trim().to_lowercase();
+        let count = if state.show_archived {
+            // The archive counts its own rows: a live shelf filter would say
+            // something about products this view cannot show.
+            let visible = visible_archived(&state.archived, &needle);
+            Some(format!("{} of {}", visible.len(), state.archived.len()))
+        } else {
+            let filtered =
+                !needle.is_empty() || state.category.is_some() || state.stock_filter != 0;
+            filtered.then(|| {
+                let visible = visible_catalog(
+                    &state.products,
+                    &state.stock,
+                    &state.expiring,
+                    state.expiry_warning_days(),
+                    state.category.as_deref(),
+                    &needle,
+                    state.stock_filter,
+                );
+                format!("{} of {}", visible.len(), state.products.len())
+            })
+        };
 
         // Offer the way in only while there is something left to count. A button
         // that opens "every product is tracked" is a dead end.
@@ -1227,7 +1319,9 @@ impl Module for Products {
             .iter()
             .filter(|product| stock_item(&state.stock, product.id).is_none())
             .count();
-        let can_track = state.permits(crate::auth::Permission::ManageInventory) && untracked > 0;
+        let can_track = !state.show_archived
+            && state.permits(crate::auth::Permission::ManageInventory)
+            && untracked > 0;
 
         let mut new = false;
         let mut track = false;
@@ -1236,6 +1330,9 @@ impl Module for Products {
         let mut template = false;
         let mut export_visible = false;
         let mut export_all = false;
+        // The archive is a view, not a catalog: its rows are not exportable and
+        // starting a new product from it would hide the row just added.
+        let archived_view = state.show_archived;
         action_bar(
             ui,
             PageLeft::Search {
@@ -1244,6 +1341,9 @@ impl Module for Products {
                 count,
             },
             |ui| {
+                if archived_view {
+                    return;
+                }
                 if actions::primary_compact(ui, "New product").clicked() {
                     new = true;
                 }
@@ -1340,6 +1440,9 @@ impl Module for Products {
     fn workspace(&mut self, ui: &mut egui::Ui, state: &mut State) {
         if !state.permits(crate::auth::Permission::ChangePrice) {
             return locked_card(ui, crate::auth::Permission::ChangePrice);
+        }
+        if state.show_archived {
+            return archived_view(ui, state);
         }
 
         // Seeing stock is part of the catalog; changing it is a separate gate.

@@ -286,6 +286,11 @@ pub struct State {
     /// in memory: a few hundred products are cheaper to filter than to query
     /// once per frame, and the grid redraws every frame.
     pub products: Vec<Product>,
+    /// Products the shop removed, kept for the archive view and restore.
+    pub archived: Vec<Product>,
+    /// Whether the Catalog sidebar is showing the archive instead of the
+    /// shelves. A view, not a filter: an archived row has no stock to facet.
+    pub show_archived: bool,
     /// The shelves the sidebars show, in the shop's order, with live counts.
     /// The first of the two category views in the database: this one is ordered
     /// and counted for drawing, `categories_list` is the raw form/sync view.
@@ -527,6 +532,7 @@ impl State {
         let sync_name_draft = settings.sync.device_name.trim().to_owned();
         let sync_peers = crate::db::sync_peers(&store).unwrap_or_default();
         let products = crate::db::products(&store);
+        let archived = crate::db::archived_products(&store);
         let categories = crate::db::categories(&store);
         let suppliers = crate::db::suppliers(&store);
         let stock = crate::db::stock(&store);
@@ -570,6 +576,8 @@ impl State {
             trend_range: 1,
             settings_section: 0,
             products,
+            archived,
+            show_archived: false,
             categories,
             product_editor: None,
             import: None,

@@ -185,6 +185,7 @@ impl State {
     /// empty grid with a category chip that is not in the sidebar.
     pub fn reload_products(&mut self) {
         self.products = crate::db::products(&self.store);
+        self.archived = crate::db::archived_products(&self.store);
         self.categories = crate::db::categories(&self.store);
 
         if let Some(selected) = &self.category
@@ -313,9 +314,13 @@ impl State {
     /// Everything is validated before the first write, so a rejected form leaves
     /// the database untouched and the text the operator typed still on screen.
     pub fn save_product(&mut self) {
-        let Some(draft) = self.product_editor.as_ref() else {
-            return;
-        };
+        let _ = self.write_product();
+    }
+
+    /// The same save, with the saved row's id for callers that must act on it
+    /// next — starting a count on a brand new product is the one we have.
+    pub(crate) fn write_product(&mut self) -> Option<i64> {
+        let draft = self.product_editor.as_ref()?;
 
         let id = draft.id;
         let name = draft.name.trim().to_owned();
@@ -475,10 +480,11 @@ impl State {
                 // re-read the ledger so the list does not keep the old spelling.
                 self.reload_stock();
                 self.notice = Some(format!("Saved {name}."));
+                Some(id)
             }
             Err(error) => {
                 tracing::error!(error = %error, "saving a product failed");
-                self.editor_error(format!("Could not save: {error}"));
+                self.editor_error(format!("Could not save: {error}"))
             }
         }
     }
@@ -502,10 +508,30 @@ impl State {
         }
     }
 
-    fn editor_error(&mut self, message: impl Into<String>) {
+    /// Put the reason on the form and return `None`, so every validation exit
+    /// from `write_product` says "not saved" with one expression.
+    /// Bring a removed product back, or explain why its old code now belongs
+    /// to somebody else. The archive stays open on failure so the operator can
+    /// see the row they were trying to restore.
+    pub fn restore_product(&mut self, id: i64) {
+        match crate::db::restore_product(&self.store, id) {
+            Ok(()) => {
+                self.reload_products();
+                self.reload_stock();
+                self.notice = Some("Product restored to the catalog.".to_owned());
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "restoring a product failed");
+                self.notice = Some(format!("Could not restore the product: {error}"));
+            }
+        }
+    }
+
+    fn editor_error(&mut self, message: impl Into<String>) -> Option<i64> {
         if let Some(draft) = self.product_editor.as_mut() {
             draft.error = Some(message.into());
         }
+        None
     }
 
     /// Add or update products from a CSV file, as listed in the import draft.

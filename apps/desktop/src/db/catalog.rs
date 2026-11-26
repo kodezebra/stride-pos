@@ -363,6 +363,90 @@ pub fn delete_product(store: &storage::Store, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The rows the shop hid, so they can be found and brought back.
+///
+/// The same read as [`products`] with the other half of `archived`; prices and
+/// codes are kept, which is what makes a restore meaningful rather than a new
+/// row typed from memory.
+pub fn archived_products(store: &storage::Store) -> Vec<Product> {
+    let mut statement = match store.conn().prepare(
+        "SELECT id, name, price_minor, category, category_id, barcode, sku,
+                unit_label, pack_size, pack_price_minor, pack_barcode, cost_milli
+         FROM products WHERE archived = 1 ORDER BY name COLLATE NOCASE",
+    ) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "archived products prepare failed");
+            return Vec::new();
+        }
+    };
+    let rows = statement.query_map([], |row| {
+        Ok(Product {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            price_minor: row.get(2)?,
+            category: row.get(3)?,
+            category_id: row.get(4)?,
+            barcode: row.get(5)?,
+            sku: row.get(6)?,
+            unit_label: row.get(7)?,
+            pack_size: row.get(8)?,
+            pack_price_minor: row.get(9)?,
+            pack_barcode: row.get(10)?,
+            cost_milli: row.get(11)?,
+            tiers: Vec::new(),
+        })
+    });
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "archived products query failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Put a hidden product back on the catalog.
+///
+/// An archived code may have been reused while the row was away, so both
+/// namespaces are checked against live rows before the flag changes. A failed
+/// restore leaves the row hidden and says why; the operator can clear the
+/// colliding code in the product form and try again.
+pub fn restore_product(store: &storage::Store, id: i64) -> anyhow::Result<()> {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = store
+        .conn()
+        .query_row(
+            "SELECT barcode, pack_barcode, sku FROM products WHERE id = ?1 AND archived = 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((barcode, pack_barcode, sku)) = row else {
+        anyhow::bail!("that product is not in the archived catalog");
+    };
+    for code in [barcode.as_deref(), pack_barcode.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|code| !code.is_empty())
+    {
+        anyhow::ensure!(
+            !barcode_taken(store, code, Some(id)),
+            "a live product already uses barcode {code}"
+        );
+    }
+    if let Some(code) = sku.as_deref().filter(|code| !code.is_empty()) {
+        anyhow::ensure!(
+            !sku_taken(store, code, Some(id)),
+            "a live product already uses shop code {code}"
+        );
+    }
+    store.conn().execute(
+        "UPDATE products SET archived = 0 WHERE id = ?1 AND archived = 1",
+        [id],
+    )?;
+    Ok(())
+}
+
 /// Whether a barcode already belongs to a product other than `except`.
 ///
 /// Checked before the write so the operator gets "that barcode is taken"
