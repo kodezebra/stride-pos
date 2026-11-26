@@ -40,6 +40,21 @@ Mobile-money and credit sales are **held** locally with a reason, never silently
 never sent to an endpoint that would reject them. Held sales are shown on the Queue screen for
 confirmation on the main till.
 
+## Camera and lifecycle
+
+On mobile Tauri builds the barcode-scanner plugin opens the native camera from the Sell screen;
+it decodes EAN-13/8, UPC-A/E and Code 39/93/128 on device. Pairing can scan the till's QR code
+the same way. Desktop builds keep the keyboard-wedge path, and the browser mock uses the
+**Simulate scan** button. A screen wake lock is held while the Sell screen is open.
+
+The plugin is registered only under `cfg(mobile)`; its capability lives in
+`src-tauri/capabilities/mobile.json`. Android init/build is still a manual step:
+
+```sh
+bun run tauri android init
+bun run tauri android build --apk
+```
+
 Verify the core:
 
 ```sh
@@ -48,6 +63,10 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
+
+The `companion` job in the repository's `ci.yml` runs all four frontend commands and these three
+Rust checks on every push to `main`. GitHub only reads workflows from the repository root, so
+that YAML is the one file that cannot live in this directory.
 
 ## Test in a browser first (fastest)
 

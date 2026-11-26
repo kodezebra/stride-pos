@@ -241,6 +241,12 @@ pub fn sync_now(state: State<'_, AppState>) -> Result<SyncResult, String> {
     })
 }
 
+/// Lets the UI choose the camera path only on a real mobile build.
+#[tauri::command]
+pub fn platform() -> &'static str {
+    if cfg!(mobile) { "mobile" } else { "desktop" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

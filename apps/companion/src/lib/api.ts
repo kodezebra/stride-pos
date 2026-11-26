@@ -11,6 +11,8 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+export type Platform = 'browser' | 'mobile' | 'desktop';
+
 const demoCatalog: Catalog = {
   version: 23,
   currency: 'UGX',
@@ -87,6 +89,8 @@ async function mock<T>(command: string, args?: Record<string, unknown>): Promise
       refreshPending();
       return structuredClone(sale) as T;
     }
+    case 'platform':
+      return 'browser' as T;
     case 'pair': {
       demoStatus = { ...demoStatus, paired: true, offline: false };
       return demoCatalog.version as T;
@@ -127,6 +131,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return mock<T>(command, args);
 }
 
+export const getPlatform = () => call<Platform>('platform');
 export const getStatus = () => call<Status>('get_status');
 export const getCatalog = () => call<Catalog>('get_catalog');
 export const getSales = () => call<Sale[]>('get_sales');
@@ -134,3 +139,29 @@ export const recordSale = (sale: NewSale) => call<Sale>('record_sale', { sale })
 export const pairTill = (host: string, port: number, token: string) =>
   call<number>('pair', { host, port, token });
 export const syncNow = () => call<SyncResult>('sync_now');
+
+/** One camera scan on mobile; null in a browser or when the user cancels. */
+export async function scanBarcode(kind: 'product' | 'qr' = 'product'): Promise<string | null> {
+  if (!isTauri()) return null;
+
+  const { scan, Format } = await import('@tauri-apps/plugin-barcode-scanner');
+  const formats =
+    kind === 'qr'
+      ? [Format.QRCode]
+      : [
+          Format.EAN13,
+          Format.EAN8,
+          Format.UPC_A,
+          Format.UPC_E,
+          Format.Code128,
+          Format.Code39,
+          Format.Code93
+        ];
+
+  try {
+    const result = await scan({ formats, cameraDirection: 'back' });
+    return result.content.trim() || null;
+  } catch {
+    return null;
+  }
+}

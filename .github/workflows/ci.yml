@@ -27,6 +27,47 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The companion owns its own lockfile and build, so the workspace jobs above
+  # never compile it. Check both halves here.
+  companion:
+    name: Companion (Svelte + Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        working-directory: apps/companion
+        run: bun install --frozen-lockfile
+
+      - name: Frontend check
+        working-directory: apps/companion
+        run: bun run check
+
+      - name: Frontend build
+        working-directory: apps/companion
+        run: bun run build
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: companion
+          workspaces: apps/companion/src-tauri
+
+      - name: Rust format
+        working-directory: apps/companion/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy
+        working-directory: apps/companion/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust test
+        working-directory: apps/companion/src-tauri
+        run: cargo test --locked
+
   # Nothing else compiles the Windows-only choices: `ui-shell` swaps glow for
   # wgpu under `cfg(windows)`, and the release workflow only runs on a tag. A
   # tag is a poor place to find out the till no longer builds there.

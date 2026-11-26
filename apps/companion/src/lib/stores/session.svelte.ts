@@ -1,4 +1,4 @@
-import { getCatalog, getSales, getStatus, pairTill, recordSale, syncNow } from '$lib/api';
+import { getCatalog, getPlatform, getSales, getStatus, pairTill, recordSale, syncNow } from '$lib/api';
 import type { Catalog, NewSale, Sale, Status, SyncResult } from '$lib/types';
 
 class SessionStore {
@@ -7,9 +7,16 @@ class SessionStore {
   sales = $state<Sale[]>([]);
   cashier = $state('');
   loaded = $state(false);
+  platform = $state<'browser' | 'mobile' | 'desktop'>('browser');
 
   async load(): Promise<void> {
-    const [status, catalog, sales] = await Promise.all([getStatus(), getCatalog(), getSales()]);
+    const [status, catalog, sales, platform] = await Promise.all([
+      getStatus(),
+      getCatalog(),
+      getSales(),
+      getPlatform()
+    ]);
+    this.platform = platform;
     this.status = status;
     this.catalog = catalog;
     this.sales = sales;

@@ -32,6 +32,10 @@ uuid = { version = "1", features = ["v7"] }
 storage = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
 lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
 
+# Camera decoding is mobile-only; desktop builds keep the keyboard-wedge path.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2"
+
 [lints.rust]
 unsafe_code = "forbid"
 

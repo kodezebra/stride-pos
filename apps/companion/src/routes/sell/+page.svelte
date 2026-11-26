@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import CartSheet from '$lib/components/CartSheet.svelte';
+  import { scanBarcode } from '$lib/api';
   import { formatMoney } from '$lib/money';
   import { cart } from '$lib/stores/cart.svelte';
   import { session } from '$lib/stores/session.svelte';
@@ -30,8 +32,7 @@
     message = `${product.name} added`;
   }
 
-  function addBarcode(): void {
-    const code = barcode.trim();
+  function addCode(code: string): void {
     const product = products.find((entry) => entry.barcode === code || entry.sku === code);
     if (!product) {
       message = `No product found for ${code || '(empty)'}`;
@@ -40,6 +41,28 @@
     add(product);
     barcode = '';
   }
+
+  function addBarcode(): void {
+    addCode(barcode.trim());
+  }
+
+  async function scanWithCamera(): Promise<void> {
+    const code = await scanBarcode('product');
+    if (code) addCode(code);
+    else message = 'Scan cancelled';
+  }
+
+  onMount(() => {
+    type WakeLock = { release: () => Promise<void> };
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: string) => Promise<WakeLock> };
+    };
+    let lock: WakeLock | null = null;
+    void nav.wakeLock?.request('screen').then((value) => { lock = value; }).catch(() => {});
+    return () => {
+      void lock?.release();
+    };
+  });
 
   function simulateScan(): void {
     const product = products[Math.floor(Math.random() * products.length)];
@@ -92,7 +115,17 @@
         <span class="corner br"></span>
         <span class="laser"></span>
       </div>
-      <p class="camera-hint muted">Point at a barcode · camera preview placeholder in browser</p>
+      {#if session.platform === 'mobile'}
+        <button class="btn btn-primary scan-button" onclick={scanWithCamera}>
+          Scan with camera
+        </button>
+      {:else}
+        <p class="camera-hint muted">
+          {session.platform === 'desktop'
+            ? 'Scan with the USB scanner, or type a barcode below.'
+            : 'Camera preview placeholder in browser — use Simulate scan.'}
+        </p>
+      {/if}
     </section>
   {/if}
 
@@ -183,6 +216,11 @@
     position: absolute;
     bottom: var(--space-sm);
     font-size: var(--type-small);
+  }
+
+  .scan-button {
+    position: absolute;
+    bottom: var(--space-lg);
   }
 
   .search-panel {

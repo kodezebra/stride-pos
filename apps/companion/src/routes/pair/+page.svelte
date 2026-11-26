@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { scanBarcode } from '$lib/api';
   import { session } from '$lib/stores/session.svelte';
 
   let host = $state('192.168.1.10');
@@ -7,6 +8,23 @@
   let token = $state('');
   let error = $state('');
   let busy = $state(false);
+
+  async function scanQr(): Promise<void> {
+    error = '';
+    const code = await scanBarcode('qr');
+    if (!code) return;
+    try {
+      const uri = new URL(code);
+      if (uri.protocol !== 'stridepos:' || uri.hostname !== 'pair') {
+        throw new Error('That is not a Stride pairing QR code');
+      }
+      host = uri.searchParams.get('host') ?? host;
+      port = Number(uri.searchParams.get('port') ?? port);
+      token = uri.searchParams.get('token') ?? '';
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+  }
 
   async function connect(): Promise<void> {
     error = '';
@@ -37,6 +55,10 @@
       Scan the pairing QR shown in the till's Settings → Phone &amp; tablet screen, or type the
       host, port and code by hand.
     </p>
+
+    {#if session.platform === 'mobile'}
+      <button class="btn wide qr-button" onclick={scanQr}>Scan pairing QR</button>
+    {/if}
 
     <label class="stack">
       <span class="eyebrow">Host</span>
@@ -88,6 +110,10 @@
   .wide {
     width: 100%;
     margin-top: var(--space-lg);
+  }
+
+  .qr-button {
+    margin-bottom: var(--space-lg);
   }
 
   .error {
