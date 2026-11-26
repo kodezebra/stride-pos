@@ -278,6 +278,10 @@ pub struct Product {
     /// Optional, and unique when present: two products claiming one barcode is
     /// a scanning bug rather than a preference.
     pub barcode: Option<String>,
+    /// The shop's own code for the row, unique among live products when set.
+    /// Unlike a barcode it is a reorder key: a CSV "update" file matches on it
+    /// first, with the barcode used only for rows that have no SKU yet.
+    pub sku: Option<String>,
     /// What one base unit is called: `tablet`, `bottle`, `box`. Shown on the
     /// receipt and on a loose cart line; `unit` when the shop has no better name.
     pub unit_label: String,

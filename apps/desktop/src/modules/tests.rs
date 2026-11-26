@@ -206,6 +206,7 @@ fn product(id: i64, name: &str, barcode: Option<&str>) -> Product {
         category: "Drinks".to_owned(),
         category_id: None,
         barcode: barcode.map(str::to_owned),
+        sku: None,
         unit_label: "unit".to_owned(),
         pack_size: 1,
         pack_price_minor: None,
@@ -735,6 +736,17 @@ fn low_stock_action_hides_when_everything_is_handled() {
         Some(&draft),
     );
     assert!(!none.has_low_stock_to_add());
+}
+
+/// The shop's own code is a search key in the catalog, just like the barcode
+/// it may not have.
+#[test]
+fn the_shop_code_finds_a_product_as_well_as_a_barcode() {
+    let mut item = product(1, "Paracetamol 500mg", Some("6001"));
+    item.sku = Some("PARA-500".to_owned());
+    assert!(catalog::matches(&item, None, "para"));
+    assert!(catalog::matches(&item, None, "6001"));
+    assert!(!catalog::matches(&item, None, "nothing"));
 }
 
 /// The catalog shows the price the shop actually paid and what it leaves, but

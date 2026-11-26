@@ -24,6 +24,7 @@ fn insert_product(
             category,
             category_id,
             barcode,
+            sku: None,
             unit_label: "unit",
             pack_size: 1,
             pack_price_minor: None,
@@ -51,6 +52,7 @@ fn update_product(
             category,
             category_id,
             barcode,
+            sku: None,
             unit_label: "unit",
             pack_size: 1,
             pack_price_minor: None,
@@ -3251,6 +3253,7 @@ fn a_pack_lives_on_the_same_row_as_its_loose_units() {
             category: "Medicine",
             category_id: None,
             barcode: Some("100100"),
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(2_800),
@@ -3281,6 +3284,7 @@ fn a_pack_lives_on_the_same_row_as_its_loose_units() {
             category: "Medicine",
             category_id: None,
             barcode: Some("100200"),
+            sku: None,
             unit_label: "unit",
             pack_size: 1,
             pack_price_minor: None,
@@ -3307,6 +3311,7 @@ fn a_pack_of_one_keeps_no_pack_price_or_code() {
             category: "Shop",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "box",
             pack_size: 1,
             pack_price_minor: Some(9_000),
@@ -3339,6 +3344,7 @@ fn price_breaks_read_back_with_the_product_in_quantity_order() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(40_000),
@@ -3391,6 +3397,7 @@ fn a_price_break_above_the_shelf_price_is_refused() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 1,
             pack_price_minor: None,
@@ -3453,6 +3460,7 @@ fn saving_a_product_replaces_its_breaks() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 1,
             pack_price_minor: None,
@@ -3480,6 +3488,7 @@ fn saving_a_product_replaces_its_breaks() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 1,
             pack_price_minor: None,
@@ -3517,6 +3526,7 @@ fn receiving_a_pack_stores_the_cost_per_tablet() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(2_800),
@@ -3582,6 +3592,7 @@ fn a_pack_sale_moves_a_pack_of_stock_and_costs_a_pack() {
             category: "Medicine",
             category_id: None,
             barcode: None,
+            sku: None,
             unit_label: "tablet",
             pack_size: 100,
             pack_price_minor: Some(2_800),
@@ -4368,6 +4379,42 @@ fn shelves_follow_saved_order_and_count_live_products() {
         shelves,
         [("Drinks", 1), ("Bakery", 1), ("Other", 1)],
         "saved order first, then names the table never saw"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The shop code is a key, not a label: two live rows cannot claim one, and a
+/// search by code or by barcode resolves to the same row.
+#[test]
+fn shop_codes_are_unique_and_find_their_product() {
+    let (store, path) = store("shop-codes");
+    fn fields<'a>(name: &'a str, sku: Option<&'a str>) -> ProductFields<'a> {
+        ProductFields {
+            name,
+            price_minor: 1_000,
+            category: "Drinks",
+            category_id: None,
+            barcode: Some("6001"),
+            sku,
+            unit_label: "unit",
+            pack_size: 1,
+            pack_price_minor: None,
+            pack_barcode: None,
+            tiers: &[],
+        }
+    }
+    let id = super::insert_product(&store, &fields("Tea", Some("TEA-100"))).expect("tea");
+
+    assert_eq!(find_by_code(&store, Some("tea-100"), None), Some(id));
+    assert_eq!(find_by_code(&store, None, Some("6001")), Some(id));
+    assert!(
+        !sku_taken(&store, "TEA-100", Some(id)),
+        "itself is not a clash"
+    );
+    assert!(
+        super::insert_product(&store, &fields("Tea again", Some("TEA-100"))).is_err(),
+        "a second live product cannot claim the same code"
     );
 
     let _ = std::fs::remove_file(path);

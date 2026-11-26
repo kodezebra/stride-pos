@@ -194,6 +194,12 @@ pub(super) fn matches(product: &Product, category: Option<&str>, needle: &str) -
             .barcode
             .as_deref()
             .is_some_and(|barcode| barcode.to_lowercase().contains(needle))
+        // The shop's own code finds the row too: it is the key the owner uses
+        // on reorder lists, so it must work as well as a manufacturer barcode.
+        || product
+            .sku
+            .as_deref()
+            .is_some_and(|sku| sku.to_lowercase().contains(needle))
         // The code on the box finds the same row: a cashier typing it should
         // see the product before the last digit resolves the scan.
         || product
@@ -791,6 +797,13 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         ui.add_space(SPACING.xs);
         components::search_field(ui, &mut draft.name, "Espresso");
 
+        ui.add_space(SPACING.sm);
+        components::field_label(ui, "Shop code (SKU, optional)");
+        ui.add_space(SPACING.xs);
+        text_field(ui, &mut draft.sku, "Your own code", 150.0).on_hover_text(
+            "A reorder key you own. CSV updates match on it first, then on a barcode.",
+        );
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Sold as");
         ui.add_space(SPACING.xs);
@@ -1057,9 +1070,11 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
 /// import and stays open on anything the till could not read, with the reason
 /// it could not.
 pub fn import_modal(ctx: &egui::Context, state: &mut State) {
+    let mode = state.import.as_ref().map(|draft| draft.mode);
     let Some(draft) = state.import.as_mut() else {
         return;
     };
+    let updating = mode == Some(crate::state::ImportMode::Update);
 
     let mut import = false;
     let mut cancel = false;
@@ -1068,12 +1083,23 @@ pub fn import_modal(ctx: &egui::Context, state: &mut State) {
     modal(ctx, egui::Id::new("pos_import")).show(ctx, |ui| {
         ui.set_width(460.0);
 
-        ui.label(components::semibold("Import products from CSV").size(TYPE.heading));
+        let heading = if updating {
+            "Update products from CSV"
+        } else {
+            "Import products from CSV"
+        };
+        ui.label(components::semibold(heading).size(TYPE.heading));
         components::caption(
             ui,
-            "Rows are read as name, category, price and an optional barcode. Headings \
-             are honoured when present, so a file from the shop's spreadsheet works as is; \
-             prices are read in this till's currency.",
+            if updating {
+                "Each row changes the product whose SKU matches, or whose barcode matches \
+                 when it has no SKU. A blank code or barcode keeps the old one. Stock and \
+                 cost are never touched by a file."
+            } else {
+                "Rows are read as name, category, price and an optional barcode. Headings \
+                 are honoured when present, so a file from the shop's spreadsheet works as is; \
+                 prices are read in this till's currency."
+            },
         );
         components::caption(
             ui,
@@ -1206,6 +1232,7 @@ impl Module for Products {
         let mut new = false;
         let mut track = false;
         let mut import = false;
+        let mut update = false;
         let mut template = false;
         let mut export_visible = false;
         let mut export_all = false;
@@ -1238,6 +1265,18 @@ impl Module for Products {
                         .clicked()
                     {
                         import = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Update from CSV…")
+                        .on_hover_text(
+                            "Change products already here. Rows match on SKU, then barcode; \
+                             stock and cost are never written by a file.",
+                        )
+                        .clicked()
+                    {
+                        update = true;
                         ui.close();
                     }
                     ui.separator();
@@ -1282,7 +1321,10 @@ impl Module for Products {
             state.start_tracking();
         }
         if import {
-            state.start_import_picker();
+            state.start_import_picker(crate::state::ImportMode::Add);
+        }
+        if update {
+            state.start_import_picker(crate::state::ImportMode::Update);
         }
         if export_visible {
             state.start_export(ExportKind::Products);

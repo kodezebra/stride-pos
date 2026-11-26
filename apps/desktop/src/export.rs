@@ -92,6 +92,7 @@ pub fn products_csv(products: &[Product], currency: Currency) -> String {
             "category",
             "price",
             "barcode",
+            "sku",
             "unit",
             "pack_size",
             "pack_price",
@@ -106,6 +107,7 @@ pub fn products_csv(products: &[Product], currency: Currency) -> String {
             product.category.clone(),
             decimal(product.price_minor, currency),
             product.barcode.clone().unwrap_or_default(),
+            product.sku.clone().unwrap_or_default(),
             product.unit_label.clone(),
             product.pack_size.to_string(),
             product
@@ -135,6 +137,7 @@ pub fn template_csv(currency: Currency) -> String {
                 category_id: None,
                 price_minor: 4_500,
                 barcode: None,
+                sku: Some("SUG-1KG".to_owned()),
                 unit_label: "unit".to_owned(),
                 pack_size: 1,
                 pack_price_minor: None,
@@ -160,6 +163,7 @@ pub fn template_csv(currency: Currency) -> String {
                 category_id: None,
                 price_minor: 3_400,
                 barcode: None,
+                sku: Some("BRD-LOAF".to_owned()),
                 unit_label: "unit".to_owned(),
                 pack_size: 1,
                 pack_price_minor: None,
@@ -240,6 +244,7 @@ mod tests {
             category_id: None,
             price_minor,
             barcode: barcode.map(str::to_owned),
+            sku: None,
             unit_label: "unit".to_owned(),
             pack_size: 1,
             pack_price_minor: None,
@@ -282,9 +287,9 @@ mod tests {
         let text = products_csv(&products, ugx());
         assert_eq!(
             text,
-            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n\
-             \"Bread, white\",Bakery,3400,0123,unit,1,,,\n\
-             Milk,Dairy,5000,,unit,1,,,\n"
+            "name,category,price,barcode,sku,unit,pack_size,pack_price,pack_barcode,tiers\n\
+             \"Bread, white\",Bakery,3400,0123,,unit,1,,,\n\
+             Milk,Dairy,5000,,,unit,1,,,\n"
         );
     }
 
@@ -292,7 +297,7 @@ mod tests {
     fn an_empty_catalog_still_names_its_columns() {
         assert_eq!(
             products_csv(&[], ugx()),
-            "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n"
+            "name,category,price,barcode,sku,unit,pack_size,pack_price,pack_barcode,tiers\n"
         );
     }
 
@@ -333,12 +338,12 @@ mod tests {
 
         assert!(
             text.starts_with(
-                "name,category,price,barcode,unit,pack_size,pack_price,pack_barcode,tiers\n"
+                "name,category,price,barcode,sku,unit,pack_size,pack_price,pack_barcode,tiers\n"
             ),
             "the template must lead with the columns the import expects: {text}"
         );
         assert!(
-            text.contains("Sugar 1 kg,Groceries,45.00,,unit,1,,,10:42.00|50:40.00\n"),
+            text.contains("Sugar 1 kg,Groceries,45.00,,SUG-1KG,unit,1,,,10:42.00|50:40.00\n"),
             "the example price and ladder must be the export's own spelling: {text}"
         );
 

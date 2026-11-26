@@ -37,6 +37,9 @@ pub struct Row {
     /// and the import caption says so.
     pub price_minor: i64,
     pub barcode: Option<String>,
+    /// The shop's own code, when the file gives one. `None` when the cell is
+    /// blank; an update keeps the product's old code in that case.
+    pub sku: Option<String>,
     /// What one base unit is called; `unit` when the file says nothing.
     pub unit_label: String,
     /// How many base units one sealed pack holds; `1` when there is no pack.
@@ -113,6 +116,11 @@ pub fn parse(text: &str, currency: Currency) -> (Vec<Row>, Vec<String>) {
             .barcode
             .map(|column| cell(&fields, column))
             .filter(|code| !code.is_empty());
+        let sku = columns
+            .sku
+            .map(|column| cell(&fields, column))
+            .filter(|code| !code.is_empty())
+            .map(|code| code.to_owned());
 
         let unit_label = columns
             .unit_label
@@ -214,6 +222,7 @@ pub fn parse(text: &str, currency: Currency) -> (Vec<Row>, Vec<String>) {
             category,
             price_minor,
             barcode,
+            sku,
             unit_label,
             pack_size,
             pack_price_minor,
@@ -233,6 +242,8 @@ struct Columns {
     /// `None` when there is no barcode column at all, so a file without one
     /// imports cleanly rather than reading a name as a barcode.
     barcode: Option<usize>,
+    /// The shop's own code, when the file names it.
+    sku: Option<usize>,
     /// The name of one base unit, when the file names it.
     unit_label: Option<usize>,
     /// How many base units one sealed pack holds, when the file has packs.
@@ -255,6 +266,7 @@ impl Columns {
             category: 1,
             price: 2,
             barcode: Some(3),
+            sku: None,
             unit_label: None,
             pack_size: None,
             pack_price: None,
@@ -275,6 +287,8 @@ fn is_heading(field: &str) -> bool {
         "retail_price",
         "retail_price_ugx",
         "barcode",
+        "sku",
+        "shop_code",
         "unit",
         "unit_label",
         "pack_size",
@@ -303,6 +317,7 @@ fn columns_from_headings(headings: &[String]) -> Columns {
         category: position(&["category_name", "category"]).unwrap_or(1),
         price: position(&["retail_price_ugx", "retail_price", "price"]).unwrap_or(2),
         barcode: position(&["barcode"]),
+        sku: position(&["sku", "shop_code"]),
         unit_label: position(&["unit_label", "unit"]),
         pack_size: position(&["pack_size"]),
         pack_price: position(&["pack_price", "pack_retail_price"]),
@@ -579,5 +594,19 @@ cost_price_ugx,retail_price_ugx,is_weighted,barcode";
             split_line(" soap ,  loofah ,1500"),
             vec![" soap ", "  loofah ", "1500"]
         );
+    }
+
+    /// The shop's own code has a column of its own, and a blank cell is no
+    /// code — not an empty string that would claim one.
+    #[test]
+    fn a_sku_column_is_read_as_the_shop_code() {
+        let text = "name,category,price,barcode,sku\n\
+                    Tea 100g,Drinks,3000,6001,TEA-100\n\
+                    Coffee 100g,Drinks,3500,6002,";
+        let (rows, errors) = parse(text, ugx());
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rows[0].sku.as_deref(), Some("TEA-100"));
+        assert_eq!(rows[1].sku, None);
     }
 }

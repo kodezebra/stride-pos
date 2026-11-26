@@ -266,6 +266,10 @@ pub struct ProductDto {
     pub price_minor: i64,
     #[serde(default)]
     pub barcode: Option<String>,
+    /// The shop's own reorder key. Absent from a snapshot written by an older
+    /// till, which is why it defaults to `None` rather than failing the pull.
+    #[serde(default)]
+    pub sku: Option<String>,
     pub category: String,
     #[serde(default)]
     pub category_id: Option<i64>,

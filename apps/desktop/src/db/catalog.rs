@@ -19,7 +19,7 @@ use super::*;
 /// that they are gone.
 pub fn products(store: &storage::Store) -> Vec<Product> {
     let mut statement = match store.conn().prepare(
-        "SELECT id, name, price_minor, category, category_id, barcode,
+        "SELECT id, name, price_minor, category, category_id, barcode, sku,
                 unit_label, pack_size, pack_price_minor, pack_barcode, cost_milli
          FROM products WHERE archived = 0 ORDER BY name COLLATE NOCASE",
     ) {
@@ -38,11 +38,12 @@ pub fn products(store: &storage::Store) -> Vec<Product> {
             category: row.get(3)?,
             category_id: row.get(4)?,
             barcode: row.get(5)?,
-            unit_label: row.get(6)?,
-            pack_size: row.get(7)?,
-            pack_price_minor: row.get(8)?,
-            pack_barcode: row.get(9)?,
-            cost_milli: row.get(10)?,
+            sku: row.get(6)?,
+            unit_label: row.get(7)?,
+            pack_size: row.get(8)?,
+            pack_price_minor: row.get(9)?,
+            pack_barcode: row.get(10)?,
+            cost_milli: row.get(11)?,
             tiers: Vec::new(),
         })
     });
@@ -239,19 +240,26 @@ pub fn insert_category(store: &storage::Store, name: &str, sort_order: i64) -> a
 pub fn insert_product(store: &storage::Store, fields: &ProductFields<'_>) -> anyhow::Result<i64> {
     let product = fields.clean()?;
     product.ensure_barcodes_free(store, None)?;
+    if let Some(sku) = product.sku.as_deref() {
+        anyhow::ensure!(
+            !sku_taken(store, sku, None),
+            "another product uses that shop code"
+        );
+    }
 
     let transaction = store.conn().unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO products
-             (name, price_minor, category, category_id, barcode,
+             (name, price_minor, category, category_id, barcode, sku,
               unit_label, pack_size, pack_price_minor, pack_barcode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             product.name,
             fields.price_minor,
             product.category,
             fields.category_id,
             product.barcode,
+            product.sku,
             product.unit_label,
             product.pack_size,
             product.pack_price_minor,
@@ -282,6 +290,12 @@ pub fn update_product(
 ) -> anyhow::Result<()> {
     let product = fields.clean()?;
     product.ensure_barcodes_free(store, Some(id))?;
+    if let Some(sku) = product.sku.as_deref() {
+        anyhow::ensure!(
+            !sku_taken(store, sku, Some(id)),
+            "another product uses that shop code"
+        );
+    }
 
     let existing = store
         .conn()
@@ -312,8 +326,8 @@ pub fn update_product(
     let changed = transaction.execute(
         "UPDATE products
          SET name = ?2, price_minor = ?3, category = ?4, category_id = ?5,
-             barcode = ?6, unit_label = ?7, pack_size = ?8,
-             pack_price_minor = ?9, pack_barcode = ?10
+             barcode = ?6, sku = ?7, unit_label = ?8, pack_size = ?9,
+             pack_price_minor = ?10, pack_barcode = ?11
          WHERE id = ?1",
         rusqlite::params![
             id,
@@ -322,6 +336,7 @@ pub fn update_product(
             product.category,
             fields.category_id,
             product.barcode,
+            product.sku,
             product.unit_label,
             product.pack_size,
             product.pack_price_minor,
@@ -370,6 +385,53 @@ pub fn barcode_taken(store: &storage::Store, barcode: &str, except: Option<i64>)
         .unwrap_or(true)
 }
 
+/// Whether another live product already claims this shop code.
+///
+/// Case-insensitive, like the index and the category name: `AB-12` typed by one
+/// person and `ab-12` by another are the same reorder key.
+pub fn sku_taken(store: &storage::Store, sku: &str, except: Option<i64>) -> bool {
+    store
+        .conn()
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM products
+                  WHERE sku = ?1 COLLATE NOCASE
+                    AND id IS NOT ?2 AND archived = 0
+             )",
+            (sku, except),
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(true)
+}
+
+/// The live product a CSV update row is about, or `None` if it names no row.
+///
+/// SKU wins because it is the shop's own key; a barcode is the fallback for a
+/// catalog that has no SKUs yet. Both barcode columns are searched so a box
+/// code finds the same product the Sell screen would have scanned.
+pub fn find_by_code(
+    store: &storage::Store,
+    sku: Option<&str>,
+    barcode: Option<&str>,
+) -> Option<i64> {
+    store
+        .conn()
+        .query_row(
+            "SELECT id FROM products
+              WHERE archived = 0
+                AND ((?1 IS NOT NULL AND sku = ?1 COLLATE NOCASE)
+                     OR (?2 IS NOT NULL
+                         AND (barcode = ?2 OR pack_barcode = ?2)))
+              ORDER BY id
+              LIMIT 1",
+            (sku, barcode),
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+}
+
 /// The editable facts of a product, as the form and the importer collect them.
 ///
 /// A struct rather than eight positional arguments: two fields are optional
@@ -381,6 +443,8 @@ pub struct ProductFields<'a> {
     pub category: &'a str,
     pub category_id: Option<i64>,
     pub barcode: Option<&'a str>,
+    /// The shop's own code. Blank means the product has no code yet.
+    pub sku: Option<&'a str>,
     pub unit_label: &'a str,
     pub pack_size: i64,
     pub pack_price_minor: Option<i64>,
@@ -398,6 +462,7 @@ pub(super) struct CleanProduct {
     pack_size: i64,
     pack_price_minor: Option<i64>,
     barcode: Option<String>,
+    sku: Option<String>,
     pack_barcode: Option<String>,
     tiers: Vec<PriceTier>,
 }
@@ -433,6 +498,11 @@ impl ProductFields<'_> {
             .map(str::trim)
             .filter(|barcode| !barcode.is_empty())
             .map(str::to_owned);
+        let sku = self
+            .sku
+            .map(str::trim)
+            .filter(|sku| !sku.is_empty())
+            .map(str::to_owned);
 
         // A pack of one is the base unit. Keeping a second price and code for
         // it would be a second name for the same thing.
@@ -462,6 +532,7 @@ impl ProductFields<'_> {
             pack_size: self.pack_size,
             pack_price_minor,
             barcode,
+            sku,
             pack_barcode,
             tiers,
         })
