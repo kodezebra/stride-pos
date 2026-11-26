@@ -43,8 +43,11 @@ keeping what was sold, so an old receipt never changes. Removed products stay
 in the **Archived** list at the bottom of the sidebar and can be restored. A
 manager also sees the
 last cost paid and the margin left at the current price. The **Stock** filter
-above the shelves shows all, low, out or expiring at a glance. Managers and the
-owner manage stock; cashiers work on Sell and Day only.
+above the shelves shows all, low, out or expiring at a glance. A manager can add
+one product to the Restock list from its row, or start a list with everything
+low using **Restock low** in the toolbar; neither writes stock — the trip is
+recorded when it is received. Managers and the owner manage stock; cashiers work
+on Sell and Day only.
 
 **Suppliers** — who the shop buys from: name, contact, phone, email, address and
 notes. Search by any of them, and archive a supplier you no longer use without

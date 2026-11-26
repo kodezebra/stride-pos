@@ -378,6 +378,7 @@ pub(super) enum ProductAction {
     Delete(i64),
     CancelDelete,
     MoveStock { id: i64, name: String, on_hand: i64 },
+    Restock(i64),
     StockHistory { id: i64, name: String },
 }
 
@@ -418,10 +419,10 @@ pub(super) fn product_row(
     ui.horizontal(|ui| {
         ui.set_min_height(52.0);
 
-        // Keep the name clear of the price and row actions. Four 44-point
+        // Keep the name clear of the price and row actions. Five 44-point
         // buttons are the widest case (a tracked product), and the reserve is
         // fixed so the price column does not move when a row gains stock.
-        const ACTIONS_WIDTH: f32 = 352.0;
+        const ACTIONS_WIDTH: f32 = 404.0;
         let text_width = (ui.available_width() - ACTIONS_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
             egui::vec2(text_width, 0.0),
@@ -492,6 +493,13 @@ pub(super) fn product_row(
                             id: product.id,
                             name: product.name.clone(),
                         });
+                    }
+                    if can_manage
+                        && components::icon_button(ui, Icon::CART, 44.0)
+                            .on_hover_text("Add to restock list — stock changes only when received")
+                            .clicked()
+                    {
+                        action = Some(ProductAction::Restock(product.id));
                     }
                     if can_manage
                         && components::icon_button(ui, move_icon(), 44.0)
@@ -1319,12 +1327,13 @@ impl Module for Products {
             .iter()
             .filter(|product| stock_item(&state.stock, product.id).is_none())
             .count();
-        let can_track = !state.show_archived
-            && state.permits(crate::auth::Permission::ManageInventory)
-            && untracked > 0;
+        let can_restock =
+            !state.show_archived && state.permits(crate::auth::Permission::ManageInventory);
+        let can_track = can_restock && untracked > 0;
 
         let mut new = false;
         let mut track = false;
+        let mut restock_low = false;
         let mut import = false;
         let mut update = false;
         let mut template = false;
@@ -1349,6 +1358,13 @@ impl Module for Products {
                 }
                 if can_track && actions::secondary_compact(ui, "Track stock").clicked() {
                     track = true;
+                }
+                if can_restock
+                    && actions::secondary_compact(ui, "Restock low")
+                        .on_hover_text("Start a list with everything at or below its warning line")
+                        .clicked()
+                {
+                    restock_low = true;
                 }
                 // Import and both exports are setup actions, not everyday ones.
                 // One menu keeps them a click away without letting four
@@ -1419,6 +1435,9 @@ impl Module for Products {
         }
         if track {
             state.start_tracking();
+        }
+        if restock_low {
+            state.restock_low_stock();
         }
         if import {
             state.start_import_picker(crate::state::ImportMode::Add);
@@ -1632,6 +1651,7 @@ impl Module for Products {
             Some(ProductAction::AskDelete(id)) => state.product_delete = Some(id),
             Some(ProductAction::Delete(id)) => state.delete_product(id),
             Some(ProductAction::CancelDelete) => state.product_delete = None,
+            Some(ProductAction::Restock(id)) => state.restock_product(id),
             Some(ProductAction::MoveStock { id, name, on_hand }) => {
                 state.start_stock_move(id, &name, on_hand, StockKind::Receive);
             }
