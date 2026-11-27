@@ -288,6 +288,26 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
     // Assemble them once, before the draft is borrowed mutably; the picker's
     // matches still follow the live search box, but read this one snapshot.
     let derived = derive_purchase(state);
+    // The margin belongs beside the cost while the price is being decided,
+    // not on a report later. Computed before the draft is borrowed mutably.
+    let margins: Vec<Option<String>> = state
+        .purchase_editor
+        .as_ref()
+        .map(|draft| {
+            draft
+                .lines
+                .iter()
+                .map(|line| {
+                    let cost = money::Money::parse(line.cost.trim(), currency)
+                        .ok()
+                        .filter(|money| money.minor() > 0)
+                        .map(|money| money.minor());
+                    let pack_size = line.pack_size.trim().parse::<i64>().unwrap_or(1).max(1);
+                    line_margin(state, Some(line.product_id), cost, pack_size)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let Some(draft) = state.purchase_editor.as_mut() else {
         return;
@@ -355,7 +375,7 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
 
         ui.add_space(SPACING.md);
         ui.horizontal(|ui| {
-            components::field_label(ui, "To buy");
+            components::field_label(ui, "Lines");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if derived.has_low_stock_to_add()
                     && actions::secondary_compact(ui, "Add low stock").clicked()
@@ -364,6 +384,14 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                 }
             });
         });
+        components::caption(
+            ui,
+            if draft.id.is_some() {
+                "Change a quantity to what came home before you mark the list received."
+            } else {
+                "Add what you mean to buy. Quantities can change when the goods arrive."
+            },
+        );
         ui.add_space(SPACING.xs);
 
         // Only this pane scrolls. The total sits with the lines so a long list
@@ -388,12 +416,18 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                         // says so with the one symbol that reads as arithmetic:
                         // 12 x 2,000. The name keeps whatever is left.
                         let (_, removed) = egui::containers::Sides::new()
-                            .height(44.0)
+                            .height(58.0)
                             .shrink_left()
                             .show(
                                 ui,
                                 |ui| {
                                     ui.label(components::semibold(&line.name).size(TYPE.body));
+                                    if let Some(planned) = line.planned_qty {
+                                        components::caption(ui, &format!("Planned {planned}"));
+                                    }
+                                    if let Some(margin) = margins.get(index).and_then(Option::as_deref) {
+                                        components::caption(ui, margin);
+                                    }
                                 },
                                 |ui| {
                                     let mut removed = false;
@@ -403,12 +437,12 @@ pub(super) fn purchase_page(ui: &mut egui::Ui, state: &mut State) {
                                     {
                                         removed = true;
                                     }
-                                    text_field(ui, &mut line.cost, "Cost", 110.0)
+                                    text_field(ui, &mut line.cost, "Unit cost", 110.0)
                                         .on_hover_text("Cost of one purchase unit");
                                     components::caption(ui, "×");
                                     text_field(ui, &mut line.qty, "Qty", 70.0)
-                                        .on_hover_text("How many purchase units");
-                                    components::caption(ui, "units/pack");
+                                        .on_hover_text("How many purchase units — packs or loose");
+                                    components::caption(ui, "per pack");
                                     text_field(ui, &mut line.pack_size, "1", 54.0)
                                         .on_hover_text("Base units in one purchase unit");
                                     removed
@@ -680,12 +714,16 @@ pub(super) fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
 /// shop can spot a bad price while the delivery note is still in hand. A line
 /// bought as a pack carries a pack cost, so it is divided down to one base
 /// unit before it is set beside the shelf price.
-fn receive_margin(state: &State, line: &crate::db::PurchaseLine) -> Option<String> {
-    let product = line
-        .product_id
-        .and_then(|id| state.products.iter().find(|product| product.id == id))?;
-    let pack_cost = line.unit_cost_minor?;
-    let pack_size = line.pack_size.max(1);
+fn line_margin(
+    state: &State,
+    product_id: Option<i64>,
+    pack_cost: Option<i64>,
+    pack_size: i64,
+) -> Option<String> {
+    let product =
+        product_id.and_then(|id| state.products.iter().find(|product| product.id == id))?;
+    let pack_cost = pack_cost?;
+    let pack_size = pack_size.max(1);
     let cost = (pack_cost + pack_size / 2) / pack_size;
     if product.price_minor == 0 {
         return None;
@@ -696,6 +734,10 @@ fn receive_margin(state: &State, line: &crate::db::PurchaseLine) -> Option<Strin
         "Sells at {} · {margin}% margin",
         state.money(price)
     ))
+}
+
+fn receive_margin(state: &State, line: &crate::db::PurchaseLine) -> Option<String> {
+    line_margin(state, line.product_id, line.unit_cost_minor, line.pack_size)
 }
 
 /// What came home on one line, in the fewest words that are still true.

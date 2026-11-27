@@ -358,8 +358,8 @@ The list now reads **Planned**. Nothing has moved in stock — a plan is intent,
 ### 3A.2 Receive what came back
 
 1. **Restock** → open the list → the page opens ready to count in.
-2. Each row starts at the planned quantity. Type what actually arrived.
-3. Enter the **unit cost** if you know it. This becomes the product's last known cost, and profit on future sales uses it.
+2. Each row starts at the planned quantity, with **Planned N** under the name. Type what actually arrived — the caption stays so you can see what changed.
+3. Enter the **unit cost** if you know it. The selling price and margin appear under the name as you type. The cost becomes the product's last known cost. Set **per pack** when a purchase unit holds several base units.
 4. For a perishable product, type the **Expiry** date printed on the pack. It cannot be left blank on a delivery. Two different dates on the same delivery are two rows — add the product twice.
 5. Set a line you did not find to **0**. It stays on the record as not bought.
 6. Bought something extra? Add it from the search at the bottom of the page with its quantity and cost.

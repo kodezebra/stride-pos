@@ -658,6 +658,7 @@ fn purchase_draft(
                 product_id,
                 name: name.to_owned(),
                 qty: "1".to_owned(),
+                planned_qty: None,
                 cost: String::new(),
                 pack_size: "1".to_owned(),
                 expires_on: String::new(),
