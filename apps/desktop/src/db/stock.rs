@@ -120,6 +120,65 @@ pub fn track_product(
     Ok(())
 }
 
+/// Record the last price paid for one unit of a product.
+///
+/// A delivery recorded straight from a product's stock action never passes
+/// through a restock list, so without this it would leave no cost behind and
+/// margin reports would read it as free goods. The cost lives on the product
+/// as thousandths of a minor unit, the same precision purchase lines use.
+pub fn set_last_cost(
+    store: &storage::Store,
+    product_id: i64,
+    cost_minor: i64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(cost_minor >= 0, "a unit cost cannot be negative");
+    let cost_milli = cost_minor
+        .checked_mul(1000)
+        .context("that unit cost is out of range")?;
+    let changed = store.conn().execute(
+        "UPDATE products SET cost_milli = ?2 WHERE id = ?1 AND archived = 0",
+        (product_id, cost_milli),
+    )?;
+    anyhow::ensure!(changed == 1, "that product is no longer in the catalog");
+    Ok(())
+}
+
+/// Set the low-stock warning line, and optionally the target, for several
+/// products at once.
+///
+/// The line used to be a one-time choice at "Track stock" with no way back.
+/// Square edits it from the stock list, because a shop's sense of "low" changes
+/// with demand; a line that cannot be corrected makes the Low stock filter a
+/// guess the owner has learned to ignore.
+pub fn set_warning_lines(
+    store: &storage::Store,
+    product_ids: &[i64],
+    low_stock: i64,
+    target_stock: Option<i64>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!product_ids.is_empty(), "select a product first");
+    anyhow::ensure!(low_stock >= 0, "the low-stock level cannot be negative");
+    anyhow::ensure!(
+        target_stock.is_none_or(|target| target >= low_stock),
+        "the target cannot be below the low-stock level"
+    );
+
+    let transaction = store.conn().unchecked_transaction()?;
+    for &product_id in product_ids {
+        let changed = transaction.execute(
+            "UPDATE products SET low_stock = ?2, target_stock = ?3
+              WHERE id = ?1 AND tracked = 1 AND archived = 0",
+            (product_id, low_stock, target_stock),
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "one of the selected products is no longer tracked"
+        );
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Mark a tracked product as perishable, or clear that.
 ///
 /// Perishability is not part of [`ProductFields`]: like tracking, it is a
@@ -561,6 +620,95 @@ pub fn record_stock_movement(
         ),
     )?;
     Ok(())
+}
+
+/// Apply a batch of corrections from one physical count.
+///
+/// All of them land in one transaction: a count is a single act in the shop,
+/// and a half-applied count is worse than one that fails outright.
+pub fn apply_counts(
+    store: &storage::Store,
+    counts: &[(i64, i64)],
+    user_id: Option<&str>,
+) -> anyhow::Result<usize> {
+    let transaction = store.conn().unchecked_transaction()?;
+    for &(product_id, delta) in counts {
+        anyhow::ensure!(
+            delta != 0,
+            "a count that matches the ledger is not a movement"
+        );
+        let tracked: Option<bool> = transaction
+            .query_row(
+                "SELECT tracked FROM products WHERE id = ?1 AND archived = 0",
+                [product_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            tracked == Some(true),
+            "a counted product is no longer tracked"
+        );
+        transaction.execute(
+            "INSERT INTO stock_movements (product_id, delta, kind, note, user_id)
+             VALUES (?1, ?2, 'adjust', 'Counted', ?3)",
+            (product_id, delta, user_id),
+        )?;
+    }
+    transaction.commit()?;
+    Ok(counts.len())
+}
+
+/// The shop-wide stock ledger, newest first, with the product name attached.
+///
+/// Filters are built from a bounded choice of days and the fixed `StockKind`
+/// keys, never from typed text. Capped because this is an answer to "what
+/// happened lately?", not an infinite report.
+pub fn all_stock_movements(
+    store: &storage::Store,
+    days: Option<i64>,
+    reason: Option<StockKind>,
+) -> Vec<GlobalStockMovement> {
+    let since = days
+        .map(|days| format!(" AND m.created_at >= datetime('now','localtime','-{days} days')"))
+        .unwrap_or_default();
+    let kind = reason
+        .map(|kind| format!(" AND m.kind = '{}'", kind.key()))
+        .unwrap_or_default();
+    let sql = format!(
+        "SELECT m.id, p.name, m.delta, m.kind, m.note,
+                strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name
+           FROM stock_movements m
+           JOIN products p ON p.id = m.product_id
+           LEFT JOIN users u ON u.id = m.user_id
+          WHERE 1 = 1 {since} {kind}
+          ORDER BY m.id DESC LIMIT 500"
+    );
+    let mut statement = match store.conn().prepare(&sql) {
+        Ok(statement) => statement,
+        Err(err) => {
+            tracing::warn!(error = %err, "stock history prepare failed");
+            return Vec::new();
+        }
+    };
+    let rows = statement.query_map([], |row| {
+        let kind: String = row.get(3)?;
+        Ok(GlobalStockMovement {
+            id: row.get(0)?,
+            product_name: row.get(1)?,
+            delta: row.get(2)?,
+            kind: StockKind::from_key(&kind).unwrap_or(StockKind::Adjust),
+            note: row.get(4)?,
+            created_at: row.get(5)?,
+            user: row.get(6)?,
+        })
+    });
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "stock history query failed");
+            Vec::new()
+        }
+    }
 }
 
 /// A product's movements, newest first.

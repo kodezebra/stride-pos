@@ -86,7 +86,7 @@ fn product_detail(
     {
         lines.push(format!(
             "Pack of {}: {}",
-            product.pack_size,
+            crate::modules::catalog::count_label(product.pack_size, &product.unit_label),
             state.money(price)
         ));
     }
@@ -1328,7 +1328,7 @@ pub(super) fn sell_toolbar(ui: &mut egui::Ui, state: &mut State) {
                         CUSTOMER_MENU_WIDTH,
                         state.customer.is_none(),
                         "Walk-in".to_owned(),
-                        "No named customer · retail price".to_owned(),
+                        "No named customer · selling price".to_owned(),
                     )
                     .clicked()
                     {

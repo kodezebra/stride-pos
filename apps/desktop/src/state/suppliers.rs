@@ -96,6 +96,12 @@ pub struct StockMoveDraft {
     pub on_hand: i64,
     pub kind: crate::db::StockKind,
     pub quantity: String,
+    /// What one unit cost on this delivery, as typed. Only meaningful when
+    /// stock is being received; the restock-list path has its own cost field.
+    pub cost: String,
+    /// The shelf price, carried in so the form can show margin as the cost is
+    /// typed rather than sending the operator to the catalog to look it up.
+    pub selling_price_minor: i64,
     pub note: String,
     /// The date printed on the pack, as typed. Only a delivery, a return or
     /// stock pulled off a dated bucket carries one.
@@ -115,6 +121,7 @@ impl StockMoveDraft {
         kind: crate::db::StockKind,
         perishable: bool,
         shelf_life_days: Option<i64>,
+        selling_price_minor: i64,
     ) -> Self {
         Self {
             product_id,
@@ -122,6 +129,8 @@ impl StockMoveDraft {
             on_hand,
             kind,
             quantity: String::new(),
+            cost: String::new(),
+            selling_price_minor,
             note: String::new(),
             expires_on: String::new(),
             perishable,
@@ -135,6 +144,39 @@ impl StockMoveDraft {
 pub struct StockHistory {
     pub product_name: String,
     pub movements: Vec<crate::db::StockMovement>,
+}
+
+/// A single pass over the shelves: count what is there, review the differences,
+/// then write them all at once. No full-count zeroing — an un walked row is
+/// untouched, which is the safe default for a small shop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CountStage {
+    Counting,
+    Review,
+}
+
+pub struct CountRow {
+    pub product_id: i64,
+    pub name: String,
+    pub unit_label: String,
+    pub on_hand: i64,
+    pub counted: String,
+}
+
+pub struct CountDraft {
+    /// Which shelf is being counted, or `None` for all tracked products.
+    pub category: Option<String>,
+    pub rows: Vec<CountRow>,
+    pub stage: CountStage,
+    pub error: Option<String>,
+}
+
+/// The shop-wide ledger filters. Days: 0 = all, 1 = 7, 2 = 30. Reason index
+/// zero is "all reasons"; the rest index `StockKind::ALL`.
+pub struct GlobalHistoryDraft {
+    pub days: usize,
+    pub reason: usize,
+    pub movements: Vec<crate::db::GlobalStockMovement>,
 }
 
 impl State {
@@ -372,6 +414,11 @@ impl State {
         kind: crate::db::StockKind,
     ) {
         let item = self.stock.iter().find(|item| item.product_id == product_id);
+        let selling_price_minor = self
+            .products
+            .iter()
+            .find(|product| product.id == product_id)
+            .map_or(0, |product| product.price_minor);
         self.stock_move = Some(StockMoveDraft::new(
             product_id,
             product_name,
@@ -379,6 +426,7 @@ impl State {
             kind,
             item.is_some_and(|item| item.perishable),
             item.and_then(|item| item.shelf_life_days),
+            selling_price_minor,
         ));
         self.stock_editor = None;
         self.stock_history = None;
@@ -397,6 +445,7 @@ impl State {
             on_hand,
             kind,
             quantity_text,
+            cost_text,
             note,
             expires_text,
             perishable,
@@ -407,6 +456,7 @@ impl State {
                 draft.on_hand,
                 draft.kind,
                 draft.quantity.trim().to_owned(),
+                draft.cost.trim().to_owned(),
                 draft.note.clone(),
                 draft.expires_on.trim().to_owned(),
                 draft.perishable,
@@ -480,6 +530,18 @@ impl State {
                 .stock_move_error("This product is perishable; date the delivery from the pack.");
         }
 
+        // A delivery whose cost is unknown is still recorded. A cost that was
+        // typed but cannot be read is refused, so a half-entered amount never
+        // silently becomes "free goods" in the margin reports.
+        let cost_minor = if kind == crate::db::StockKind::Receive && !cost_text.is_empty() {
+            match money::Money::parse(&cost_text, self.currency) {
+                Ok(money) if money.minor() >= 0 => Some(money.minor()),
+                _ => return self.stock_move_error("Unit cost must be a positive amount."),
+            }
+        } else {
+            None
+        };
+
         match crate::db::record_stock_movement(
             &self.store,
             product_id,
@@ -491,13 +553,183 @@ impl State {
         ) {
             Ok(()) => {
                 self.stock_move = None;
+                match cost_minor {
+                    Some(cost) => match crate::db::set_last_cost(&self.store, product_id, cost) {
+                        Ok(()) => {
+                            self.notice = Some(format!(
+                                "{} recorded for {product_name}, with the unit cost saved.",
+                                kind.label()
+                            ))
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, "saving the unit cost failed");
+                            self.notice = Some(format!(
+                                "{} recorded, but the unit cost was not saved: {error}",
+                                kind.label()
+                            ));
+                        }
+                    },
+                    None => {
+                        self.notice =
+                            Some(format!("{} recorded for {product_name}.", kind.label()));
+                    }
+                }
                 self.reload_stock();
-                self.notice = Some(format!("{} recorded for {product_name}.", kind.label()));
             }
             Err(error) => {
                 tracing::error!(error = %error, "recording a stock movement failed");
                 self.stock_move_error(format!("Could not record it: {error}"));
             }
+        }
+    }
+
+    /// Start a physical count over the tracked products in one category, or
+    /// all of them. Counted fields start blank so an untouched row is never
+    /// mistaken for a count of zero.
+    pub fn open_count(&mut self, category: Option<String>) {
+        let mut rows: Vec<CountRow> = self
+            .stock
+            .iter()
+            .filter(|item| {
+                category
+                    .as_deref()
+                    .is_none_or(|shelf| item.category == shelf)
+            })
+            .map(|item| CountRow {
+                product_id: item.product_id,
+                name: item.name.clone(),
+                unit_label: item.unit_label.clone(),
+                on_hand: item.on_hand,
+                counted: String::new(),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.count = Some(CountDraft {
+            category,
+            rows,
+            stage: CountStage::Counting,
+            error: None,
+        });
+        self.notice = None;
+    }
+
+    /// Change the count's category without losing counts already typed.
+    pub fn recount_category(&mut self, category: Option<String>) {
+        let typed: std::collections::HashMap<i64, String> = self
+            .count
+            .take()
+            .map(|draft| {
+                draft
+                    .rows
+                    .into_iter()
+                    .filter(|row| !row.counted.trim().is_empty())
+                    .map(|row| (row.product_id, row.counted))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.open_count(category);
+        if let Some(draft) = self.count.as_mut() {
+            for row in &mut draft.rows {
+                if let Some(counted) = typed.get(&row.product_id) {
+                    row.counted = counted.clone();
+                }
+            }
+        }
+    }
+
+    /// The corrections this count would write. Blank and matching rows are
+    /// left alone, so counting a whole shelf does not churn the ledger.
+    pub fn count_deltas(&self) -> Vec<(i64, i64)> {
+        self.count
+            .as_ref()
+            .map(|draft| {
+                draft
+                    .rows
+                    .iter()
+                    .filter_map(|row| {
+                        let counted = row.counted.trim().parse::<i64>().ok()?;
+                        let delta = counted - row.on_hand;
+                        (delta != 0).then_some((row.product_id, delta))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn review_count(&mut self) {
+        let Some(draft) = self.count.as_ref() else {
+            return;
+        };
+        for row in &draft.rows {
+            let typed = row.counted.trim();
+            if !typed.is_empty() && typed.parse::<i64>().map_or(true, |count| count < 0) {
+                return self.count_error("Every count must be a whole number of zero or more.");
+            }
+        }
+        if self.count_deltas().is_empty() {
+            return self.count_error("No count differs from the till. Nothing to change.");
+        }
+        if let Some(draft) = self.count.as_mut() {
+            draft.stage = CountStage::Review;
+            draft.error = None;
+        }
+    }
+
+    /// Write every correction in one transaction. A part-written count would
+    /// be worse than a failed one: the shop cannot tell which shelves it did.
+    pub fn confirm_count(&mut self) {
+        let deltas = self.count_deltas();
+        let user_id = self.session.as_ref().map(|session| session.user_id.clone());
+        match crate::db::apply_counts(&self.store, &deltas, user_id.as_deref()) {
+            Ok(applied) => {
+                self.count = None;
+                self.reload_stock();
+                self.notice = Some(format!(
+                    "Count applied to {applied} {}.",
+                    if applied == 1 { "product" } else { "products" }
+                ));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "applying a stock count failed");
+                self.count_error(format!("Could not apply the count: {error}"));
+            }
+        }
+    }
+
+    fn count_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.count.as_mut() {
+            draft.error = Some(message.into());
+        }
+    }
+
+    /// Open the shop-wide ledger with no filters applied.
+    pub fn open_global_history(&mut self) {
+        self.global_history = Some(GlobalHistoryDraft {
+            days: 0,
+            reason: 0,
+            movements: Vec::new(),
+        });
+        self.reload_global_history();
+    }
+
+    /// Re-read the ledger after a filter changes.
+    pub fn reload_global_history(&mut self) {
+        let Some(draft) = self.global_history.as_ref() else {
+            return;
+        };
+        let days = match draft.days {
+            1 => Some(7),
+            2 => Some(30),
+            _ => None,
+        };
+        let reason = if draft.reason == 0 {
+            None
+        } else {
+            crate::db::StockKind::ALL.get(draft.reason - 1).copied()
+        };
+        let movements = crate::db::all_stock_movements(&self.store, days, reason);
+        if let Some(draft) = self.global_history.as_mut() {
+            draft.movements = movements;
         }
     }
 

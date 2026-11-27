@@ -446,6 +446,7 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
 
 /// One manual movement: receive, a customer return, waste, or an adjustment.
 pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
+    let currency = state.currency;
     let Some(draft) = state.stock_move.as_mut() else {
         return;
     };
@@ -481,13 +482,36 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
         text_field(
             ui,
             &mut draft.quantity,
-            if draft.kind == StockKind::Adjust {
-                "Counted quantity"
-            } else {
-                "Quantity"
-            },
+            movement_quantity_label(draft.kind),
             160.0,
         );
+
+        // Square shows Price, Unit Cost and Profit Margin together at the
+        // point of receiving. Here the price is already on the product, so
+        // typing the cost is enough to show the margin — no trip to a report.
+        if draft.kind == StockKind::Receive {
+            ui.add_space(SPACING.md);
+            components::field_label(ui, &format!("Unit cost ({}, optional)", currency.code()));
+            ui.add_space(SPACING.xs);
+            text_field(ui, &mut draft.cost, "0", 130.0)
+                .on_hover_text("What one unit cost you on this delivery.");
+            if let Ok(cost) = money::Money::parse(draft.cost.trim(), currency)
+                && cost.minor() >= 0
+                && draft.selling_price_minor > 0
+            {
+                let price = draft.selling_price_minor;
+                let margin = ((price - cost.minor()) * 100 + price / 2) / price;
+                components::caption(
+                    ui,
+                    &format!(
+                        "Selling at {} · {margin}% margin at that cost.",
+                        money::Money::new(price, currency).format()
+                    ),
+                );
+            } else {
+                components::caption(ui, "Used for margin and profit reports.");
+            }
+        }
 
         // A date only exists on stock that arrived or left on a specific
         // batch. An adjustment is a correction to a count, not a delivery.
@@ -582,10 +606,10 @@ pub(super) fn movement_hint(kind: StockKind) -> &'static str {
 }
 
 pub(super) fn movement_quantity_label(kind: StockKind) -> &'static str {
-    if kind == StockKind::Adjust {
-        "Counted quantity"
-    } else {
-        "Quantity"
+    match kind {
+        StockKind::Adjust => "Counted quantity",
+        StockKind::Receive => "Number received",
+        _ => "Quantity",
     }
 }
 
@@ -690,6 +714,304 @@ pub(super) fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovemen
     });
     components::divider(ui);
 }
+/// A single count over the shelf, with a variance review before anything is
+/// written. Cycle counts, not full counts: an un counted row is untouched.
+pub fn count_modal(ctx: &egui::Context, state: &mut State) {
+    if state.count.is_none() {
+        return;
+    }
+    let stage = state.count.as_ref().expect("checked above").stage;
+    let categories = state.categories.clone();
+    let category = state
+        .count
+        .as_ref()
+        .and_then(|draft| draft.category.clone())
+        .unwrap_or_else(|| "All products".to_owned());
+    let change_count = state.count_deltas().len();
+    let mut new_category: Option<Option<String>> = None;
+    let mut review = false;
+    let mut back = false;
+    let mut confirm = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_stock_count")).show(ctx, |ui| {
+        ui.set_width(640.0);
+        ui.label(components::semibold("Count stock").size(TYPE.heading));
+        components::caption(
+            ui,
+            "Count what is on the shelf. Leave a row blank and the till keeps its number.",
+        );
+
+        let Some(draft) = state.count.as_mut() else {
+            return;
+        };
+
+        if stage == crate::state::CountStage::Counting {
+            ui.add_space(SPACING.md);
+            ui.horizontal(|ui| {
+                components::field_label(ui, "Category");
+                egui::ComboBox::from_id_salt("pos_count_category")
+                    .width(200.0)
+                    .selected_text(&category)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(draft.category.is_none(), "All products")
+                            .clicked()
+                        {
+                            new_category = Some(None);
+                            ui.close();
+                        }
+                        for shelf in &categories {
+                            let selected = draft.category.as_deref() == Some(shelf.name.as_str());
+                            if ui.selectable_label(selected, &shelf.name).clicked() {
+                                new_category = Some(Some(shelf.name.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(SPACING.sm);
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    if draft.rows.is_empty() {
+                        components::caption(ui, "No tracked products in this category.");
+                    }
+                    for row in &mut draft.rows {
+                        let name = if row.unit_label == "unit" {
+                            row.name.clone()
+                        } else {
+                            format!("{} ({})", row.name, row.unit_label)
+                        };
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(34.0);
+                            ui.label(components::semibold(&name).size(TYPE.body));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    text_field(ui, &mut row.counted, "—", 90.0)
+                                        .on_hover_text("What you counted on the shelf");
+                                    components::caption(ui, &format!("{} on hand", row.on_hand));
+                                },
+                            );
+                        });
+                        components::divider(ui);
+                    }
+                });
+        } else {
+            ui.add_space(SPACING.md);
+            let changes: Vec<_> = draft
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    let counted = row.counted.trim().parse::<i64>().ok()?;
+                    let delta = counted - row.on_hand;
+                    (delta != 0).then_some((row, counted, delta))
+                })
+                .collect();
+            components::caption(ui, "Review the differences before they are written.");
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for (row, counted, delta) in changes {
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(34.0);
+                            ui.label(components::semibold(&row.name).size(TYPE.body));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let sign = if delta > 0 { "+" } else { "" };
+                                    components::caption(
+                                        ui,
+                                        &format!("{} → {counted} ({sign}{delta})", row.on_hand),
+                                    );
+                                },
+                            );
+                        });
+                        components::divider(ui);
+                    }
+                });
+        }
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        actions::footer(ui, |ui| {
+            if stage == crate::state::CountStage::Counting {
+                if actions::primary(ui, "Review counts").clicked() {
+                    review = true;
+                }
+            } else {
+                if actions::primary(ui, &format!("Confirm {change_count} changes")).clicked() {
+                    confirm = true;
+                }
+                if actions::secondary(ui, "Back").clicked() {
+                    back = true;
+                }
+            }
+            if actions::secondary(ui, "Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if let Some(shelf) = new_category {
+        state.recount_category(shelf);
+    }
+    if review {
+        state.review_count();
+    }
+    if back {
+        if let Some(draft) = state.count.as_mut() {
+            draft.stage = crate::state::CountStage::Counting;
+            draft.error = None;
+        }
+    }
+    if confirm {
+        state.confirm_count();
+    }
+    if cancel {
+        state.count = None;
+    }
+}
+
+/// The shop-wide ledger with reason and date filters. Built as a modal rather
+/// than another tab: it answers one question and leaves the catalog in place.
+pub fn global_history_modal(ctx: &egui::Context, state: &mut State) {
+    if state.global_history.is_none() {
+        return;
+    }
+    let mut close = false;
+    let mut days = None;
+    let mut reason = None;
+
+    modal(ctx, egui::Id::new("pos_global_history")).show(ctx, |ui| {
+        ui.set_width(680.0);
+        ui.label(components::semibold("Stock history").size(TYPE.heading));
+        components::caption(
+            ui,
+            "Every change to stock, newest first. Sales appear as negative.",
+        );
+
+        let Some(draft) = state.global_history.as_mut() else {
+            return;
+        };
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+            ui.vertical(|ui| {
+                components::field_label(ui, "When");
+                egui::ComboBox::from_id_salt("pos_history_days")
+                    .width(140.0)
+                    .selected_text(["All time", "Last 7 days", "Last 30 days"][draft.days.min(2)])
+                    .show_ui(ui, |ui| {
+                        for (index, label) in ["All time", "Last 7 days", "Last 30 days"]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            if ui.selectable_label(draft.days == index, label).clicked() {
+                                days = Some(index);
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+            ui.vertical(|ui| {
+                components::field_label(ui, "Reason");
+                let labels = reason_labels();
+                egui::ComboBox::from_id_salt("pos_history_reason")
+                    .width(160.0)
+                    .selected_text(labels[draft.reason.min(labels.len() - 1)].to_owned())
+                    .show_ui(ui, |ui| {
+                        for (index, label) in labels.iter().enumerate() {
+                            if ui.selectable_label(draft.reason == index, *label).clicked() {
+                                reason = Some(index);
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+        });
+
+        ui.add_space(SPACING.sm);
+        let (added, removed) = draft
+            .movements
+            .iter()
+            .fold((0_i64, 0_i64), |(up, down), row| {
+                if row.delta > 0 {
+                    (up + row.delta, down)
+                } else {
+                    (up, down + row.delta)
+                }
+            });
+        components::caption(ui, &format!("{added} in · {removed} out on screen."));
+
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                if draft.movements.is_empty() {
+                    components::caption(ui, "Nothing matches these filters.");
+                }
+                for movement in &draft.movements {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(34.0);
+                        ui.label(components::semibold(&movement.product_name).size(TYPE.body));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            components::caption(ui, &movement.created_at);
+                            let sign = if movement.delta > 0 { "+" } else { "" };
+                            components::caption(ui, &format!("{sign}{}", movement.delta));
+                            components::caption(ui, movement.kind.label());
+                        });
+                    });
+                    if let Some(note) = &movement.note {
+                        components::caption(ui, note);
+                    }
+                    components::divider(ui);
+                }
+            });
+
+        actions::footer(ui, |ui| {
+            if actions::secondary(ui, "Close").clicked() {
+                close = true;
+            }
+        });
+    });
+
+    if let Some(value) = days {
+        if let Some(draft) = state.global_history.as_mut() {
+            draft.days = value;
+        }
+        state.reload_global_history();
+    }
+    if let Some(value) = reason {
+        if let Some(draft) = state.global_history.as_mut() {
+            draft.reason = value;
+        }
+        state.reload_global_history();
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) || close {
+        state.global_history = None;
+    }
+}
+
+/// The reason choices for the global ledger, with "all reasons" at zero.
+fn reason_labels() -> Vec<&'static str> {
+    let mut labels = vec!["All reasons"];
+    labels.extend(
+        crate::db::StockKind::ALL
+            .into_iter()
+            .map(|kind| kind.label()),
+    );
+    labels
+}
+
 impl Module for Suppliers {
     fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut State) {
         components::section_title(ui, "Directory");

@@ -277,22 +277,26 @@ The product now shows its on-hand count beside its name in Catalog. Every future
 
 ### 3.3 Record a movement
 
-1. `F3` → find the product → **Move stock**.
+1. `F3` → find the product → **click its on-hand number**. The same form opens
+   from the row's **⋯** menu under **Receive, count or remove stock**.
 2. Choose **What happened**.
 
 | Choice | Use it when | Effect |
 |---|---|---|
-| **Received** | A supplier delivery arrives | Adds the quantity; a perishable product needs the date on the pack |
+| **Received** | A supplier delivery arrives | Adds the **number received**; a perishable product needs the date on the pack |
 | **Customer return** | A customer brings goods back | Adds the quantity |
 | **Waste** | Spoiled, broken, or unsellable | Subtracts the quantity |
-| **Adjustment** | A physical count differs | Sets stock to the counted number |
+| **Counted** | A physical count differs | Sets stock to the counted number |
 
-3. Type the **Quantity**. For an adjustment, type the **counted quantity**, not the difference.
+3. Type the count. A delivery asks for **Number received**; a correction asks for
+   **Counted quantity**. For a delivery you can also type **Unit cost** — the
+   margin at the selling price appears underneath as you type it, and the cost
+   is saved for later reports.
 4. If the product is perishable, type the **Expiry date** printed on the pack. It is required for a delivery, optional for a return or waste. The till will not take a date that does not exist (`31/02`); a past date is allowed and flagged.
 5. Type a **Note** — invoice number, delivery date, or reason.
 6. Press **Record**.
 
-**Adjustment example:** the till says 12 sugar, you count 9. Choose **Adjustment**, type `9`, and record. The till stores a difference of −3. If you type the number the till already has, it tells you they match and keeps the form open.
+**Counted example:** the till says 12 sugar, you count 9. Choose **Counted**, type `9`, and record. The till stores a difference of −3. If you type the number the till already has, it tells you they match and keeps the form open.
 
 ### 3.4 History and filters
 
@@ -603,7 +607,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* Acme delivers 24 tea, invoice `INV-104`.
 
-*Do:* **Move stock** → **Received** → 24 → note `INV-104`.
+*Do:* click the count → **Received** → **Number received** `24` → note `INV-104`.
 
 *Check:* Tea rises by 24. The history shows +24, your name, and the note.
 
@@ -611,7 +615,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* The till says 12 of a product; you count 9.
 
-*Do:* **Move stock** → **Adjustment** → counted quantity 9.
+*Do:* click the count → **Counted** → counted quantity 9.
 
 *Check:* The count becomes 9 and the history shows −3. If you type the number the till already has, it says they match and does not record.
 
@@ -619,7 +623,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* Two toothpaste tubes are crushed and cannot be sold.
 
-*Do:* **Move stock** → **Waste** → 2 → note `Crushed in delivery`.
+*Do:* click the count → **Waste** → 2 → note `Crushed in delivery`.
 
 *Check:* Toothpaste drops by 2.
 
@@ -627,7 +631,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* A customer brings back one bar of soap, still sellable.
 
-*Do:* **Move stock** → **Customer return** → 1.
+*Do:* click the count → **Customer return** → 1.
 
 *Check:* Soap rises by 1. Do not record a sale.
 
@@ -828,8 +832,13 @@ ROUNDING     UGX/KES nearest 100 · TZS nearest 5,000
              cash only; the exact total is still recorded
 
 STOCK        Track stock → count → warn level → keep-in-stock level
-             Move stock → Received / Customer return / Waste / Adjustment
-             Adjustment = type what you COUNTED, not the difference
+             Click the on-hand number → Received / Customer return /
+             Waste / Counted
+             Counted = type what you COUNTED, not the difference
+             ⋯ menu → stock history, restock, receive, delete
+             Tick rows → Warning line… → change warn and keep levels
+             Count stock → category → counts → review → confirm
+             All stock history → filter by date and reason
              Sale subtracts by itself. Negative is allowed.
 
 PURCHASES    F3 → Restock → New list → Add low stock → Save (Planned)

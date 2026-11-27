@@ -1824,6 +1824,203 @@ fn the_pack_price_helper_rounds_up_not_down() {
     assert_eq!(draft.price, "29");
 }
 
+/// The editor needs to say when a price appeared on its own: an unexplained
+/// number is exactly the kind of thing that gets trusted and charged.
+#[test]
+fn the_pack_price_helper_says_when_it_filled_the_price() {
+    let mut draft = ProductDraft::new("Medicine".to_owned(), None);
+    draft.pack_size = "100".to_owned();
+    draft.pack_price = "2800".to_owned();
+
+    assert!(!draft.price_was_filled_from_pack());
+    draft.sync_price_from_pack(Currency::UGX);
+    assert!(draft.price_was_filled_from_pack());
+
+    draft.note_price_typed();
+    assert!(
+        !draft.price_was_filled_from_pack(),
+        "once typed, the price is the operator's own"
+    );
+}
+
+/// A delivery recorded straight from a product can carry its cost. Without
+/// this, a shop that never makes a restock list reports those goods as free.
+#[test]
+fn a_direct_receive_saves_its_unit_cost() {
+    let (mut state, path) = state("stock-receive-cost", Currency::UGX);
+
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "0".to_owned();
+        draft.low_stock = "1".to_owned();
+    }
+    state.save_tracking();
+
+    state.start_stock_move(1, "Test item", 0, crate::db::StockKind::Receive);
+    {
+        let draft = state.stock_move.as_mut().expect("open");
+        assert_eq!(
+            draft.selling_price_minor, 100,
+            "the form carries the shelf price"
+        );
+        draft.quantity = "10".to_owned();
+        draft.cost = "18".to_owned();
+    }
+    state.save_stock_move();
+
+    assert!(state.stock_move.is_none(), "a saved movement closes");
+    assert_eq!(state.stock[0].on_hand, 10);
+    let saved = crate::db::products(&state.store);
+    assert_eq!(
+        saved[0].cost_milli,
+        Some(18_000),
+        "one unit cost 18 minor units, kept in thousandths"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A warning line set at Track stock can be corrected later. Otherwise a
+/// wrong line quietly makes the Low stock filter useless for the whole shop.
+#[test]
+fn the_warning_line_can_be_corrected_from_the_catalog() {
+    let (mut state, path) = state("warning-line", Currency::UGX);
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "12".to_owned();
+        draft.low_stock = "3".to_owned();
+    }
+    state.save_tracking();
+    assert_eq!(state.stock[0].low_stock, 3);
+
+    state.toggle_product_selection(1);
+    let ids = state.selected_products.clone();
+    state.open_warning_editor(ids);
+    {
+        let draft = state.warning_editor.as_mut().expect("open");
+        assert_eq!(
+            draft.low_stock, "3",
+            "the current line is the starting point"
+        );
+        draft.low_stock = "6".to_owned();
+        draft.target_stock = "20".to_owned();
+    }
+    state.save_warning_editor();
+
+    assert!(state.warning_editor.is_none(), "a saved form closes");
+    assert_eq!(state.stock[0].low_stock, 6);
+    assert_eq!(state.stock[0].target_stock, Some(20));
+
+    // A target below the warning line is refused without touching the shelf.
+    let ids = state.selected_products.clone();
+    state.open_warning_editor(ids);
+    {
+        let draft = state.warning_editor.as_mut().expect("open");
+        draft.low_stock = "10".to_owned();
+        draft.target_stock = "5".to_owned();
+    }
+    state.save_warning_editor();
+
+    assert!(state.warning_editor.is_some(), "a refused form stays open");
+    assert!(state.warning_editor.as_ref().expect("open").error.is_some());
+    assert_eq!(state.stock[0].low_stock, 6, "nothing was written");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A cycle count corrects only the rows the shop actually counted. Walking a
+/// shelf must never turn an un counted row into a zero.
+#[test]
+fn a_count_only_writes_the_rows_that_differ() {
+    let (mut state, path) = state("stock-count", Currency::UGX);
+    seed_product(&state.store, "Second", 200, None);
+    state.reload_products();
+
+    for (id, opening) in [(1, "12"), (2, "7")] {
+        state.start_tracking();
+        {
+            let draft = state.stock_editor.as_mut().expect("open");
+            draft.product_id = Some(id);
+            draft.opening = opening.to_owned();
+            draft.low_stock = "1".to_owned();
+        }
+        state.save_tracking();
+    }
+
+    state.open_count(None);
+    assert_eq!(state.count.as_ref().expect("open").rows.len(), 2);
+    {
+        let draft = state.count.as_mut().expect("open");
+        let row = draft
+            .rows
+            .iter_mut()
+            .find(|row| row.product_id == 1)
+            .expect("tracked product");
+        row.counted = "10".to_owned();
+        // The other row is left blank on purpose.
+    }
+    state.review_count();
+    assert_eq!(
+        state.count.as_ref().expect("open").stage,
+        crate::state::CountStage::Review
+    );
+    assert_eq!(state.count_deltas(), vec![(1, -2)]);
+
+    state.confirm_count();
+    assert!(state.count.is_none(), "a confirmed count closes");
+    let on_hand: std::collections::HashMap<i64, i64> = state
+        .stock
+        .iter()
+        .map(|item| (item.product_id, item.on_hand))
+        .collect();
+    assert_eq!(on_hand[&1], 10);
+    assert_eq!(on_hand[&2], 7, "an uncounted row is untouched");
+
+    state.open_stock_history(1, "Test item");
+    let history = state.stock_history.as_ref().expect("history");
+    assert_eq!(history.movements[0].delta, -2);
+    assert_eq!(history.movements[0].kind, crate::db::StockKind::Adjust);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The global ledger answers "how much did we lose to spoilage?" without a
+/// report builder. Filters must reach the query, not just hide table rows.
+#[test]
+fn the_global_history_filters_by_reason() {
+    let (mut state, path) = state("global-history", Currency::UGX);
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "10".to_owned();
+        draft.low_stock = "1".to_owned();
+    }
+    state.save_tracking();
+
+    state.start_stock_move(1, "Test item", 10, crate::db::StockKind::Waste);
+    state.stock_move.as_mut().expect("open").quantity = "2".to_owned();
+    state.save_stock_move();
+
+    state.open_global_history();
+    let all = state.global_history.as_ref().expect("open").movements.len();
+    assert_eq!(all, 2, "an opening count and a waste movement");
+
+    // "All reasons" is zero; Waste is fifth in StockKind::ALL, hence index 5.
+    state.global_history.as_mut().expect("open").reason = 5;
+    state.reload_global_history();
+    let filtered = &state.global_history.as_ref().expect("open").movements;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].kind, crate::db::StockKind::Waste);
+    assert_eq!(filtered[0].delta, -2);
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn a_customer_rate_comes_off_the_basket() {
     let (mut state, path) = state("cart-customer", Currency::UGX);

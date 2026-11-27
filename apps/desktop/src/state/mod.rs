@@ -238,6 +238,9 @@ pub struct State {
     pub sell_search: String,
     /// The Products list's query.
     pub catalog_search: String,
+    /// How the Products list is ordered: catalog order, lowest stock first,
+    /// highest stock first, then A–Z. A view choice, never written to a product.
+    pub catalog_sort: usize,
     /// Set when the selling screen opens, so the next frame can put the cursor in
     /// the scan field. A scanner types into whatever has focus; a till that needs
     /// one click before the first barcode is a till that "doesn't scan".
@@ -297,6 +300,8 @@ pub struct State {
     pub categories: Vec<CategorySummary>,
     /// The product form, when it is open.
     pub product_editor: Option<ProductDraft>,
+    /// The warning-line form for selected products, when it is open.
+    pub warning_editor: Option<WarningDraft>,
     /// The CSV import modal, when it is open. The typed-path fallback for a
     /// file whose location is already known.
     pub import: Option<ImportDraft>,
@@ -352,6 +357,10 @@ pub struct State {
     pub stock_move: Option<StockMoveDraft>,
     /// One product's movements, read when the history modal opens.
     pub stock_history: Option<StockHistory>,
+    /// A physical count in progress, over one category or the whole shelf.
+    pub count: Option<CountDraft>,
+    /// The shop-wide ledger, read with the filters the owner picked.
+    pub global_history: Option<GlobalHistoryDraft>,
 
     /// Restocking trips, newest first. A purchase is a plan or a received
     /// record; it never edits stock except through the receiving screen.
@@ -560,6 +569,7 @@ impl State {
             prefs_dirty: false,
             sell_search: String::new(),
             catalog_search: String::new(),
+            catalog_sort: 0,
             scan_focus: true,
             scan_submit: false,
             scanner_status: ScanStatus::Off,
@@ -583,6 +593,7 @@ impl State {
             show_archived: false,
             categories,
             product_editor: None,
+            warning_editor: None,
             import: None,
             import_mode: ImportMode::Add,
             picker: None,
@@ -602,6 +613,8 @@ impl State {
             stock_editor: None,
             stock_move: None,
             stock_history: None,
+            count: None,
+            global_history: None,
             purchases,
             purchase_search: String::new(),
             purchase_filter: 0,

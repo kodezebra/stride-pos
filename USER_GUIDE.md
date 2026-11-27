@@ -499,20 +499,27 @@ this — it is how the drawer physically balances.
 
 Stock lives on the catalogue, not on a screen of its own: a tracked product's
 count sits beside its name, and **All stock / Low stock / Out of stock /
-Expiring** under **Stock** in the sidebar narrows the list. The summary above it
-reads how many products are tracked and how many need attention. **Move stock**
-and **History** sit on each tracked row.
+Expiring** under **Stock** in the sidebar narrows the list. Sort by lowest or
+highest stock from the same sidebar. The count itself is clickable; the row's
+**⋯** menu holds stock history, restock, receiving and delete.
 
 - Stock is the **sum of movements** — it is not edited directly.
 - A sale subtracts its quantities automatically.
 - Receiving adds; customer returns add; waste removes.
-- **Adjustment** is for "I counted the shelf and it says 37, the till says 41":
+- **Counted** is for "I counted the shelf and it says 37, the till says 41":
   enter what you counted, the till records the difference. Zero difference keeps
-  the form open and tells you they match.
+  the form open and tells you they match. A delivery can carry a **Unit cost**;
+  the selling price and margin are shown as you type it.
+- **Count stock** in the sidebar counts a whole category in one pass. Leave a
+  row blank to leave it alone, review every difference, then confirm. Uncounted
+  rows are never zeroed.
 - Every movement lands in the product's **History**: kind, date, who, note,
   signed delta. Newest 200 shown.
-- Low-stock warning level is set once, when the product is first tracked (the
-  "Warn at or below" field). Adjusting stock or viewing history does not change it.
+- **All stock history** opens the shop-wide ledger, filterable by date and
+  reason — useful for questions like "how much did we lose to spoilage?".
+- Low-stock warning level can be changed from the catalog: tick one or more
+  products and choose **Warning line…** in the toolbar. The first selected
+  product supplies the starting values.
 - Sales never fail because stock ran out — the count just goes negative, which
   is your reminder to receive stock.
 - Receiving a purchase is the usual way stock comes back in. It writes one
@@ -813,8 +820,10 @@ Clear cart · Lock till.
 
 **Import products** — headings (case-insensitive, optional): `name`, `product_name`,
 `category`, `category_name`, `price`, `retail_price`, `retail_price_ugx`, `barcode`.
-Plain column order `name,category,price,barcode` works with no headings. Prices
-in the till's currency. Blank/invalid rows skipped, never half-imported.
+The older `retail_price` headings are accepted for existing files; on screen the
+same number is called **Selling price**. Plain column order
+`name,category,price,barcode` works with no headings. Prices in the till's
+currency. Blank/invalid rows skipped, never half-imported.
 
 **Export products** — `name,category,price,barcode`, same order.
 

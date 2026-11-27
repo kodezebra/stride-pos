@@ -638,6 +638,9 @@ pub(super) fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
                                 ui.vertical(|ui| {
                                     ui.label(components::semibold(&line.name).size(TYPE.body));
                                     components::caption(ui, &bought_label(line));
+                                    if let Some(money_line) = receive_margin(state, line) {
+                                        components::caption(ui, &money_line);
+                                    }
                                     if let Some(date) = line.expires_on.as_deref() {
                                         components::caption(ui, &format!("Expires {date}"));
                                     }
@@ -669,6 +672,30 @@ pub(super) fn purchase_received_page(ui: &mut egui::Ui, state: &mut State) {
     if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
         state.purchase_view = None;
     }
+}
+
+/// The selling price and margin beside a delivered line, when both are known.
+///
+/// Square puts Price, Unit Cost and Profit Margin together at receiving so a
+/// shop can spot a bad price while the delivery note is still in hand. A line
+/// bought as a pack carries a pack cost, so it is divided down to one base
+/// unit before it is set beside the shelf price.
+fn receive_margin(state: &State, line: &crate::db::PurchaseLine) -> Option<String> {
+    let product = line
+        .product_id
+        .and_then(|id| state.products.iter().find(|product| product.id == id))?;
+    let pack_cost = line.unit_cost_minor?;
+    let pack_size = line.pack_size.max(1);
+    let cost = (pack_cost + pack_size / 2) / pack_size;
+    if product.price_minor == 0 {
+        return None;
+    }
+    let price = product.price_minor;
+    let margin = ((price - cost) * 100 + price / 2) / price;
+    Some(format!(
+        "Sells at {} · {margin}% margin",
+        state.money(price)
+    ))
 }
 
 /// What came home on one line, in the fewest words that are still true.
