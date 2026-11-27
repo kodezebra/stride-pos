@@ -1604,6 +1604,10 @@ impl Module for Products {
         // The archive is a view, not a catalog: its rows are not exportable and
         // starting a new product from it would hide the row just added.
         let archived_view = state.show_archived;
+        // At a narrow window the workspace cannot hold the search field and
+        // five buttons. Put the secondary actions in one menu rather than let
+        // the first button disappear off the left edge.
+        let narrow = ui.available_width() < 760.0;
         action_bar(
             ui,
             PageLeft::Search {
@@ -1618,94 +1622,160 @@ impl Module for Products {
                 if actions::primary_compact(ui, "New product").clicked() {
                     new = true;
                 }
-                if can_track && actions::secondary_compact(ui, "Track stock").clicked() {
-                    track = true;
-                }
-                if can_restock
-                    && actions::secondary_compact(ui, "Restock low")
-                        .on_hover_text("Start a list with everything at or below its warning line")
-                        .clicked()
-                {
-                    restock_low = true;
-                }
-                if can_bulk {
-                    if actions::secondary_compact(ui, &format!("Restock {selected_count} selected"))
+                if !narrow {
+                    if can_track && actions::secondary_compact(ui, "Track stock").clicked() {
+                        track = true;
+                    }
+                    if can_restock
+                        && actions::secondary_compact(ui, "Restock low")
+                            .on_hover_text(
+                                "Start a list with everything at or below its warning line",
+                            )
+                            .clicked()
+                    {
+                        restock_low = true;
+                    }
+                    if can_bulk {
+                        if actions::secondary_compact(
+                            ui,
+                            &format!("Restock {selected_count} selected"),
+                        )
                         .on_hover_text("Add the ticked products to one restock list")
                         .clicked()
-                    {
-                        restock_selected = true;
+                        {
+                            restock_selected = true;
+                        }
+                        if actions::quiet_compact(ui, "Warning line…")
+                            .on_hover_text("Change when these products show as low on stock")
+                            .clicked()
+                        {
+                            warning_line = true;
+                        }
+                        if actions::quiet_compact(ui, "Clear").clicked() {
+                            clear_selection = true;
+                        }
                     }
-                    if actions::quiet_compact(ui, "Warning line…")
-                        .on_hover_text("Change when these products show as low on stock")
-                        .clicked()
-                    {
-                        warning_line = true;
-                    }
-                    if actions::quiet_compact(ui, "Clear").clicked() {
-                        clear_selection = true;
-                    }
+                } else if can_restock || can_bulk {
+                    actions::toolbar_menu(
+                        ui,
+                        Icon::named("ellipsis-vertical").unwrap_or(Icon::SETTINGS),
+                        "More",
+                        |ui| {
+                            ui.set_min_width(220.0);
+                            if can_track && ui.button("Track stock").clicked() {
+                                track = true;
+                                ui.close();
+                            }
+                            if can_restock && ui.button("Restock low").clicked() {
+                                restock_low = true;
+                                ui.close();
+                            }
+                            if can_bulk {
+                                if ui
+                                    .button(format!("Restock {selected_count} selected"))
+                                    .clicked()
+                                {
+                                    restock_selected = true;
+                                    ui.close();
+                                }
+                                if ui.button("Warning line…").clicked() {
+                                    warning_line = true;
+                                    ui.close();
+                                }
+                                if ui.button("Clear selection").clicked() {
+                                    clear_selection = true;
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Import from CSV…").clicked() {
+                                import = true;
+                                ui.close();
+                            }
+                            if ui.button("Update from CSV…").clicked() {
+                                update = true;
+                                ui.close();
+                            }
+                            if ui.button("Save a template…").clicked() {
+                                template = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Export this view").clicked() {
+                                export_visible = true;
+                                ui.close();
+                            }
+                            if ui.button("Export all products").clicked() {
+                                export_all = true;
+                                ui.close();
+                            }
+                        },
+                    );
                 }
                 // Import and both exports are setup actions, not everyday ones.
                 // One menu keeps them a click away without letting four
                 // file-shaped icons compete with the catalog's primary action
-                // for the bar's width.
-                actions::toolbar_menu(ui, transfer_icon(), "Import / Export", |ui| {
-                    ui.set_min_width(210.0);
-                    if ui
-                        .button("Import from CSV…")
-                        .on_hover_text(
-                            "Read name, category, price and barcode. A barcode that \
+                // for the bar's width. On a narrow window they share the More
+                // menu instead, leaving room for the search field to be read.
+                if !narrow {
+                    actions::toolbar_menu(ui, transfer_icon(), "Import / Export", |ui| {
+                        ui.set_min_width(210.0);
+                        if ui
+                            .button("Import from CSV…")
+                            .on_hover_text(
+                                "Read name, category, price and barcode. A barcode that \
                              starts with 0 may need a text column in Excel.",
-                        )
-                        .clicked()
-                    {
-                        import = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button("Update from CSV…")
-                        .on_hover_text(
-                            "Change products already here. Rows match on SKU, then barcode; \
+                            )
+                            .clicked()
+                        {
+                            import = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Update from CSV…")
+                            .on_hover_text(
+                                "Change products already here. Rows match on SKU, then barcode; \
                              stock and cost are never written by a file.",
-                        )
-                        .clicked()
-                    {
-                        update = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button("Save a template…")
-                        .on_hover_text(
-                            "A blank CSV with the columns the import reads and two \
+                            )
+                            .clicked()
+                        {
+                            update = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Save a template…")
+                            .on_hover_text(
+                                "A blank CSV with the columns the import reads and two \
                              example rows",
-                        )
-                        .clicked()
-                    {
-                        template = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button("Export this view")
-                        .on_hover_text(
-                            "Save the products on screen with the columns the import reads",
-                        )
-                        .clicked()
-                    {
-                        export_visible = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button("Export all products")
-                        .on_hover_text("Save every product with the columns the import reads")
-                        .clicked()
-                    {
-                        export_all = true;
-                        ui.close();
-                    }
-                });
+                            )
+                            .clicked()
+                        {
+                            template = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Export this view")
+                            .on_hover_text(
+                                "Save the products on screen with the columns the import reads",
+                            )
+                            .clicked()
+                        {
+                            export_visible = true;
+                            ui.close();
+                        }
+                        if ui
+                            .button("Export all products")
+                            .on_hover_text("Save every product with the columns the import reads")
+                            .clicked()
+                        {
+                            export_all = true;
+                            ui.close();
+                        }
+                    });
+                }
             },
         );
 
