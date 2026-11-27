@@ -185,6 +185,19 @@ pub struct ImportDraft {
     pub error: Option<String>,
 }
 
+/// The warning line for one or more selected products, open as a modal.
+///
+/// The first selected product supplies the starting values: changing a line is
+/// usually a correction to an existing choice, not a fresh guess. Blank target
+/// means "auto", the same rule the Track stock form uses.
+pub struct WarningDraft {
+    pub ids: Vec<i64>,
+    pub label: String,
+    pub low_stock: String,
+    pub target_stock: String,
+    pub error: Option<String>,
+}
+
 impl State {
     /// Re-read the catalog and the category list after a write.
     ///
@@ -203,6 +216,85 @@ impl State {
                 .any(|category| category.name == *selected)
         {
             self.category = None;
+        }
+    }
+
+    /// Open the warning-line form on the ticked products.
+    pub fn open_warning_editor(&mut self, ids: Vec<i64>) {
+        let first = ids.first().copied();
+        let item = first.and_then(|id| self.stock.iter().find(|item| item.product_id == id));
+        let names: Vec<String> = ids
+            .iter()
+            .filter_map(|&id| {
+                self.products
+                    .iter()
+                    .find(|product| product.id == id)
+                    .map(|product| product.name.clone())
+            })
+            .collect();
+        let label = match names.len() {
+            0 => "the selected products".to_owned(),
+            1 => names[0].clone(),
+            count => format!("{count} selected products"),
+        };
+        self.warning_editor = Some(WarningDraft {
+            ids,
+            label,
+            low_stock: item.map_or_else(|| "5".to_owned(), |item| item.low_stock.to_string()),
+            target_stock: item
+                .and_then(|item| item.target_stock)
+                .map_or_else(String::new, |target| target.to_string()),
+            error: None,
+        });
+        self.notice = None;
+    }
+
+    /// Save the warning line, keeping the form open with a reason on failure.
+    pub fn save_warning_editor(&mut self) {
+        let Some(draft) = self.warning_editor.as_ref() else {
+            return;
+        };
+        let (ids, label, low_text, target_text) = (
+            draft.ids.clone(),
+            draft.label.clone(),
+            draft.low_stock.trim().to_owned(),
+            draft.target_stock.trim().to_owned(),
+        );
+        let low_stock = match low_text.parse::<i64>() {
+            Ok(level) if level >= 0 => level,
+            _ => return self.warning_editor_error("Warn at or below must be zero or more."),
+        };
+        let target_stock = if target_text.is_empty() {
+            None
+        } else {
+            match target_text.parse::<i64>() {
+                Ok(target) if target >= low_stock => Some(target),
+                Ok(_) => {
+                    return self
+                        .warning_editor_error("Keep in stock cannot be below the warning line.");
+                }
+                Err(_) => {
+                    return self.warning_editor_error("Keep in stock must be a whole number.");
+                }
+            }
+        };
+        match crate::db::set_warning_lines(&self.store, &ids, low_stock, target_stock) {
+            Ok(()) => {
+                self.warning_editor = None;
+                self.reload_stock();
+                self.reload_products();
+                self.notice = Some(format!("Warning line saved for {label}."));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "saving warning lines failed");
+                self.warning_editor_error(format!("Could not save it: {error}"));
+            }
+        }
+    }
+
+    fn warning_editor_error(&mut self, message: impl Into<String>) {
+        if let Some(draft) = self.warning_editor.as_mut() {
+            draft.error = Some(message.into());
         }
     }
 

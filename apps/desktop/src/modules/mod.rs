@@ -52,7 +52,7 @@ use widgets::*;
 
 // The modals the shell opens by name, kept at the module root so the shell does
 // not have to know which file a screen lives in.
-pub use catalog::{import_modal, product_editor_modal};
+pub use catalog::{import_modal, product_editor_modal, warning_modal};
 pub use sales::sale_detail_modal;
 pub use sell::cart_quantity_modal;
 pub use sell::credit_settle_modal;

@@ -251,6 +251,7 @@ impl PosShell {
         // the rest of the foreground: a modal inside a module's workspace would
         // be clipped to that panel and could not dim the list behind it.
         crate::modules::product_editor_modal(ui.ctx(), &mut self.state);
+        crate::modules::warning_modal(ui.ctx(), &mut self.state);
         // The supplier directory's form, owned by its module for the same
         // reason and drawn in the same foreground layer.
         crate::modules::supplier_editor_modal(ui.ctx(), &mut self.state);

@@ -576,17 +576,6 @@ pub(super) fn restore_icon() -> Icon {
     Icon::named("archive-restore").unwrap_or(Icon::REFUND)
 }
 
-/// The movement glyph. Two arrows say "in or out"; the tooltip names the four
-/// reasons a movement can have.
-pub(super) fn move_icon() -> Icon {
-    Icon::named("arrow-right-left").unwrap_or(Icon::BOXES)
-}
-
-/// The history glyph, resolved by name like the directory's archive icon: the
-/// vocabulary can move without taking a button with it.
-pub(super) fn history_icon() -> Icon {
-    Icon::named("history").unwrap_or(Icon::RECEIPT)
-}
 /// What a module shows when the person cannot open it.
 ///
 /// The module stays on the rail so the cashier can see it exists and ask for it,

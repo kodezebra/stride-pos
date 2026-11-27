@@ -1882,6 +1882,56 @@ fn a_direct_receive_saves_its_unit_cost() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A warning line set at Track stock can be corrected later. Otherwise a
+/// wrong line quietly makes the Low stock filter useless for the whole shop.
+#[test]
+fn the_warning_line_can_be_corrected_from_the_catalog() {
+    let (mut state, path) = state("warning-line", Currency::UGX);
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "12".to_owned();
+        draft.low_stock = "3".to_owned();
+    }
+    state.save_tracking();
+    assert_eq!(state.stock[0].low_stock, 3);
+
+    state.toggle_product_selection(1);
+    let ids = state.selected_products.clone();
+    state.open_warning_editor(ids);
+    {
+        let draft = state.warning_editor.as_mut().expect("open");
+        assert_eq!(
+            draft.low_stock, "3",
+            "the current line is the starting point"
+        );
+        draft.low_stock = "6".to_owned();
+        draft.target_stock = "20".to_owned();
+    }
+    state.save_warning_editor();
+
+    assert!(state.warning_editor.is_none(), "a saved form closes");
+    assert_eq!(state.stock[0].low_stock, 6);
+    assert_eq!(state.stock[0].target_stock, Some(20));
+
+    // A target below the warning line is refused without touching the shelf.
+    let ids = state.selected_products.clone();
+    state.open_warning_editor(ids);
+    {
+        let draft = state.warning_editor.as_mut().expect("open");
+        draft.low_stock = "10".to_owned();
+        draft.target_stock = "5".to_owned();
+    }
+    state.save_warning_editor();
+
+    assert!(state.warning_editor.is_some(), "a refused form stays open");
+    assert!(state.warning_editor.as_ref().expect("open").error.is_some());
+    assert_eq!(state.stock[0].low_stock, 6, "nothing was written");
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn a_customer_rate_comes_off_the_basket() {
     let (mut state, path) = state("cart-customer", Currency::UGX);

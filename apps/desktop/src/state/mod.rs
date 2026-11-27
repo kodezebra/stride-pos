@@ -300,6 +300,8 @@ pub struct State {
     pub categories: Vec<CategorySummary>,
     /// The product form, when it is open.
     pub product_editor: Option<ProductDraft>,
+    /// The warning-line form for selected products, when it is open.
+    pub warning_editor: Option<WarningDraft>,
     /// The CSV import modal, when it is open. The typed-path fallback for a
     /// file whose location is already known.
     pub import: Option<ImportDraft>,
@@ -587,6 +589,7 @@ impl State {
             show_archived: false,
             categories,
             product_editor: None,
+            warning_editor: None,
             import: None,
             import_mode: ImportMode::Add,
             picker: None,

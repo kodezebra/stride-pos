@@ -143,6 +143,42 @@ pub fn set_last_cost(
     Ok(())
 }
 
+/// Set the low-stock warning line, and optionally the target, for several
+/// products at once.
+///
+/// The line used to be a one-time choice at "Track stock" with no way back.
+/// Square edits it from the stock list, because a shop's sense of "low" changes
+/// with demand; a line that cannot be corrected makes the Low stock filter a
+/// guess the owner has learned to ignore.
+pub fn set_warning_lines(
+    store: &storage::Store,
+    product_ids: &[i64],
+    low_stock: i64,
+    target_stock: Option<i64>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!product_ids.is_empty(), "select a product first");
+    anyhow::ensure!(low_stock >= 0, "the low-stock level cannot be negative");
+    anyhow::ensure!(
+        target_stock.is_none_or(|target| target >= low_stock),
+        "the target cannot be below the low-stock level"
+    );
+
+    let transaction = store.conn().unchecked_transaction()?;
+    for &product_id in product_ids {
+        let changed = transaction.execute(
+            "UPDATE products SET low_stock = ?2, target_stock = ?3
+              WHERE id = ?1 AND tracked = 1 AND archived = 0",
+            (product_id, low_stock, target_stock),
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "one of the selected products is no longer tracked"
+        );
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Mark a tracked product as perishable, or clear that.
 ///
 /// Perishability is not part of [`ProductFields`]: like tracking, it is a

@@ -484,10 +484,10 @@ pub(super) fn product_row(
         }
         ui.add_space(SPACING.xs);
 
-        // Keep the name clear of the price and row actions. Five 44-point
-        // buttons are the widest case (a tracked product), and the reserve is
-        // fixed so the price column does not move when a row gains stock.
-        const ACTIONS_WIDTH: f32 = 404.0;
+        // Keep the name clear of the price and row actions. Edit and the "⋯"
+        // menu are the widest case now, and the reserve is fixed so the price
+        // column does not move when a row gains stock.
+        const ACTIONS_WIDTH: f32 = 130.0;
         const CHECK_WIDTH: f32 = 28.0;
         let text_width = (ui.available_width() - ACTIONS_WIDTH - CHECK_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
@@ -539,50 +539,49 @@ pub(super) fn product_row(
                 }
                 components::caption(ui, "Remove this product?");
             } else {
-                if components::icon_button(ui, Icon::TRASH, 44.0)
-                    .on_hover_text("Delete")
-                    .clicked()
-                {
-                    action = Some(ProductAction::AskDelete(product.id));
-                }
+                // Edit stays on the row; it is the ordinary action. The rarer
+                // ones sit in a named menu, as on Square's stock rows, so a
+                // dense catalog reads as products and prices rather than
+                // five unlabelled icons per line.
                 if components::icon_button(ui, edit_icon(), 44.0)
                     .on_hover_text("Edit")
                     .clicked()
                 {
                     action = Some(ProductAction::Edit(product.id));
                 }
-                // Stock actions belong to products the shop actually counts. An
-                // untracked product has no ledger to move or read; the toolbar's
-                // "Track stock" is the way in.
-                if let Some(item) = stock {
-                    if components::icon_button(ui, history_icon(), 44.0)
-                        .on_hover_text("Stock history")
-                        .clicked()
-                    {
-                        action = Some(ProductAction::StockHistory {
-                            id: product.id,
-                            name: product.name.clone(),
-                        });
+                ui.menu_button("⋯", |ui| {
+                    ui.set_min_width(210.0);
+                    // Stock actions belong to products the shop counts. An
+                    // untracked product has no ledger to read or move.
+                    if let Some(item) = stock {
+                        if ui.button("Stock history").clicked() {
+                            action = Some(ProductAction::StockHistory {
+                                id: product.id,
+                                name: product.name.clone(),
+                            });
+                            ui.close();
+                        }
+                        if can_manage && ui.button("Add to restock list").clicked() {
+                            action = Some(ProductAction::Restock(product.id));
+                            ui.close();
+                        }
+                        if can_manage && ui.button("Receive, count or remove stock").clicked() {
+                            action = Some(ProductAction::MoveStock {
+                                id: product.id,
+                                name: product.name.clone(),
+                                on_hand: item.on_hand,
+                            });
+                            ui.close();
+                        }
+                        ui.separator();
                     }
-                    if can_manage
-                        && components::icon_button(ui, Icon::CART, 44.0)
-                            .on_hover_text("Add to restock list — stock changes only when received")
-                            .clicked()
-                    {
-                        action = Some(ProductAction::Restock(product.id));
+                    if ui.button("Delete product").clicked() {
+                        action = Some(ProductAction::AskDelete(product.id));
+                        ui.close();
                     }
-                    if can_manage
-                        && components::icon_button(ui, move_icon(), 44.0)
-                            .on_hover_text("Move stock: receive, return, waste or adjust")
-                            .clicked()
-                    {
-                        action = Some(ProductAction::MoveStock {
-                            id: product.id,
-                            name: product.name.clone(),
-                            on_hand: item.on_hand,
-                        });
-                    }
-                }
+                })
+                .response
+                .on_hover_text("More actions");
             }
         });
     });
@@ -839,6 +838,85 @@ pub(super) fn expiry_summary(tracked: bool, perishable: bool, shelf_life: &str) 
         "Dates every delivery".to_owned()
     } else {
         format!("Dates every delivery · {life} days")
+    }
+}
+
+/// The warning-line form for selected products, drawn in the shell's foreground
+/// layer like the product editor. A line that can be corrected is a line the
+/// owner trusts; the Low stock filter depends on it.
+pub fn warning_modal(ctx: &egui::Context, state: &mut State) {
+    if state.warning_editor.is_none() {
+        return;
+    }
+    let label = state
+        .warning_editor
+        .as_ref()
+        .expect("checked above")
+        .label
+        .clone();
+    let mut save = false;
+    let mut cancel = false;
+
+    modal(ctx, egui::Id::new("pos_warning_line")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.label(components::semibold("Set warning line").size(TYPE.heading));
+        components::caption(
+            ui,
+            &format!("For {label}. Low stock uses this line to decide what to show."),
+        );
+
+        let Some(draft) = state.warning_editor.as_mut() else {
+            return;
+        };
+        ui.add_space(SPACING.md);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.md;
+            ui.vertical(|ui| {
+                components::field_label(ui, "Warn at or below");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.low_stock, "5", 110.0);
+            });
+            ui.vertical(|ui| {
+                components::field_label(ui, "Keep in stock");
+                ui.add_space(SPACING.xs);
+                text_field(ui, &mut draft.target_stock, "Auto", 110.0);
+            });
+        });
+        components::caption(
+            ui,
+            "Keep in stock is how much you like to have. Leave it empty for twice the warning line.",
+        );
+
+        if let Some(error) = &draft.error {
+            ui.add_space(SPACING.sm);
+            ui.label(
+                egui::RichText::new(error)
+                    .size(TYPE.small)
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+
+        actions::footer(ui, |ui| {
+            if actions::primary(ui, "Save").clicked() {
+                save = true;
+            }
+            if actions::secondary(ui, "Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    });
+
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        save = true;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    if save {
+        state.save_warning_editor();
+    }
+    if cancel {
+        state.warning_editor = None;
     }
 }
 
@@ -1494,6 +1572,7 @@ impl Module for Products {
         let mut track = false;
         let mut restock_low = false;
         let mut restock_selected = false;
+        let mut warning_line = false;
         let mut clear_selection = false;
         let mut import = false;
         let mut update = false;
@@ -1533,6 +1612,12 @@ impl Module for Products {
                         .clicked()
                     {
                         restock_selected = true;
+                    }
+                    if actions::quiet_compact(ui, "Warning line…")
+                        .on_hover_text("Change when these products show as low on stock")
+                        .clicked()
+                    {
+                        warning_line = true;
                     }
                     if actions::quiet_compact(ui, "Clear").clicked() {
                         clear_selection = true;
@@ -1613,6 +1698,10 @@ impl Module for Products {
         }
         if restock_selected {
             state.restock_selected();
+        }
+        if warning_line {
+            let ids = state.selected_products.clone();
+            state.open_warning_editor(ids);
         }
         if clear_selection {
             state.clear_product_selection();
