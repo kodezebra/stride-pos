@@ -278,7 +278,7 @@ The product now shows its on-hand count beside its name in Catalog. Every future
 ### 3.3 Record a movement
 
 1. `F3` → find the product → **click its on-hand number**. The same form opens
-   from the row's **⋯** menu under **Receive, count or remove stock**.
+   from the row's **More actions** menu under **Receive, count or remove stock**.
 2. Choose **What happened**.
 
 | Choice | Use it when | Effect |
@@ -835,7 +835,7 @@ STOCK        Track stock → count → warn level → keep-in-stock level
              Click the on-hand number → Received / Customer return /
              Waste / Counted
              Counted = type what you COUNTED, not the difference
-             ⋯ menu → stock history, restock, receive, delete
+             More actions → stock history, restock, receive, delete
              Tick rows → Warning line… → change warn and keep levels
              Count stock → category → counts → review → confirm
              All stock history → filter by date and reason
