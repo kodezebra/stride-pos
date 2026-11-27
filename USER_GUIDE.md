@@ -459,6 +459,18 @@ this — it is how the drawer physically balances.
 - Editing a product never changes old receipts — sale lines copy the name and
   price at the time of sale.
 
+**Units and packs, by example.** Paracetamol sells loose as a `tablet` at 30 and
+in a sealed box of 100 at 2,800. Set **Sold as** to `tablet`, the price to 30,
+then open **Pack & barcodes**: **Units per pack** is 100, **Pack price** is
+2,800, and the box has its own barcode while the loose strip keeps the other
+one. Scanning the strip adds one tablet at 30; scanning the box adds one pack
+at 2,800, as a separate line on the same sale. Selling two boxes takes 200
+tablets off the shelf — stock is always counted in the base unit, never in
+boxes. A pack of **1** means no sealed pack: the pack price and pack barcode
+are ignored, and only loose units sell. A shop that sells only boxes sets
+**Sold as** to `box` and leaves **Units per pack** at 1. Quantity breaks apply
+to loose units only, because the pack price is already the bulk deal.
+
 ### 6.10 Importing a product list
 
 1. **Catalog** (`F3`) → **Import / Export ▾** → **Save a template…** → a folder
