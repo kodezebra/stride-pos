@@ -1012,6 +1012,15 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             "A reorder key you own. CSV updates match on it first, then on a barcode.",
         );
 
+        let each = {
+            let label = draft.unit_label.trim();
+            if label.is_empty() {
+                "unit".to_owned()
+            } else {
+                label.to_owned()
+            }
+        };
+
         ui.add_space(SPACING.md);
         components::field_label(ui, "Sold as");
         ui.add_space(SPACING.xs);
@@ -1033,15 +1042,12 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                     }
                 });
         });
-
-        let each = {
-            let label = draft.unit_label.trim();
-            if label.is_empty() {
-                "unit".to_owned()
-            } else {
-                label.to_owned()
-            }
-        };
+        components::caption(
+            ui,
+            &format!(
+                "One {each} is the base unit. Stock is counted in {each}, even when a pack is sold."
+            ),
+        );
 
         // Fill before drawing so the field and its explanation agree on the
         // same frame. Once the operator types a price, the helper steps aside.
@@ -1134,9 +1140,10 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                     ui.spacing_mut().item_spacing.x = SPACING.md;
 
                     ui.vertical(|ui| {
-                        components::field_label(ui, "Units per pack");
+                        components::field_label(ui, &format!("Units per pack ({each})"));
                         ui.add_space(SPACING.xs);
-                        text_field(ui, &mut draft.pack_size, "1", 90.0);
+                        text_field(ui, &mut draft.pack_size, "1", 90.0)
+                            .on_hover_text(format!("How many {each} one sealed pack holds."));
                     });
 
                     ui.vertical(|ui| {
@@ -1153,13 +1160,16 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                 ui.add_space(SPACING.xs);
                 components::caption(
                     ui,
-                    "A pack of one means the product is sold only by the unit.",
+                    "Set to 1 when there is no sealed pack — the pack price and \
+                     pack barcode are then ignored.",
                 );
 
                 ui.add_space(SPACING.sm);
                 components::field_label(ui, "Pack barcode (optional)");
                 ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.pack_barcode, "On the box", 350.0);
+                text_field(ui, &mut draft.pack_barcode, "On the box", 350.0).on_hover_text(
+                    format!("Scanning this code adds one sealed pack of {each}."),
+                );
 
                 ui.add_space(SPACING.sm);
                 components::field_label(ui, "Barcode (optional)");
