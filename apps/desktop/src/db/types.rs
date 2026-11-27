@@ -435,7 +435,7 @@ impl StockKind {
             StockKind::Receive => "Received",
             StockKind::Return => "Returned",
             StockKind::Waste => "Waste",
-            StockKind::Adjust => "Adjustment",
+            StockKind::Adjust => "Counted",
         }
     }
 }

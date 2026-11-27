@@ -218,7 +218,7 @@ impl Module for Sell {
                 ui,
                 PageLeft::Search {
                     text: &mut state.sell_search,
-                    hint: "Name or barcode",
+                    hint: "Name, code or barcode",
                     count: None,
                 },
                 |ui| sell_view_toggle(ui, &mut state.sell_view),
@@ -1128,7 +1128,7 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
         components::caption(
             ui,
             &format!(
-                "Wholesale prices — {name}'s {} is not applied",
+                "{name}'s {} is not added to wholesale prices",
                 percent_text(state.customer.as_ref().map_or(0, |c| c.discount_bp))
             ),
         );
