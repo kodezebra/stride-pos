@@ -258,7 +258,7 @@ Stock is not a number you type and overwrite. It is the **sum of movements**:
 - Received adds.
 - Customer return adds.
 - Waste subtracts.
-- Adjustment corrects to a counted number.
+- Counted corrects to the number you physically counted.
 
 Because stock is a ledger, you can always answer "why is the count what it is?" by opening the product's **History**.
 
@@ -320,7 +320,7 @@ first — that is why the row badge names the *soonest* date only.
 
 ### 3.6 Three rules to say out loud
 
-1. **Never type a stock number to "make it right"** unless you have physically counted the shelf. Use **Adjustment** with the counted number.
+1. **Never type a stock number to "make it right"** unless you have physically counted the shelf. Use **Counted** with the counted number.
 2. **Negative stock is allowed.** If the till says −1, the shop can still sell. The negative is your reminder to receive stock or fix the count.
 3. **Deleting a product deletes its stock history.** The stock record is operational, not a financial archive.
 
@@ -329,7 +329,7 @@ first — that is why the row badge names the *soonest* date only.
 1. Track all six products with the opening counts and warning levels in the table.
 2. Receive a delivery: 24 tea, note `INV-104`.
 3. Check tea is now 44.
-4. Count sugar: the shelf has 9, the till says 12. Record an **Adjustment** of 9.
+4. Count sugar: the shelf has 9, the till says 12. Record a **Counted** movement of 9.
 5. Record **Waste** of 2 toothpaste.
 6. Record a **Customer return** of 1 soap.
 7. Open tea's **History** and read the last three lines.
@@ -781,7 +781,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 
 - [ ] Starts tracking with an opening count and warning level
 - [ ] Records a **Received** movement with a note
-- [ ] Records an **Adjustment** using the counted quantity
+- [ ] Records a **Counted** movement using the counted quantity
 - [ ] Records **Waste** and **Customer return**
 - [ ] Reads a product's history and explains a negative count
 
@@ -898,7 +898,7 @@ IF STUCK     Read the caption under the button.
 | **Receive** | Count what actually arrived; this is what moves stock |
 | **Unit cost** | What one item cost you; used for profit on later sales |
 | **Profit** | Revenue minus cost, for the sale lines whose cost is known |
-| **Adjustment** | A correction after counting the shelf by hand |
+| **Counted** | A correction after counting the shelf by hand |
 | **Perishable** | A product that goes off; every delivery must carry its date |
 | **Expiry date** | The date printed on the pack, typed when the goods arrive |
 | **Expiring** | A filter: dated stock inside the warning window, expired included |

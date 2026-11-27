@@ -589,7 +589,7 @@ pub(super) fn movement_label(kind: StockKind) -> &'static str {
         StockKind::Receive => "Received",
         StockKind::Return => "Customer return",
         StockKind::Waste => "Waste",
-        StockKind::Adjust => "Adjustment",
+        StockKind::Adjust => "Counted",
         StockKind::Opening => "Opening count",
         StockKind::Sale => "Sale",
     }

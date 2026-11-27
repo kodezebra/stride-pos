@@ -492,7 +492,7 @@ fn the_page_bar_fits_its_search_and_its_actions_on_one_row() {
                     ui,
                     PageLeft::Search {
                         text: &mut query,
-                        hint: "Name or barcode",
+                        hint: "Name, code or barcode",
                         count: Some("3 of 12".to_owned()),
                     },
                     |ui| {
