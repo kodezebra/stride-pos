@@ -90,13 +90,23 @@ fn order_panel(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) -> b
             let label = format!("Discount ({})", state::percent_text(summary.discount_bp));
             crate::modules::amount_row(ui, &label, &state.money(-summary.discount_minor), false);
         }
+        // Prices are tax-inclusive: show the tax already inside the total, as
+        // the cart does, so the two panels cannot appear to disagree.
+        if summary.tax_configured {
+            crate::modules::amount_row(ui, "Tax", &state.money(summary.tax_minor), false);
+        }
         if summary.rounding_minor != 0 {
-            let label = if summary.rounding_minor < 0 {
-                "Rounded down"
+            let step = crate::currencies::cash_step(state.currency);
+            let direction = if summary.rounding_minor < 0 {
+                "down"
             } else {
-                "Rounded up"
+                "up"
             };
-            crate::modules::amount_row(ui, label, &state.money(summary.rounding_minor), false);
+            let label = format!(
+                "Rounded {direction} to nearest {}",
+                Money::new(step, state.currency).format()
+            );
+            crate::modules::amount_row(ui, &label, &state.money(summary.rounding_minor), false);
         }
         crate::modules::amount_row(ui, "Total", &state.money(summary.due_minor), true);
     });
@@ -131,6 +141,10 @@ fn order_panel(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) -> b
                         );
                     });
                 });
+            }
+            let paid = state.payment_paid_minor();
+            if paid > 0 {
+                components::caption(ui, &format!("Paid so far {}", state.money(paid)));
             }
             ui.add_space(SPACING.xs);
             if actions::quiet(ui, "Undo last payment")
@@ -224,9 +238,10 @@ fn payment_form(ui: &mut egui::Ui, state: &mut State, summary: &CartSummary) {
                 button = button.fill(palette.accent).stroke(egui::Stroke::NONE);
             }
             if ui.add(button).clicked() && !selected {
+                // Keep what was typed. Tapping the wrong method and tapping back
+                // used to wipe the amount and the reference, which is exactly
+                // the kind of small slip that costs a sale at a busy counter.
                 payment.method = (*key).to_owned();
-                payment.tendered.clear();
-                payment.reference.clear();
                 payment.error = None;
                 // Hand the keyboard back to the amount: the next thing the
                 // cashier does is type or tap a note.
