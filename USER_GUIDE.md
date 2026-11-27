@@ -501,7 +501,7 @@ Stock lives on the catalogue, not on a screen of its own: a tracked product's
 count sits beside its name, and **All stock / Low stock / Out of stock /
 Expiring** under **Stock** in the sidebar narrows the list. Sort by lowest or
 highest stock from the same sidebar. The count itself is clickable; the row's
-**⋯** menu holds stock history, restock, receiving and delete.
+**More actions** menu holds stock history, restock, receiving and delete.
 
 - Stock is the **sum of movements** — it is not edited directly.
 - A sale subtracts its quantities automatically.

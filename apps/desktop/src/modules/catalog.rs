@@ -549,11 +549,12 @@ pub(super) fn product_row(
                 {
                     action = Some(ProductAction::Edit(product.id));
                 }
-                // An SVG ellipsis, like the other row buttons: the "⋯" glyph
-                // is not in the bundled fonts and can paint as nothing at all.
+                // The vertical three-dot menu, like the other row buttons'
+                // SVG icons: a text ellipsis glyph is not in the bundled fonts
+                // and can paint as nothing at all.
                 let more = components::icon_button(
                     ui,
-                    Icon::named("ellipsis").unwrap_or(Icon::SETTINGS),
+                    Icon::named("ellipsis-vertical").unwrap_or(Icon::SETTINGS),
                     44.0,
                 )
                 .on_hover_text("More actions");
