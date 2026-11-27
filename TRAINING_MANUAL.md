@@ -429,7 +429,7 @@ All three ways can be mixed in one sale:
 
 ### 4.3 Taking cash
 
-The cart shows **Subtotal**, **Tax** (it says "not configured" in this build — ignore it), and **Total**. The tender panel shows **Subtotal**, any rounding line, and **To pay** in large type.
+The cart shows **Subtotal**, **Tax** (it says "not configured" in this build — ignore it), and **Total**. The tender panel shows the same breakdown — **Subtotal**, **Tax**, and a rounding line such as "Rounded up to nearest 100" — with **To pay** in large type. Once a payment is added, **Paid so far** appears under **Payments taken**.
 
 - Leave the cash field empty to mean **exact amount**.
 - Or type what the customer handed over.
