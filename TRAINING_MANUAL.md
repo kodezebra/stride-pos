@@ -257,7 +257,7 @@ Stock is not a number you type and overwrite. It is the **sum of movements**:
 - A sale subtracts automatically.
 - Received adds.
 - Customer return adds.
-- Waste subtracts.
+- Damage, Spoilage and Loss subtract.
 - Counted corrects to the number you physically counted.
 
 Because stock is a ledger, you can always answer "why is the count what it is?" by opening the product's **History**.
@@ -285,14 +285,16 @@ The product now shows its on-hand count beside its name in Catalog. Every future
 |---|---|---|
 | **Received** | A supplier delivery arrives | Adds the **number received**; a perishable product needs the date on the pack |
 | **Customer return** | A customer brings goods back | Adds the quantity |
-| **Waste** | Spoiled, broken, or unsellable | Subtracts the quantity |
+| **Damage** | Broken or unsellable | Subtracts the quantity |
+| **Spoilage** | Went off or out of date | Subtracts the quantity |
+| **Loss** | Missing or stolen | Subtracts the quantity |
 | **Counted** | A physical count differs | Sets stock to the counted number |
 
 3. Type the count. A delivery asks for **Number received**; a correction asks for
    **Counted quantity**. For a delivery you can also type **Unit cost** — the
    margin at the selling price appears underneath as you type it, and the cost
    is saved for later reports.
-4. If the product is perishable, type the **Expiry date** printed on the pack. It is required for a delivery, optional for a return or waste. The till will not take a date that does not exist (`31/02`); a past date is allowed and flagged.
+4. If the product is perishable, type the **Expiry date** printed on the pack. It is required for a delivery, optional for a return or a write-off. The till will not take a date that does not exist (`31/02`); a past date is allowed and flagged.
 5. Type a **Note** — invoice number, delivery date, or reason.
 6. Press **Record**.
 
@@ -312,7 +314,7 @@ first — that is why the row badge names the *soonest* date only.
 
 1. Look at the **Expiring stock** card on the Products page, or press **Expiring** under **Stock**.
 2. A red **Expired** or **Expires today** badge means the date has arrived. The count beside it is what is left *on that date*, not the whole shelf.
-3. Press **Pull to waste** on the card, or **Move stock** → **Waste** with that date. The dated waste movement takes only that batch.
+3. Press **Pull to waste** on the card, or click the count → **Spoilage** with that date. The dated write-off takes only that batch.
 4. Anything with a later date, or no date, stays on the shelf. Check the product's **History**: the waste line shows the date it removed.
 5. Never "adjust" expired stock away by typing a count: adjustment has no date and would hide which delivery left.
 
@@ -330,7 +332,7 @@ first — that is why the row badge names the *soonest* date only.
 2. Receive a delivery: 24 tea, note `INV-104`.
 3. Check tea is now 44.
 4. Count sugar: the shelf has 9, the till says 12. Record a **Counted** movement of 9.
-5. Record **Waste** of 2 toothpaste.
+5. Record **Damage** of 2 toothpaste (or **Spoilage** if it went off).
 6. Record a **Customer return** of 1 soap.
 7. Open tea's **History** and read the last three lines.
 8. Make one product perishable (Catalog → **Edit product** → **Expiry**). Receive 6 dated a week from today, add 6 more dated a month from today as a second line, then sell 7 and check the soonest date is now used up and the badge moved to the later one.
@@ -625,7 +627,7 @@ Bad Row,Groceries,abc,6001234500097
 
 *Situation:* Two toothpaste tubes are crushed and cannot be sold.
 
-*Do:* click the count → **Waste** → 2 → note `Crushed in delivery`.
+*Do:* click the count → **Damage** → 2 → note `Crushed in delivery`.
 
 *Check:* Toothpaste drops by 2.
 
@@ -784,7 +786,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 - [ ] Starts tracking with an opening count and warning level
 - [ ] Records a **Received** movement with a note
 - [ ] Records a **Counted** movement using the counted quantity
-- [ ] Records **Waste** and **Customer return**
+- [ ] Records **Damage**, **Spoilage** or **Loss**, and **Customer return**
 - [ ] Reads a product's history and explains a negative count
 
 **Selling**
@@ -835,7 +837,8 @@ ROUNDING     UGX/KES nearest 100 · TZS nearest 5,000
 
 STOCK        Track stock → count → warn level → keep-in-stock level
              Click the on-hand number → Received / Customer return /
-             Waste / Counted
+             Damage / Spoilage / Loss / Counted
+             Stock history reason filter includes each write-off cause
              Counted = type what you COUNTED, not the difference
              More actions → stock history, restock, receive, delete
              Tick rows → Warning line… → change warn and keep levels

@@ -611,7 +611,7 @@ impl State {
                 counted: String::new(),
             })
             .collect();
-        rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        rows.sort_by_key(|row| row.name.to_lowercase());
         self.count = Some(CountDraft {
             category,
             rows,

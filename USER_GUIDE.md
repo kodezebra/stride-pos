@@ -510,7 +510,8 @@ highest stock from the same sidebar. The count itself is clickable; the row's
 
 - Stock is the **sum of movements** — it is not edited directly.
 - A sale subtracts its quantities automatically.
-- Receiving adds; customer returns add; waste removes.
+- Receiving adds; customer returns add; **Damage**, **Spoilage** and **Loss**
+  remove. Old write-offs without a cause still appear as "Waste".
 - **Counted** is for "I counted the shelf and it says 37, the till says 41":
   enter what you counted, the till records the difference. Zero difference keeps
   the form open and tells you they match. A delivery can carry a **Unit cost**;
@@ -518,8 +519,9 @@ highest stock from the same sidebar. The count itself is clickable; the row's
 - **Count stock** in the sidebar counts a whole category in one pass. Leave a
   row blank to leave it alone, review every difference, then confirm. Uncounted
   rows are never zeroed.
-- Every movement lands in the product's **History**: kind, date, who, note,
-  signed delta. Newest 200 shown.
+- Every movement lands in the product's **History**: reason, date, who, note,
+  signed delta. Write-offs show **Damage**, **Spoilage** or **Loss**; older rows
+  without a cause still say **Waste**. Newest 200 shown.
 - **All stock history** opens the shop-wide ledger, filterable by date and
   reason — useful for questions like "how much did we lose to spoilage?".
 - Low-stock warning level can be changed from the catalog: tick one or more
@@ -538,7 +540,7 @@ highest stock from the same sidebar. The count itself is clickable; the row's
 - A dated delivery shows the date in the row and in **History** (`· dated
   2026-12-31`). A return or a waste movement can carry a date too; a sale, an
   adjustment and an opening count do not.
-- **Pull to waste** on the Expiring card (or a Waste movement with that date)
+- **Pull to waste** on the Expiring card (or a Spoilage movement with that date)
   removes only what is left on that one date. Any later delivery stays put.
 - Sales take the oldest date first, so the badge moves on by itself as the
   fridge empties. Nothing is stored "per date": the remaining count is derived
@@ -633,7 +635,7 @@ today's figures can differ from "what the shelf should have earned".
 ### 7.4 Stock is a ledger
 
 Tracked products have a movement ledger (+opening, −sale, +received, +return,
-−waste, ±adjustment). On-hand = sum of the ledger. Nothing else writes to stock,
+−damage/spoilage/loss, ±adjustment). On-hand = sum of the ledger. Nothing else writes to stock,
 so "What the ledger says is on the shelf" is always derivable. A purchase plan is
 not stock; only receiving its lines writes movements. Deleting a product deletes
 its ledger — stock history is operational, not financial.

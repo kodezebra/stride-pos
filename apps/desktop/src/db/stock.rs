@@ -569,8 +569,11 @@ pub fn record_stock_movement(
     )
 }
 
-/// The write-off case of [`record_stock_movement`], with the cause recorded
-/// alongside the ledger row. The original six call sites stay unchanged.
+/// [`record_stock_movement`] with an optional write-off cause recorded
+/// alongside the ledger row. Normal movements pass `None` and read as before.
+// Each input is a separate fact about the movement, and the existing callers
+// already name them in order; a bundle would add a type for no extra safety.
+#[allow(clippy::too_many_arguments)]
 pub fn record_stock_movement_cause(
     store: &storage::Store,
     product_id: i64,

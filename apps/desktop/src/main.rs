@@ -36,6 +36,8 @@ mod lan;
 mod modules;
 mod picker;
 mod prefs;
+#[cfg(test)]
+mod qa_tests;
 mod receipt;
 mod scan;
 mod settings;

@@ -280,6 +280,7 @@ pub(super) fn earliest_expiry(expiring: &[ExpiryBucket], product_id: i64) -> Opt
 /// Its own function because the toolbar's count and the rows must agree; a
 /// filter that counted one set and drew another is the kind of bug a reader
 /// blames on the till.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn visible_catalog(
     products: &[Product],
     stock: &[StockItem],
@@ -664,14 +665,15 @@ pub(super) fn product_identity(
             pill
         };
         pill.on_hover_text(hint);
-        if can_move_stock && pill_clicked {
-            if let Some(item) = stock {
-                action = Some(ProductAction::MoveStock {
-                    id: product.id,
-                    name: product.name.clone(),
-                    on_hand: item.on_hand,
-                });
-            }
+        if can_move_stock
+            && pill_clicked
+            && let Some(item) = stock
+        {
+            action = Some(ProductAction::MoveStock {
+                id: product.id,
+                name: product.name.clone(),
+                on_hand: item.on_hand,
+            });
         }
 
         // Only the soonest date gets a badge: a perishable with four dates on

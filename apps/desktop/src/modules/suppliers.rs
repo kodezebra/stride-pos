@@ -593,7 +593,7 @@ pub(super) fn movement_hint(kind: StockKind) -> &'static str {
     match kind {
         StockKind::Receive => "Goods arriving from a supplier add to the shelf.",
         StockKind::Return => "Stock a customer brought back adds to the shelf.",
-        StockKind::Waste => "Spoiled, broken or unsellable stock leaves the shelf.",
+        StockKind::Waste => "Stock that was damaged, spoiled or lost leaves the shelf.",
         StockKind::Adjust => "Enter what you counted. The till records the difference.",
         StockKind::Opening | StockKind::Sale => "",
     }
@@ -862,11 +862,9 @@ pub fn count_modal(ctx: &egui::Context, state: &mut State) {
     if review {
         state.review_count();
     }
-    if back {
-        if let Some(draft) = state.count.as_mut() {
-            draft.stage = crate::state::CountStage::Counting;
-            draft.error = None;
-        }
+    if back && let Some(draft) = state.count.as_mut() {
+        draft.stage = crate::state::CountStage::Counting;
+        draft.error = None;
     }
     if confirm {
         state.confirm_count();
