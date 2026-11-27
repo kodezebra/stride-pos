@@ -1074,6 +1074,58 @@ fn tracking_writes_an_opening_movement_and_manual_kinds_keep_their_signs() {
 }
 
 #[test]
+fn a_write_off_cause_is_recorded_and_can_be_filtered() {
+    let (store, path) = store("stock-cause");
+    let soap = insert_product(&store, "Soap", 1_200, "Household", None, None).expect("product");
+    track_product(&store, soap, 12, 3, None, None).expect("track");
+
+    record_stock_movement_cause(
+        &store,
+        soap,
+        -1,
+        StockKind::Waste,
+        Some(WasteCause::Spoilage),
+        "Old stock",
+        None,
+        None,
+    )
+    .expect("spoilage");
+    record_stock_movement_cause(
+        &store,
+        soap,
+        -2,
+        StockKind::Waste,
+        Some(WasteCause::Damage),
+        "Crushed",
+        None,
+        None,
+    )
+    .expect("damage");
+    // An uncaused write-off from an older till still reads as plain "Waste".
+    record_stock_movement(&store, soap, -1, StockKind::Waste, "Lost", None, None).expect("waste");
+
+    let history = stock_movements(&store, soap);
+    // Newest first: the legacy uncaused row was written last.
+    assert_eq!(history[0].cause, None);
+    assert_eq!(history[0].reason_label(), "Waste");
+    assert_eq!(history[1].cause, Some(WasteCause::Damage));
+    assert_eq!(history[1].reason_label(), "Damage");
+    assert_eq!(history[2].cause, Some(WasteCause::Spoilage));
+    assert_eq!(history[2].reason_label(), "Spoilage");
+
+    let spoiled = all_stock_movements(
+        &store,
+        None,
+        Some(StockKind::Waste),
+        Some(WasteCause::Spoilage),
+    );
+    assert_eq!(spoiled.len(), 1);
+    assert_eq!(spoiled[0].reason_label(), "Spoilage");
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn a_sale_subtracts_only_the_tracked_lines() {
     let (store, path) = store("stock-sale");
     let soap = insert_product(&store, "Soap", 1_000, "Household", None, None).expect("soap");
