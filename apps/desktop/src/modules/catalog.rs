@@ -484,10 +484,10 @@ pub(super) fn product_row(
         }
         ui.add_space(SPACING.xs);
 
-        // Keep the name clear of the price and row actions. Edit and the "⋯"
-        // menu are the widest case now, and the reserve is fixed so the price
-        // column does not move when a row gains stock.
-        const ACTIONS_WIDTH: f32 = 130.0;
+        // Keep the name clear of the price and row actions. A long price plus
+        // two 44-point buttons needs more than the old single-button reserve;
+        // too tight and the last button overflows the row and disappears.
+        const ACTIONS_WIDTH: f32 = 190.0;
         const CHECK_WIDTH: f32 = 28.0;
         let text_width = (ui.available_width() - ACTIONS_WIDTH - CHECK_WIDTH).max(120.0);
         ui.allocate_ui_with_layout(
@@ -549,7 +549,15 @@ pub(super) fn product_row(
                 {
                     action = Some(ProductAction::Edit(product.id));
                 }
-                ui.menu_button("⋯", |ui| {
+                // An SVG ellipsis, like the other row buttons: the "⋯" glyph
+                // is not in the bundled fonts and can paint as nothing at all.
+                let more = components::icon_button(
+                    ui,
+                    Icon::named("ellipsis").unwrap_or(Icon::SETTINGS),
+                    44.0,
+                )
+                .on_hover_text("More actions");
+                egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(210.0);
                     // Stock actions belong to products the shop counts. An
                     // untracked product has no ledger to read or move.
@@ -579,9 +587,7 @@ pub(super) fn product_row(
                         action = Some(ProductAction::AskDelete(product.id));
                         ui.close();
                     }
-                })
-                .response
-                .on_hover_text("More actions");
+                });
             }
         });
     });
