@@ -1941,6 +1941,34 @@ fn the_warning_line_can_be_corrected_from_the_catalog() {
     let _ = std::fs::remove_file(path);
 }
 
+/// The stock sidebar's warning counts low and out products but not healthy
+/// ones, so the number means "shelves to look at" rather than "all stock".
+#[test]
+fn the_attention_count_counts_low_and_out_only() {
+    let (mut state, path) = state("attention-count", Currency::UGX);
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "10".to_owned();
+        draft.low_stock = "5".to_owned();
+    }
+    state.save_tracking();
+    assert_eq!(state.stock_attention_count(), 0);
+
+    state.start_stock_move(1, "Test item", 10, crate::db::StockKind::Adjust);
+    state.stock_move.as_mut().expect("open").quantity = "3".to_owned();
+    state.save_stock_move();
+    assert_eq!(state.stock_attention_count(), 1, "below the warning line");
+
+    state.start_stock_move(1, "Test item", 3, crate::db::StockKind::Adjust);
+    state.stock_move.as_mut().expect("open").quantity = "0".to_owned();
+    state.save_stock_move();
+    assert_eq!(state.stock_attention_count(), 1, "out is still one product");
+
+    let _ = std::fs::remove_file(path);
+}
+
 /// A cycle count corrects only the rows the shop actually counted. Walking a
 /// shelf must never turn an un counted row into a zero.
 #[test]

@@ -95,6 +95,8 @@ pub struct StockMoveDraft {
     /// operator sees rather than a difference they would have to subtract.
     pub on_hand: i64,
     pub kind: crate::db::StockKind,
+    /// Which write-off this is, when `kind` is Waste. None for other kinds.
+    pub cause: Option<crate::db::WasteCause>,
     pub quantity: String,
     /// What one unit cost on this delivery, as typed. Only meaningful when
     /// stock is being received; the restock-list path has its own cost field.
@@ -128,6 +130,7 @@ impl StockMoveDraft {
             product_name: product_name.to_owned(),
             on_hand,
             kind,
+            cause: None,
             quantity: String::new(),
             cost: String::new(),
             selling_price_minor,
@@ -444,6 +447,7 @@ impl State {
             product_name,
             on_hand,
             kind,
+            cause,
             quantity_text,
             cost_text,
             note,
@@ -455,6 +459,7 @@ impl State {
                 draft.product_name.clone(),
                 draft.on_hand,
                 draft.kind,
+                draft.cause,
                 draft.quantity.trim().to_owned(),
                 draft.cost.trim().to_owned(),
                 draft.note.clone(),
@@ -542,11 +547,12 @@ impl State {
             None
         };
 
-        match crate::db::record_stock_movement(
+        match crate::db::record_stock_movement_cause(
             &self.store,
             product_id,
             delta,
             kind,
+            cause,
             &note,
             expires_on.as_deref(),
             user_id.as_deref(),
@@ -558,20 +564,22 @@ impl State {
                         Ok(()) => {
                             self.notice = Some(format!(
                                 "{} recorded for {product_name}, with the unit cost saved.",
-                                kind.label()
+                                crate::db::movement_reason_label(kind, cause)
                             ))
                         }
                         Err(error) => {
                             tracing::error!(error = %error, "saving the unit cost failed");
                             self.notice = Some(format!(
                                 "{} recorded, but the unit cost was not saved: {error}",
-                                kind.label()
+                                crate::db::movement_reason_label(kind, cause)
                             ));
                         }
                     },
                     None => {
-                        self.notice =
-                            Some(format!("{} recorded for {product_name}.", kind.label()));
+                        self.notice = Some(format!(
+                            "{} recorded for {product_name}.",
+                            crate::db::movement_reason_label(kind, cause)
+                        ));
                     }
                 }
                 self.reload_stock();
@@ -722,15 +730,38 @@ impl State {
             2 => Some(30),
             _ => None,
         };
-        let reason = if draft.reason == 0 {
-            None
+        // Indices: 0 = all, 1..=6 = the six movement kinds, then the three
+        // write-off causes. A cause narrows to a waste movement with that
+        // cause, so "Spoilage" answers the question the old "Waste" could not.
+        let (reason, cause) = if draft.reason == 0 {
+            (None, None)
         } else {
-            crate::db::StockKind::ALL.get(draft.reason - 1).copied()
+            let index = draft.reason - 1;
+            match crate::db::StockKind::ALL.get(index) {
+                Some(kind) => (Some(*kind), None),
+                None => {
+                    let cause_index = index - crate::db::StockKind::ALL.len();
+                    match crate::db::WasteCause::ALL.get(cause_index) {
+                        Some(cause) => (Some(crate::db::StockKind::Waste), Some(*cause)),
+                        None => (None, None),
+                    }
+                }
+            }
         };
-        let movements = crate::db::all_stock_movements(&self.store, days, reason);
+        let movements = crate::db::all_stock_movements(&self.store, days, reason, cause);
         if let Some(draft) = self.global_history.as_mut() {
             draft.movements = movements;
         }
+    }
+
+    /// How many tracked products are low or out, for the stock sidebar's
+    /// at-a-glance warning. Square marks these with a dot on its stock list;
+    /// a single count gives the same signal without another colour code.
+    pub fn stock_attention_count(&self) -> usize {
+        self.stock
+            .iter()
+            .filter(|item| item.is_low() || item.is_out())
+            .count()
     }
 
     /// Read one product's recent movements for the history modal.

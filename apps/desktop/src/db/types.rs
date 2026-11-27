@@ -440,6 +440,39 @@ impl StockKind {
     }
 }
 
+/// Why stock was written off. The ledger still records a `waste` movement;
+/// the cause is a separate, optional column so old rows and sync are untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasteCause {
+    Damage,
+    Spoilage,
+    Loss,
+}
+
+impl WasteCause {
+    pub const ALL: [WasteCause; 3] = [WasteCause::Damage, WasteCause::Spoilage, WasteCause::Loss];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            WasteCause::Damage => "damage",
+            WasteCause::Spoilage => "spoilage",
+            WasteCause::Loss => "loss",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|cause| cause.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WasteCause::Damage => "Damage",
+            WasteCause::Spoilage => "Spoilage",
+            WasteCause::Loss => "Loss",
+        }
+    }
+}
+
 /// One tracked product and what the ledger says is on the shelf.
 ///
 /// `on_hand` is always `SUM(delta)`, never a stored count. Negative is allowed:
@@ -527,9 +560,18 @@ pub struct GlobalStockMovement {
     /// Signed: positive puts stock on the shelf, negative takes it off.
     pub delta: i64,
     pub kind: StockKind,
+    /// Damage, spoilage or loss on a waste movement. Old rows have none and
+    /// still read plainly as "Waste".
+    pub cause: Option<WasteCause>,
     pub note: Option<String>,
     pub created_at: String,
     pub user: Option<String>,
+}
+
+impl GlobalStockMovement {
+    pub fn reason_label(&self) -> &'static str {
+        movement_reason_label(self.kind, self.cause)
+    }
 }
 
 /// One line of a product's stock history.
@@ -539,6 +581,7 @@ pub struct StockMovement {
     /// Signed: positive puts stock on the shelf, negative takes it off.
     pub delta: i64,
     pub kind: StockKind,
+    pub cause: Option<WasteCause>,
     pub note: Option<String>,
     pub created_at: String,
     /// Who recorded it, when the movement names a staff account.
@@ -546,6 +589,21 @@ pub struct StockMovement {
     /// The date on the pack this movement carried, when it was a delivery or a
     /// return. `None` for sales, adjustments and undated stock.
     pub expires_on: Option<String>,
+}
+
+/// The reason as the shop says it: a caused write-off is no longer just
+/// "Waste". Old rows without a cause keep the old label.
+pub fn movement_reason_label(kind: StockKind, cause: Option<WasteCause>) -> &'static str {
+    match (kind, cause) {
+        (StockKind::Waste, Some(cause)) => cause.label(),
+        _ => kind.label(),
+    }
+}
+
+impl StockMovement {
+    pub fn reason_label(&self) -> &'static str {
+        movement_reason_label(self.kind, self.cause)
+    }
 }
 
 /// Where a purchase is in the only lifecycle it has: a shopping list, then a

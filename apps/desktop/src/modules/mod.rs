@@ -26,7 +26,9 @@ use ui_shell::regions;
 
 use crate::actions;
 use crate::category_seeds;
-use crate::db::{ExpiryBucket, Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplier};
+use crate::db::{
+    ExpiryBucket, Product, Purchase, PurchaseStatus, StockItem, StockKind, Supplier, WasteCause,
+};
 use crate::picker::ExportKind;
 use crate::state::{self, CustomerMode, MAX_PRICE_BREAKS, SellView, State, percent_text};
 
