@@ -357,6 +357,10 @@ pub struct State {
     pub stock_move: Option<StockMoveDraft>,
     /// One product's movements, read when the history modal opens.
     pub stock_history: Option<StockHistory>,
+    /// A physical count in progress, over one category or the whole shelf.
+    pub count: Option<CountDraft>,
+    /// The shop-wide ledger, read with the filters the owner picked.
+    pub global_history: Option<GlobalHistoryDraft>,
 
     /// Restocking trips, newest first. A purchase is a plan or a received
     /// record; it never edits stock except through the receiving screen.
@@ -609,6 +613,8 @@ impl State {
             stock_editor: None,
             stock_move: None,
             stock_history: None,
+            count: None,
+            global_history: None,
             purchases,
             purchase_search: String::new(),
             purchase_filter: 0,

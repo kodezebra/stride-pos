@@ -1502,6 +1502,21 @@ impl Module for Products {
                 }
             });
 
+        ui.add_space(SPACING.sm);
+        if state.permits(crate::auth::Permission::ManageInventory)
+            && actions::secondary_compact(ui, "Count stock")
+                .on_hover_text("Count a category in one pass and review every difference")
+                .clicked()
+        {
+            state.open_count(None);
+        }
+        if actions::quiet_compact(ui, "All stock history")
+            .on_hover_text("See every stock change, filtered by reason")
+            .clicked()
+        {
+            state.open_global_history();
+        }
+
         // Categories are facets: they narrow the list without being the list's
         // question. The question — "which product?" — is the bar's search field,
         // in the same place as on every other list.

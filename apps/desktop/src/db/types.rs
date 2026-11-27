@@ -519,6 +519,19 @@ impl StockItem {
     }
 }
 
+/// One movement from any product, for the shop-wide history view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalStockMovement {
+    pub id: i64,
+    pub product_name: String,
+    /// Signed: positive puts stock on the shelf, negative takes it off.
+    pub delta: i64,
+    pub kind: StockKind,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub user: Option<String>,
+}
+
 /// One line of a product's stock history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StockMovement {

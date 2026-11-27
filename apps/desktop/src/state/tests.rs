@@ -1932,6 +1932,95 @@ fn the_warning_line_can_be_corrected_from_the_catalog() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A cycle count corrects only the rows the shop actually counted. Walking a
+/// shelf must never turn an un counted row into a zero.
+#[test]
+fn a_count_only_writes_the_rows_that_differ() {
+    let (mut state, path) = state("stock-count", Currency::UGX);
+    seed_product(&state.store, "Second", 200, None);
+    state.reload_products();
+
+    for (id, opening) in [(1, "12"), (2, "7")] {
+        state.start_tracking();
+        {
+            let draft = state.stock_editor.as_mut().expect("open");
+            draft.product_id = Some(id);
+            draft.opening = opening.to_owned();
+            draft.low_stock = "1".to_owned();
+        }
+        state.save_tracking();
+    }
+
+    state.open_count(None);
+    assert_eq!(state.count.as_ref().expect("open").rows.len(), 2);
+    {
+        let draft = state.count.as_mut().expect("open");
+        let row = draft
+            .rows
+            .iter_mut()
+            .find(|row| row.product_id == 1)
+            .expect("tracked product");
+        row.counted = "10".to_owned();
+        // The other row is left blank on purpose.
+    }
+    state.review_count();
+    assert_eq!(
+        state.count.as_ref().expect("open").stage,
+        crate::state::CountStage::Review
+    );
+    assert_eq!(state.count_deltas(), vec![(1, -2)]);
+
+    state.confirm_count();
+    assert!(state.count.is_none(), "a confirmed count closes");
+    let on_hand: std::collections::HashMap<i64, i64> = state
+        .stock
+        .iter()
+        .map(|item| (item.product_id, item.on_hand))
+        .collect();
+    assert_eq!(on_hand[&1], 10);
+    assert_eq!(on_hand[&2], 7, "an uncounted row is untouched");
+
+    state.open_stock_history(1, "Test item");
+    let history = state.stock_history.as_ref().expect("history");
+    assert_eq!(history.movements[0].delta, -2);
+    assert_eq!(history.movements[0].kind, crate::db::StockKind::Adjust);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The global ledger answers "how much did we lose to spoilage?" without a
+/// report builder. Filters must reach the query, not just hide table rows.
+#[test]
+fn the_global_history_filters_by_reason() {
+    let (mut state, path) = state("global-history", Currency::UGX);
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "10".to_owned();
+        draft.low_stock = "1".to_owned();
+    }
+    state.save_tracking();
+
+    state.start_stock_move(1, "Test item", 10, crate::db::StockKind::Waste);
+    state.stock_move.as_mut().expect("open").quantity = "2".to_owned();
+    state.save_stock_move();
+
+    state.open_global_history();
+    let all = state.global_history.as_ref().expect("open").movements.len();
+    assert_eq!(all, 2, "an opening count and a waste movement");
+
+    // "All reasons" is zero; Waste is fifth in StockKind::ALL, hence index 5.
+    state.global_history.as_mut().expect("open").reason = 5;
+    state.reload_global_history();
+    let filtered = &state.global_history.as_ref().expect("open").movements;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].kind, crate::db::StockKind::Waste);
+    assert_eq!(filtered[0].delta, -2);
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn a_customer_rate_comes_off_the_basket() {
     let (mut state, path) = state("cart-customer", Currency::UGX);
