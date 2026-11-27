@@ -446,6 +446,7 @@ pub fn track_modal(ctx: &egui::Context, state: &mut State) {
 
 /// One manual movement: receive, a customer return, waste, or an adjustment.
 pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
+    let currency = state.currency;
     let Some(draft) = state.stock_move.as_mut() else {
         return;
     };
@@ -481,13 +482,36 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
         text_field(
             ui,
             &mut draft.quantity,
-            if draft.kind == StockKind::Adjust {
-                "Counted quantity"
-            } else {
-                "Quantity"
-            },
+            movement_quantity_label(draft.kind),
             160.0,
         );
+
+        // Square shows Price, Unit Cost and Profit Margin together at the
+        // point of receiving. Here the price is already on the product, so
+        // typing the cost is enough to show the margin — no trip to a report.
+        if draft.kind == StockKind::Receive {
+            ui.add_space(SPACING.md);
+            components::field_label(ui, &format!("Unit cost ({}, optional)", currency.code()));
+            ui.add_space(SPACING.xs);
+            text_field(ui, &mut draft.cost, "0", 130.0)
+                .on_hover_text("What one unit cost you on this delivery.");
+            if let Ok(cost) = money::Money::parse(draft.cost.trim(), currency)
+                && cost.minor() >= 0
+                && draft.selling_price_minor > 0
+            {
+                let price = draft.selling_price_minor;
+                let margin = ((price - cost.minor()) * 100 + price / 2) / price;
+                components::caption(
+                    ui,
+                    &format!(
+                        "Selling at {} · {margin}% margin at that cost.",
+                        money::Money::new(price, currency).format()
+                    ),
+                );
+            } else {
+                components::caption(ui, "Used for margin and profit reports.");
+            }
+        }
 
         // A date only exists on stock that arrived or left on a specific
         // batch. An adjustment is a correction to a count, not a delivery.
@@ -582,10 +606,10 @@ pub(super) fn movement_hint(kind: StockKind) -> &'static str {
 }
 
 pub(super) fn movement_quantity_label(kind: StockKind) -> &'static str {
-    if kind == StockKind::Adjust {
-        "Counted quantity"
-    } else {
-        "Quantity"
+    match kind {
+        StockKind::Adjust => "Counted quantity",
+        StockKind::Receive => "Number received",
+        _ => "Quantity",
     }
 }
 

@@ -216,6 +216,30 @@ fn product(id: i64, name: &str, barcode: Option<&str>) -> Product {
     }
 }
 
+/// Stock sorting is a lens over the same rows, not a different filter. An
+/// untracked product has no count, so it goes last in both stock orders
+/// instead of pretending to be an empty shelf.
+#[test]
+fn the_catalog_sorts_by_stock_with_untracked_rows_last() {
+    let products = [
+        product(1, "High", None),
+        product(2, "Low", None),
+        product(3, "Untracked", None),
+    ];
+    let mut high = stock_item(1, "High", "Drinks", false);
+    high.on_hand = 40;
+    let mut low = stock_item(2, "Low", "Drinks", false);
+    low.on_hand = 3;
+    let stock = [high, low];
+
+    let visible = |sort| catalog::visible_catalog(&products, &stock, &[], 7, None, "", 0, sort);
+
+    assert_eq!(visible(0), vec![0, 1, 2], "catalog order is the default");
+    assert_eq!(visible(1), vec![1, 0, 2], "lowest stock first");
+    assert_eq!(visible(2), vec![0, 1, 2], "highest stock first");
+    assert_eq!(visible(3), vec![0, 1, 2], "A–Z");
+}
+
 /// A barcode is what the scanner sends, and a product *name* can contain the
 /// same digits. If the name won, the wrong item would land in the cart and the
 /// till would be off by the difference — silently.

@@ -238,6 +238,9 @@ pub struct State {
     pub sell_search: String,
     /// The Products list's query.
     pub catalog_search: String,
+    /// How the Products list is ordered: catalog order, lowest stock first,
+    /// highest stock first, then A–Z. A view choice, never written to a product.
+    pub catalog_sort: usize,
     /// Set when the selling screen opens, so the next frame can put the cursor in
     /// the scan field. A scanner types into whatever has focus; a till that needs
     /// one click before the first barcode is a till that "doesn't scan".
@@ -560,6 +563,7 @@ impl State {
             prefs_dirty: false,
             sell_search: String::new(),
             catalog_search: String::new(),
+            catalog_sort: 0,
             scan_focus: true,
             scan_submit: false,
             scanner_status: ScanStatus::Off,

@@ -96,6 +96,12 @@ pub struct StockMoveDraft {
     pub on_hand: i64,
     pub kind: crate::db::StockKind,
     pub quantity: String,
+    /// What one unit cost on this delivery, as typed. Only meaningful when
+    /// stock is being received; the restock-list path has its own cost field.
+    pub cost: String,
+    /// The shelf price, carried in so the form can show margin as the cost is
+    /// typed rather than sending the operator to the catalog to look it up.
+    pub selling_price_minor: i64,
     pub note: String,
     /// The date printed on the pack, as typed. Only a delivery, a return or
     /// stock pulled off a dated bucket carries one.
@@ -115,6 +121,7 @@ impl StockMoveDraft {
         kind: crate::db::StockKind,
         perishable: bool,
         shelf_life_days: Option<i64>,
+        selling_price_minor: i64,
     ) -> Self {
         Self {
             product_id,
@@ -122,6 +129,8 @@ impl StockMoveDraft {
             on_hand,
             kind,
             quantity: String::new(),
+            cost: String::new(),
+            selling_price_minor,
             note: String::new(),
             expires_on: String::new(),
             perishable,
@@ -372,6 +381,11 @@ impl State {
         kind: crate::db::StockKind,
     ) {
         let item = self.stock.iter().find(|item| item.product_id == product_id);
+        let selling_price_minor = self
+            .products
+            .iter()
+            .find(|product| product.id == product_id)
+            .map_or(0, |product| product.price_minor);
         self.stock_move = Some(StockMoveDraft::new(
             product_id,
             product_name,
@@ -379,6 +393,7 @@ impl State {
             kind,
             item.is_some_and(|item| item.perishable),
             item.and_then(|item| item.shelf_life_days),
+            selling_price_minor,
         ));
         self.stock_editor = None;
         self.stock_history = None;
@@ -397,6 +412,7 @@ impl State {
             on_hand,
             kind,
             quantity_text,
+            cost_text,
             note,
             expires_text,
             perishable,
@@ -407,6 +423,7 @@ impl State {
                 draft.on_hand,
                 draft.kind,
                 draft.quantity.trim().to_owned(),
+                draft.cost.trim().to_owned(),
                 draft.note.clone(),
                 draft.expires_on.trim().to_owned(),
                 draft.perishable,
@@ -480,6 +497,18 @@ impl State {
                 .stock_move_error("This product is perishable; date the delivery from the pack.");
         }
 
+        // A delivery whose cost is unknown is still recorded. A cost that was
+        // typed but cannot be read is refused, so a half-entered amount never
+        // silently becomes "free goods" in the margin reports.
+        let cost_minor = if kind == crate::db::StockKind::Receive && !cost_text.is_empty() {
+            match money::Money::parse(&cost_text, self.currency) {
+                Ok(money) if money.minor() >= 0 => Some(money.minor()),
+                _ => return self.stock_move_error("Unit cost must be a positive amount."),
+            }
+        } else {
+            None
+        };
+
         match crate::db::record_stock_movement(
             &self.store,
             product_id,
@@ -491,8 +520,28 @@ impl State {
         ) {
             Ok(()) => {
                 self.stock_move = None;
+                match cost_minor {
+                    Some(cost) => match crate::db::set_last_cost(&self.store, product_id, cost) {
+                        Ok(()) => {
+                            self.notice = Some(format!(
+                                "{} recorded for {product_name}, with the unit cost saved.",
+                                kind.label()
+                            ))
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, "saving the unit cost failed");
+                            self.notice = Some(format!(
+                                "{} recorded, but the unit cost was not saved: {error}",
+                                kind.label()
+                            ));
+                        }
+                    },
+                    None => {
+                        self.notice =
+                            Some(format!("{} recorded for {product_name}.", kind.label()));
+                    }
+                }
                 self.reload_stock();
-                self.notice = Some(format!("{} recorded for {product_name}.", kind.label()));
             }
             Err(error) => {
                 tracing::error!(error = %error, "recording a stock movement failed");

@@ -5,6 +5,23 @@
 //! target, the export and the editor all live beside the list they serve.
 
 use super::*;
+
+/// The stock order Square puts on its Stock overview, plus the catalog's own
+/// order and A–Z. Indexed by [`crate::state::State::catalog_sort`].
+const CATALOG_SORT_LABELS: &[&str] = &[
+    "Catalog order",
+    "Lowest stock first",
+    "Highest stock first",
+    "A–Z",
+];
+
+/// What one loose item is usually called. These are starting words, not a
+/// schema: the field stays editable, so a shop selling "strips" or "rolls" is
+/// not forced into someone else's vocabulary.
+const UNIT_PRESETS: &[&str] = &[
+    "unit", "tablet", "sachet", "box", "bottle", "each", "kg", "litre",
+];
+
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
@@ -62,6 +79,7 @@ pub(crate) fn run_export(state: &mut State, kind: ExportKind, dir: &Path) {
                 state.category.as_deref(),
                 &needle,
                 state.stock_filter,
+                state.catalog_sort,
             );
             let rows: Vec<Product> = visible
                 .iter()
@@ -270,8 +288,9 @@ pub(super) fn visible_catalog(
     category: Option<&str>,
     needle: &str,
     filter: usize,
+    sort: usize,
 ) -> Vec<usize> {
-    products
+    let mut visible: Vec<usize> = products
         .iter()
         .enumerate()
         .filter(|(_, product)| {
@@ -289,7 +308,37 @@ pub(super) fn visible_catalog(
                 }
         })
         .map(|(index, _)| index)
-        .collect()
+        .collect();
+
+    // Sorting is a lens over the same rows, not a filter: an untracked product
+    // has no count to rank, so it goes last in both stock orders rather than
+    // pretending to be zero. Names break ties so the order is stable.
+    let on_hand = |index: usize| stock_item(stock, products[index].id).map(|item| item.on_hand);
+    match sort {
+        1 | 2 => visible.sort_by(|&a, &b| {
+            let order = match (on_hand(a), on_hand(b)) {
+                (Some(x), Some(y)) if sort == 1 => x.cmp(&y),
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            order.then_with(|| {
+                products[a]
+                    .name
+                    .to_lowercase()
+                    .cmp(&products[b].name.to_lowercase())
+            })
+        }),
+        3 => visible.sort_by(|&a, &b| {
+            products[a]
+                .name
+                .to_lowercase()
+                .cmp(&products[b].name.to_lowercase())
+        }),
+        _ => {}
+    }
+    visible
 }
 
 /// What a scanned code or a typed name resolved to.
@@ -445,14 +494,18 @@ pub(super) fn product_row(
             egui::vec2(text_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                product_identity(
+                let from_identity = product_identity(
                     ui,
                     product,
                     stock,
                     &state.expiring,
                     state.expiry_warning_days(),
                     cost.as_deref(),
-                )
+                    can_manage,
+                );
+                if action.is_none() {
+                    action = from_identity;
+                }
             },
         );
 
@@ -464,7 +517,7 @@ pub(super) fn product_row(
             {
                 price.on_hover_text(format!(
                     "Pack of {}: {}",
-                    product.pack_size,
+                    count_label(product.pack_size, &product.unit_label),
                     state.money(pack_price)
                 ));
             }
@@ -546,12 +599,19 @@ pub(super) fn product_identity(
     expiring: &[ExpiryBucket],
     warn_days: i64,
     cost: Option<&str>,
-) {
+    can_move_stock: bool,
+) -> Option<ProductAction> {
+    let mut action = None;
     ui.horizontal_wrapped(|ui| {
         ui.label(components::semibold(&product.name).size(TYPE.body));
         let (text, color, hint) = match stock {
             Some(item) => {
                 let (color, hint) = stock_badge(ui, item);
+                let hint = if can_move_stock {
+                    format!("{hint}\nClick to receive, count or remove stock.")
+                } else {
+                    hint
+                };
                 (item.on_hand.to_string(), color, hint)
             }
             // A dash, not a zero: the product has no ledger, and a count of
@@ -577,14 +637,36 @@ pub(super) fn product_identity(
                 .size()
                 .x
         });
-        let badge = ui
-            .allocate_ui_with_layout(
-                egui::vec2(text_width + 13.0, 0.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| components::badge(ui, &text, color),
-            )
-            .response;
-        badge.on_hover_text(hint);
+        let allocated = ui.allocate_ui_with_layout(
+            egui::vec2(text_width + 13.0, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| components::badge(ui, &text, color),
+        );
+        // A badge is a label, so it has no click sense of its own. Put an
+        // explicit, same-size hit area over it: the count is the thing a
+        // manager touches, and should open the stock action directly instead
+        // of sending them hunting for an icon among the row's buttons.
+        let pill = ui.interact(
+            allocated.response.rect,
+            egui::Id::new(("pos_stock_pill", product.id)),
+            egui::Sense::click(),
+        );
+        let pill_clicked = pill.clicked();
+        let pill = if can_move_stock {
+            pill.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            pill
+        };
+        pill.on_hover_text(hint);
+        if can_move_stock && pill_clicked {
+            if let Some(item) = stock {
+                action = Some(ProductAction::MoveStock {
+                    id: product.id,
+                    name: product.name.clone(),
+                    on_hand: item.on_hand,
+                });
+            }
+        }
 
         // Only the soonest date gets a badge: a perishable with four dates on
         // the shelf needs one warning, not four. The Stock screen lists them
@@ -646,6 +728,7 @@ pub(super) fn product_identity(
         detail.push_str(cost);
     }
     components::caption(ui, &detail);
+    action
 }
 
 /// "12" for units, "12 boxes" when the product names what it is counted in.
@@ -845,8 +928,24 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         ui.add_space(SPACING.md);
         components::field_label(ui, "Sold as");
         ui.add_space(SPACING.xs);
-        text_field(ui, &mut draft.unit_label, "unit", 110.0)
-            .on_hover_text("What one loose item is called.");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACING.xs;
+            text_field(ui, &mut draft.unit_label, "unit", 110.0)
+                .on_hover_text("What one loose item is called.");
+            // Starting words for the shop to tap; the field stays editable so
+            // "strips" or "rolls" are never forced into a preset.
+            egui::ComboBox::from_id_salt("pos_product_unit")
+                .width(116.0)
+                .selected_text("Pick…")
+                .show_ui(ui, |ui| {
+                    for name in UNIT_PRESETS {
+                        if ui.selectable_label(false, *name).clicked() {
+                            draft.unit_label = (*name).to_owned();
+                            ui.close();
+                        }
+                    }
+                });
+        });
 
         let each = {
             let label = draft.unit_label.trim();
@@ -857,14 +956,27 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             }
         };
 
+        // Fill before drawing so the field and its explanation agree on the
+        // same frame. Once the operator types a price, the helper steps aside.
+        draft.sync_price_from_pack(currency);
+
         ui.add_space(SPACING.md);
-        components::field_label(ui, &format!("Price per {each} ({})", currency.code()));
+        components::field_label(
+            ui,
+            &format!("Selling price per {each} ({})", currency.code()),
+        );
         ui.add_space(SPACING.xs);
         let response = text_field(ui, &mut draft.price, "0", 150.0);
         // A typed price belongs to the operator: stop the pack helper from
         // replacing it as they keep adjusting the pack price.
         if response.changed() {
             draft.note_price_typed();
+        }
+        if draft.price_was_filled_from_pack() {
+            components::caption(
+                ui,
+                "Filled from the pack price. Type your own to override it.",
+            );
         }
         if let Some(note) = &cost_note {
             components::caption(ui, note);
@@ -911,10 +1023,8 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             }
         }
 
-        // Fill the loose price from the pack price on the first pass, and keep
-        // it in step while the operator tunes the pack. Once they type a price
-        // of their own the helper steps aside.
-        draft.sync_price_from_pack(currency);
+        // The pack helper runs beside the price field, above, so its note and
+        // the number on screen are always from the same frame.
 
         // Pack details, breaks and expiry are closed on a new product. The
         // heading carries the state, so nothing important is hidden silently.
@@ -943,7 +1053,12 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                     });
 
                     ui.vertical(|ui| {
-                        components::field_label(ui, &format!("Pack price ({})", currency.code()));
+                        let size = draft.pack_size.trim().parse::<i64>().unwrap_or(1).max(1);
+                        let pack_label = count_label(size, &each);
+                        components::field_label(
+                            ui,
+                            &format!("Pack price ({pack_label}, {})", currency.code()),
+                        );
                         ui.add_space(SPACING.xs);
                         text_field(ui, &mut draft.pack_price, "Optional", 130.0);
                     });
@@ -991,7 +1106,7 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                         ui.spacing_mut().item_spacing.x = SPACING.sm;
                         components::caption(ui, "From");
                         text_field(ui, &mut row.qty, "10", 70.0);
-                        components::caption(ui, "units, each");
+                        components::caption(ui, &format!("{each}, each"));
                         text_field(ui, &mut row.price, "0", 110.0);
                         if actions::quiet_compact(ui, "Remove").clicked() {
                             remove = Some(index);
@@ -1288,6 +1403,27 @@ impl Module for Products {
         ui.add_space(SPACING.sm);
         components::caption(ui, "Low, out and expiring count tracked products only.");
 
+        // Sort lives beside the stock facets because it is how the morning
+        // "what is low?" answer is read. It reorders the same rows; it never
+        // hides one, so the toolbar's count and the list cannot disagree.
+        ui.add_space(SPACING.sm);
+        components::field_label(ui, "Sort");
+        ui.add_space(SPACING.xs);
+        egui::ComboBox::from_id_salt("pos_catalog_sort")
+            .width(160.0)
+            .selected_text(CATALOG_SORT_LABELS[state.catalog_sort.min(3)])
+            .show_ui(ui, |ui| {
+                for (index, label) in CATALOG_SORT_LABELS.iter().enumerate() {
+                    if ui
+                        .selectable_label(state.catalog_sort == index, *label)
+                        .clicked()
+                    {
+                        state.catalog_sort = index;
+                        ui.close();
+                    }
+                }
+            });
+
         // Categories are facets: they narrow the list without being the list's
         // question. The question — "which product?" — is the bar's search field,
         // in the same place as on every other list.
@@ -1335,6 +1471,7 @@ impl Module for Products {
                     state.category.as_deref(),
                     &needle,
                     state.stock_filter,
+                    state.catalog_sort,
                 );
                 format!("{} of {}", visible.len(), state.products.len())
             })
@@ -1370,7 +1507,7 @@ impl Module for Products {
             ui,
             PageLeft::Search {
                 text: &mut state.catalog_search,
-                hint: "Name or barcode",
+                hint: "Name, code or barcode",
                 count,
             },
             |ui| {
@@ -1519,6 +1656,7 @@ impl Module for Products {
             state.category.as_deref(),
             &needle,
             state.stock_filter,
+            state.catalog_sort,
         );
 
         file_feedback(ui, state);

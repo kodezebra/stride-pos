@@ -155,6 +155,14 @@ impl ProductDraft {
         self.price_typed = true;
         self.derived_price_minor = None;
     }
+
+    /// Whether the price currently in the field was filled from the pack.
+    ///
+    /// The editor says so on screen: a price that appeared on its own is a
+    /// surprise worth explaining, while a price the operator typed is theirs.
+    pub fn price_was_filled_from_pack(&self) -> bool {
+        self.derived_price_minor.is_some()
+    }
 }
 
 /// What a CSV file is for: new rows, or prices and details for rows already

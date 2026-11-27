@@ -1824,6 +1824,64 @@ fn the_pack_price_helper_rounds_up_not_down() {
     assert_eq!(draft.price, "29");
 }
 
+/// The editor needs to say when a price appeared on its own: an unexplained
+/// number is exactly the kind of thing that gets trusted and charged.
+#[test]
+fn the_pack_price_helper_says_when_it_filled_the_price() {
+    let mut draft = ProductDraft::new("Medicine".to_owned(), None);
+    draft.pack_size = "100".to_owned();
+    draft.pack_price = "2800".to_owned();
+
+    assert!(!draft.price_was_filled_from_pack());
+    draft.sync_price_from_pack(Currency::UGX);
+    assert!(draft.price_was_filled_from_pack());
+
+    draft.note_price_typed();
+    assert!(
+        !draft.price_was_filled_from_pack(),
+        "once typed, the price is the operator's own"
+    );
+}
+
+/// A delivery recorded straight from a product can carry its cost. Without
+/// this, a shop that never makes a restock list reports those goods as free.
+#[test]
+fn a_direct_receive_saves_its_unit_cost() {
+    let (mut state, path) = state("stock-receive-cost", Currency::UGX);
+
+    state.start_tracking();
+    {
+        let draft = state.stock_editor.as_mut().expect("open");
+        draft.product_id = Some(1);
+        draft.opening = "0".to_owned();
+        draft.low_stock = "1".to_owned();
+    }
+    state.save_tracking();
+
+    state.start_stock_move(1, "Test item", 0, crate::db::StockKind::Receive);
+    {
+        let draft = state.stock_move.as_mut().expect("open");
+        assert_eq!(
+            draft.selling_price_minor, 100,
+            "the form carries the shelf price"
+        );
+        draft.quantity = "10".to_owned();
+        draft.cost = "18".to_owned();
+    }
+    state.save_stock_move();
+
+    assert!(state.stock_move.is_none(), "a saved movement closes");
+    assert_eq!(state.stock[0].on_hand, 10);
+    let saved = crate::db::products(&state.store);
+    assert_eq!(
+        saved[0].cost_milli,
+        Some(18_000),
+        "one unit cost 18 minor units, kept in thousandths"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn a_customer_rate_comes_off_the_basket() {
     let (mut state, path) = state("cart-customer", Currency::UGX);

@@ -120,6 +120,29 @@ pub fn track_product(
     Ok(())
 }
 
+/// Record the last price paid for one unit of a product.
+///
+/// A delivery recorded straight from a product's stock action never passes
+/// through a restock list, so without this it would leave no cost behind and
+/// margin reports would read it as free goods. The cost lives on the product
+/// as thousandths of a minor unit, the same precision purchase lines use.
+pub fn set_last_cost(
+    store: &storage::Store,
+    product_id: i64,
+    cost_minor: i64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(cost_minor >= 0, "a unit cost cannot be negative");
+    let cost_milli = cost_minor
+        .checked_mul(1000)
+        .context("that unit cost is out of range")?;
+    let changed = store.conn().execute(
+        "UPDATE products SET cost_milli = ?2 WHERE id = ?1 AND archived = 0",
+        (product_id, cost_milli),
+    )?;
+    anyhow::ensure!(changed == 1, "that product is no longer in the catalog");
+    Ok(())
+}
+
 /// Mark a tracked product as perishable, or clear that.
 ///
 /// Perishability is not part of [`ProductFields`]: like tracking, it is a
