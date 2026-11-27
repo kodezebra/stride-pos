@@ -712,8 +712,7 @@ pub(super) fn cart(ui: &mut egui::Ui, state: &mut State) {
                 ui.separator();
                 let mut recall_idx = None;
                 let mut discard_idx = None;
-                for i in 0..parked_count {
-                    let p = &state.parked_carts[i];
+                for (i, p) in state.parked_carts.iter().enumerate() {
                     let text = format!("{} · {} ({} items)", p.id, p.created_at, p.lines.len());
                     ui.horizontal(|ui| {
                         if ui.button(text).clicked() {
