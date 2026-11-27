@@ -201,7 +201,10 @@ This is the whole counter flow, from idle till to done.
    - scan a barcode (phone or USB scanner) — exact barcode wins over search;
    - type part of a name or barcode in the search field at the top of the
      screen — the grid narrows as you type;
-   - tap a tile in the grid.
+   - tap a tile in the grid. A product with a priced pack also shows a small
+     **×N** badge in the tile's bottom corner: tap it to add one sealed pack
+     instead of a loose unit. With a mouse, the same choices are in the
+     right-click menu.
 4. Same product twice merges into one line at the next quantity. Use the **− / +**
    stepper on a line to change quantity; going below 1 removes the line.
 5. The right-hand pane shows **Subtotal**, **Tax** (literal "not configured"),

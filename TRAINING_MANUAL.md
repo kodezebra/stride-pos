@@ -417,7 +417,9 @@ All three ways can be mixed in one sale:
 
 - **Scan** with a USB scanner or the paired phone. An exact barcode wins over the search text.
 - **Search** by part of a name or barcode. The grid narrows as you type.
-- **Tap** a product tile.
+- **Tap** a product tile. If it has a priced pack, the small **×N** badge in
+  the tile's bottom-right adds one sealed pack instead of a loose unit. With a
+  mouse, both choices are also in the right-click menu.
 
 **Same product twice** merges into one line at quantity 2. Check the quantity, not the number of lines.
 

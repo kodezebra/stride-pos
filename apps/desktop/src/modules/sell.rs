@@ -457,6 +457,49 @@ pub(super) fn sell_view_toggle(ui: &mut egui::Ui, view: &mut SellView) {
         });
 }
 
+/// A touch-sized shortcut for adding one sealed pack.
+///
+/// The right-click menu also offers the pack, but a till has no right button:
+/// without this, a shop that sells boxes can only ring them up by breaking open
+/// the catalog. The badge sits at the bottom-right, away from the name and the
+/// price, and only appears for products that actually have a pack price.
+fn pack_shortcut(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    product_index: usize,
+    product: &crate::db::Product,
+    pack_price: &str,
+    clicked: &mut Option<(usize, i64)>,
+) -> bool {
+    if product.pack_size <= 1 || product.pack_price_minor.is_none() {
+        return false;
+    }
+    let size = egui::vec2(48.0, 28.0);
+    let badge_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.right() - size.x - SPACING.sm,
+            rect.bottom() - size.y - SPACING.sm,
+        ),
+        size,
+    );
+    let palette = theme::current(ui.ctx());
+    let button =
+        egui::Button::new(egui::RichText::new(format!("×{}", product.pack_size)).size(TYPE.small))
+            .min_size(size)
+            .fill(egui::Color32::from(palette.surface_alt))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from(palette.border)))
+            .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
+    let response = ui.put(badge_rect, button).on_hover_text(format!(
+        "Add one pack of {} {} · {}",
+        product.pack_size, product.unit_label, pack_price
+    ));
+    if response.clicked() {
+        *clicked = Some((product_index, product.pack_size));
+        return true;
+    }
+    false
+}
+
 /// The touch layout: touch-sized tiles in rows of as many as the panel holds.
 ///
 /// Tile by rectangle, not by wrapping. The column count is arithmetic on the
@@ -502,8 +545,14 @@ pub(super) fn product_tiles(
                 };
                 let response = ui.put(rect, tile);
                 let response = with_product_hint(response, derived.detail(index));
+                let pack_price = product
+                    .pack_price_minor
+                    .map(|price| state.money(price))
+                    .unwrap_or_default();
+                let pack_clicked =
+                    pack_shortcut(ui, rect, product_index, product, &pack_price, &mut clicked);
                 product_context_menu(&response, product, product_index, &mut clicked);
-                if response.clicked() {
+                if response.clicked() && !pack_clicked {
                     clicked = Some((product_index, 1));
                 }
             }
@@ -538,10 +587,22 @@ pub(super) fn product_rows(
             for (slot, &product_index) in derived.visible().iter().enumerate() {
                 let product = &state.products[product_index];
                 let price = state.money(product.price_minor);
-                let response = sell_row(ui, &product.name, &price);
+                let pack_price = product
+                    .pack_price_minor
+                    .map(|price| state.money(price))
+                    .unwrap_or_default();
+                let (response, pack_clicked) = sell_row(
+                    ui,
+                    &product.name,
+                    &price,
+                    product_index,
+                    product,
+                    &pack_price,
+                    &mut clicked,
+                );
                 let response = with_product_hint(response, derived.detail(slot));
                 product_context_menu(&response, product, product_index, &mut clicked);
-                if response.clicked() {
+                if response.clicked() && !pack_clicked {
                     clicked = Some((product_index, 1));
                 }
             }
@@ -570,14 +631,22 @@ fn product_context_menu(
     clicked: &mut Option<(usize, i64)>,
 ) {
     response.context_menu(|ui| {
-        if ui.button("Add loose").clicked() {
+        let one = if product.unit_label == "unit" {
+            "one".to_owned()
+        } else {
+            format!("one {}", product.unit_label)
+        };
+        if ui.button(format!("Add {one}")).clicked() {
             *clicked = Some((product_index, 1));
             ui.close();
         }
         if product.pack_size > 1
             && product.pack_price_minor.is_some()
             && ui
-                .button(format!("Add pack of {}", product.pack_size))
+                .button(format!(
+                    "Add pack of {} {}",
+                    product.pack_size, product.unit_label
+                ))
                 .clicked()
         {
             *clicked = Some((product_index, product.pack_size));
@@ -588,7 +657,15 @@ fn product_context_menu(
 
 /// One product in the Sell list: name and price on a row that is one big
 /// click target.
-pub(super) fn sell_row(ui: &mut egui::Ui, name: &str, price: &str) -> egui::Response {
+pub(super) fn sell_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    price: &str,
+    product_index: usize,
+    product: &crate::db::Product,
+    pack_price: &str,
+    clicked: &mut Option<(usize, i64)>,
+) -> (egui::Response, bool) {
     let palette = theme::current(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -634,7 +711,11 @@ pub(super) fn sell_row(ui: &mut egui::Ui, name: &str, price: &str) -> egui::Resp
         });
     }
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let pack_clicked = pack_shortcut(ui, rect, product_index, product, pack_price, clicked);
+    (
+        response.on_hover_cursor(egui::CursorIcon::PointingHand),
+        pack_clicked,
+    )
 }
 
 /// Space kept below the line list so the total never scrolls out of sight.
