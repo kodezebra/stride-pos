@@ -465,13 +465,19 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
         components::field_label(ui, "What happened");
         ui.add_space(SPACING.xs);
         ui.horizontal_wrapped(|ui| {
-            for kind in [
-                StockKind::Receive,
-                StockKind::Return,
-                StockKind::Waste,
-                StockKind::Adjust,
+            for (kind, cause, label) in [
+                (StockKind::Receive, None, "Received"),
+                (StockKind::Return, None, "Customer return"),
+                (StockKind::Waste, Some(WasteCause::Damage), "Damage"),
+                (StockKind::Waste, Some(WasteCause::Spoilage), "Spoilage"),
+                (StockKind::Waste, Some(WasteCause::Loss), "Loss"),
+                (StockKind::Adjust, None, "Counted"),
             ] {
-                ui.selectable_value(&mut draft.kind, kind, movement_label(kind));
+                let selected = draft.kind == kind && draft.cause == cause;
+                if ui.selectable_label(selected, label).clicked() {
+                    draft.kind = kind;
+                    draft.cause = cause;
+                }
             }
         });
         components::caption(ui, movement_hint(draft.kind));
@@ -583,18 +589,6 @@ pub fn stock_move_modal(ctx: &egui::Context, state: &mut State) {
     }
 }
 
-/// A movement kind in the till's words, not the stored ones.
-pub(super) fn movement_label(kind: StockKind) -> &'static str {
-    match kind {
-        StockKind::Receive => "Received",
-        StockKind::Return => "Customer return",
-        StockKind::Waste => "Waste",
-        StockKind::Adjust => "Counted",
-        StockKind::Opening => "Opening count",
-        StockKind::Sale => "Sale",
-    }
-}
-
 pub(super) fn movement_hint(kind: StockKind) -> &'static str {
     match kind {
         StockKind::Receive => "Goods arriving from a supplier add to the shelf.",
@@ -688,7 +682,7 @@ pub(super) fn movement_row(ui: &mut egui::Ui, movement: &crate::db::StockMovemen
     ui.horizontal(|ui| {
         ui.set_min_height(44.0);
         ui.vertical(|ui| {
-            ui.label(components::semibold(movement_label(movement.kind)).size(TYPE.body));
+            ui.label(components::semibold(movement.reason_label()).size(TYPE.body));
             let mut detail = movement.created_at.clone();
             if let Some(user) = &movement.user {
                 detail.push_str(" · ");
@@ -967,7 +961,7 @@ pub fn global_history_modal(ctx: &egui::Context, state: &mut State) {
                             components::caption(ui, &movement.created_at);
                             let sign = if movement.delta > 0 { "+" } else { "" };
                             components::caption(ui, &format!("{sign}{}", movement.delta));
-                            components::caption(ui, movement.kind.label());
+                            components::caption(ui, movement.reason_label());
                         });
                     });
                     if let Some(note) = &movement.note {
@@ -1008,6 +1002,11 @@ fn reason_labels() -> Vec<&'static str> {
         crate::db::StockKind::ALL
             .into_iter()
             .map(|kind| kind.label()),
+    );
+    labels.extend(
+        crate::db::WasteCause::ALL
+            .into_iter()
+            .map(|cause| cause.label()),
     );
     labels
 }

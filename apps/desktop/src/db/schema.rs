@@ -825,4 +825,9 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "product_sku",
         sql: include_str!("../../migrations/2000_product_sku.sql"),
     },
+    Migration {
+        version: 2001,
+        name: "stock_cause",
+        sql: include_str!("../../migrations/2001_stock_cause.sql"),
+    },
 ];

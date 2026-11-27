@@ -536,11 +536,12 @@ pub fn pull_expired(
         .unwrap_or(0);
     anyhow::ensure!(remaining > 0, "that date has no stock left to pull");
 
-    record_stock_movement(
+    record_stock_movement_cause(
         store,
         product_id,
         -remaining,
         StockKind::Waste,
+        Some(WasteCause::Spoilage),
         "Expired",
         Some(&date),
         user_id,
@@ -553,6 +554,7 @@ pub fn pull_expired(
 /// Signs are fixed by the kind, not left to the caller: `Receive` and `Return`
 /// add stock, `Waste` removes it, and only `Adjust` may go either way. A UI that
 /// computes the wrong sign is a bug this function refuses rather than stores.
+#[cfg(test)]
 pub fn record_stock_movement(
     store: &storage::Store,
     product_id: i64,
@@ -562,6 +564,27 @@ pub fn record_stock_movement(
     expires_on: Option<&str>,
     user_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    record_stock_movement_cause(
+        store, product_id, delta, kind, None, note, expires_on, user_id,
+    )
+}
+
+/// The write-off case of [`record_stock_movement`], with the cause recorded
+/// alongside the ledger row. The original six call sites stay unchanged.
+pub fn record_stock_movement_cause(
+    store: &storage::Store,
+    product_id: i64,
+    delta: i64,
+    kind: StockKind,
+    cause: Option<WasteCause>,
+    note: &str,
+    expires_on: Option<&str>,
+    user_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cause.is_none() || kind == StockKind::Waste,
+        "only a write-off can name a cause"
+    );
     anyhow::ensure!(delta != 0, "a stock movement must change the count");
     match kind {
         StockKind::Receive | StockKind::Return => {
@@ -608,12 +631,13 @@ pub fn record_stock_movement(
 
     store.conn().execute(
         "INSERT INTO stock_movements
-             (product_id, delta, kind, note, expires_on, user_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (product_id, delta, kind, cause, note, expires_on, user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         (
             product_id,
             delta,
             kind.key(),
+            cause.map(WasteCause::key),
             optional_text(note),
             expires_on,
             user_id,
@@ -667,6 +691,7 @@ pub fn all_stock_movements(
     store: &storage::Store,
     days: Option<i64>,
     reason: Option<StockKind>,
+    cause: Option<WasteCause>,
 ) -> Vec<GlobalStockMovement> {
     let since = days
         .map(|days| format!(" AND m.created_at >= datetime('now','localtime','-{days} days')"))
@@ -674,13 +699,16 @@ pub fn all_stock_movements(
     let kind = reason
         .map(|kind| format!(" AND m.kind = '{}'", kind.key()))
         .unwrap_or_default();
+    let cause_clause = cause
+        .map(|cause| format!(" AND m.cause = '{}'", cause.key()))
+        .unwrap_or_default();
     let sql = format!(
-        "SELECT m.id, p.name, m.delta, m.kind, m.note,
+        "SELECT m.id, p.name, m.delta, m.kind, m.cause, m.note,
                 strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name
            FROM stock_movements m
            JOIN products p ON p.id = m.product_id
            LEFT JOIN users u ON u.id = m.user_id
-          WHERE 1 = 1 {since} {kind}
+          WHERE 1 = 1 {since} {kind} {cause_clause}
           ORDER BY m.id DESC LIMIT 500"
     );
     let mut statement = match store.conn().prepare(&sql) {
@@ -692,14 +720,16 @@ pub fn all_stock_movements(
     };
     let rows = statement.query_map([], |row| {
         let kind: String = row.get(3)?;
+        let cause: Option<String> = row.get(4)?;
         Ok(GlobalStockMovement {
             id: row.get(0)?,
             product_name: row.get(1)?,
             delta: row.get(2)?,
             kind: StockKind::from_key(&kind).unwrap_or(StockKind::Adjust),
-            note: row.get(4)?,
-            created_at: row.get(5)?,
-            user: row.get(6)?,
+            cause: cause.and_then(|key| WasteCause::from_key(&key)),
+            note: row.get(5)?,
+            created_at: row.get(6)?,
+            user: row.get(7)?,
         })
     });
     match rows {
@@ -720,7 +750,7 @@ pub const MOVEMENT_HISTORY: i64 = 200;
 
 pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMovement> {
     let mut statement = match store.conn().prepare(
-        "SELECT m.id, m.delta, m.kind, m.note,
+        "SELECT m.id, m.delta, m.kind, m.cause, m.note,
                 strftime('%d/%m %H:%M', m.created_at, 'localtime'), u.name,
                 m.expires_on
          FROM stock_movements m
@@ -743,9 +773,10 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
             row.get::<_, i64>(1)?,
             kind,
             row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     });
 
@@ -755,16 +786,19 @@ pub fn stock_movements(store: &storage::Store, product_id: i64) -> Vec<StockMove
     };
 
     rows.filter_map(Result::ok)
-        .filter_map(|(id, delta, kind, note, created_at, user, expires_on)| {
-            Some(StockMovement {
-                id,
-                delta,
-                kind: StockKind::from_key(&kind)?,
-                note,
-                created_at,
-                user,
-                expires_on,
-            })
-        })
+        .filter_map(
+            |(id, delta, kind, cause, note, created_at, user, expires_on)| {
+                Some(StockMovement {
+                    id,
+                    delta,
+                    kind: StockKind::from_key(&kind)?,
+                    cause: cause.and_then(|key| WasteCause::from_key(&key)),
+                    note,
+                    created_at,
+                    user,
+                    expires_on,
+                })
+            },
+        )
         .collect()
 }

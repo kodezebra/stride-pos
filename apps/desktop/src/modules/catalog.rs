@@ -1487,6 +1487,18 @@ impl Module for Products {
         }
         ui.add_space(SPACING.sm);
         components::caption(ui, "Low, out and expiring count tracked products only.");
+        let attention = state.stock_attention_count();
+        ui.add_space(SPACING.xs);
+        if attention > 0 {
+            let palette = theme::current(ui.ctx());
+            ui.scope(|ui| {
+                components::badge(ui, &format!("{attention} need attention"), palette.warning);
+            })
+            .response
+            .on_hover_text("Products at or below their warning line, or out of stock.");
+        } else {
+            components::caption(ui, "Nothing needs attention.");
+        }
 
         // Sort lives beside the stock facets because it is how the morning
         // "what is low?" answer is read. It reorders the same rows; it never
