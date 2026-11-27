@@ -439,6 +439,12 @@ impl State {
         let Some(pack_size) = pack_size else {
             return self.editor_error("A pack size must be a whole number of one or more.");
         };
+        // Scanning checks the loose code first. The same code on both fields
+        // would make the pack unreachable from the till, so refuse it here
+        // rather than saving a pack nobody can sell.
+        if pack_size > 1 && !barcode.is_empty() && barcode == pack_barcode {
+            return self.editor_error("The pack barcode must differ from the loose barcode.");
+        }
         // An unnamed category is not worth an error: a product whose shelf has
         // no name yet still sells, so it lands in the default one instead of
         // stopping the save.

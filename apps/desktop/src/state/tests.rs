@@ -878,6 +878,104 @@ fn an_unnamed_category_lands_in_general() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A pack of one is a loose-only product: stale pack fields are ignored on
+/// save rather than saving a second way to sell the same goods.
+#[test]
+fn a_pack_of_one_discards_its_pack_price_and_barcode() {
+    let (mut state, path) = state("product-pack-of-one", Currency::UGX);
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Loose paracetamol".to_owned();
+        draft.price = "30".to_owned();
+        draft.unit_label = "tablet".to_owned();
+        draft.pack_size = "1".to_owned();
+        draft.pack_price = "2800".to_owned();
+        draft.pack_barcode = "BOX-100".to_owned();
+        draft.barcode = "STRIP-1".to_owned();
+    }
+    state.save_product();
+
+    let saved = state
+        .products
+        .iter()
+        .find(|product| product.name == "Loose paracetamol")
+        .expect("saved with its loose details");
+    assert_eq!(saved.unit_label, "tablet");
+    assert_eq!(saved.pack_size, 1);
+    assert_eq!(saved.pack_price_minor, None, "no price for a pack of one");
+    assert_eq!(saved.pack_barcode.as_deref(), None, "no box code either");
+    assert_eq!(saved.barcode.as_deref(), Some("STRIP-1"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A priced pack keeps its own size, price and barcode on the same catalog row.
+#[test]
+fn a_priced_pack_saves_with_its_own_barcode() {
+    let (mut state, path) = state("product-priced-pack", Currency::UGX);
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Boxed paracetamol".to_owned();
+        draft.price = "30".to_owned();
+        draft.unit_label = "tablet".to_owned();
+        draft.pack_size = "100".to_owned();
+        draft.pack_price = "2800".to_owned();
+        draft.pack_barcode = "BOX-100".to_owned();
+        draft.barcode = "STRIP-1".to_owned();
+    }
+    state.save_product();
+
+    let saved = state
+        .products
+        .iter()
+        .find(|product| product.name == "Boxed paracetamol")
+        .expect("saved with its pack details");
+    assert_eq!(saved.pack_size, 100);
+    assert_eq!(saved.pack_price_minor, Some(2_800));
+    assert_eq!(saved.pack_barcode.as_deref(), Some("BOX-100"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Scanning checks the loose barcode first, so one code on both fields would
+/// make the pack unreachable. Refuse it while the form is still open.
+#[test]
+fn a_pack_barcode_matching_the_loose_barcode_is_refused() {
+    let (mut state, path) = state("product-pack-barcode-clash", Currency::UGX);
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Clashing pack".to_owned();
+        draft.price = "30".to_owned();
+        draft.pack_size = "100".to_owned();
+        draft.pack_price = "2800".to_owned();
+        draft.barcode = "SAME-CODE".to_owned();
+        draft.pack_barcode = "SAME-CODE".to_owned();
+    }
+    state.save_product();
+
+    let draft = state.product_editor.as_ref().expect("the form stays open");
+    assert!(
+        draft
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("differ")),
+        "the form explains the clash: {:?}",
+        draft.error
+    );
+    assert!(
+        !state
+            .products
+            .iter()
+            .any(|product| product.name == "Clashing pack"),
+        "nothing was saved"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
 /// The form is where a ladder is typed. It saves with the product, and reopens
 /// with the same rungs so changing one is an edit rather than a retype.
 #[test]
