@@ -301,10 +301,12 @@ zero when you receive.
 **When the goods come back**
 
 1. **Restock** (`F3`) → open the planned list.
-2. Each row starts at the planned quantity. Change it to what actually arrived.
+2. Each row starts at the planned quantity, with **Planned N** under the name so
+   you can see what changed. Change the quantity to what actually arrived.
    A line you did not find is set to **0**: it stays on the record as not bought.
-   Enter the unit cost if you know it — this becomes the product's last known
-   cost, and profit on future sales uses it.
+   Enter the **unit cost** if you know it — the selling price and margin appear
+   under the name as you type, and the cost becomes the product's last known
+   cost. Cost is per purchase unit: set **per pack** when a box holds several.
 3. If you bought something not on the list, add it from the search at the bottom
    of the page with its quantity and cost. This is also the moment to correct the
    supplier if the list named the wrong one.

@@ -14,6 +14,10 @@ pub struct PurchaseLineDraft {
     pub product_id: i64,
     pub name: String,
     pub qty: String,
+    /// What the saved plan asked for, when this line came from one. Shown while
+    /// receiving so the number being changed is visibly a deviation, not a
+    /// fresh guess. `None` for a line added directly to the count sheet.
+    pub planned_qty: Option<i64>,
     pub cost: String,
     /// How many base units one ordered unit holds. Prefilled from the product
     /// but editable: the shop may buy loose this week and a boxed pack next.
@@ -88,6 +92,7 @@ impl State {
                 product_id: line.product_id.unwrap_or_default(),
                 name: line.name.clone(),
                 qty: line.qty_ordered.to_string(),
+                planned_qty: Some(line.qty_ordered),
                 cost: line
                     .unit_cost_minor
                     .map(|cost| plain_amount(cost, currency))
@@ -136,6 +141,7 @@ impl State {
             product_id,
             name,
             qty: "1".to_owned(),
+            planned_qty: None,
             cost: cost
                 .map(|cost| plain_amount(cost, currency))
                 .unwrap_or_default(),
@@ -314,6 +320,7 @@ impl State {
                 product_id,
                 name,
                 qty: qty.to_string(),
+                planned_qty: None,
                 cost: cost
                     .map(|cost| plain_amount(cost, currency))
                     .unwrap_or_default(),

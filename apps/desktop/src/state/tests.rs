@@ -154,6 +154,7 @@ fn a_trip_planned_at_the_market_is_received_in_one_go() {
             product_id: 1,
             name: "Test item".to_owned(),
             qty: "3".to_owned(),
+            planned_qty: None,
             cost: "500".to_owned(),
             pack_size: "1".to_owned(),
             expires_on: String::new(),
@@ -195,6 +196,7 @@ fn receiving_asks_for_a_second_press() {
             product_id: 1,
             name: "Test item".to_owned(),
             qty: "2".to_owned(),
+            planned_qty: None,
             cost: String::new(),
             pack_size: "1".to_owned(),
             expires_on: String::new(),
@@ -252,6 +254,7 @@ fn an_unsaved_trip_can_count_a_line_at_zero() {
                 product_id,
                 name: name.to_owned(),
                 qty: qty.to_owned(),
+                planned_qty: None,
                 cost: String::new(),
                 pack_size: "1".to_owned(),
                 expires_on: String::new(),
@@ -310,6 +313,7 @@ fn a_received_trip_keeps_the_difference_between_plan_and_count() {
                 product_id,
                 name: name.to_owned(),
                 qty: qty.to_owned(),
+                planned_qty: None,
                 cost: "500".to_owned(),
                 pack_size: "1".to_owned(),
                 expires_on: String::new(),
@@ -322,6 +326,11 @@ fn a_received_trip_keeps_the_difference_between_plan_and_count() {
     let id = state.purchases[0].id;
     state.edit_purchase(id);
     let draft = state.purchase_editor.as_mut().expect("reopened");
+    assert_eq!(
+        draft.lines[0].planned_qty,
+        Some(5),
+        "the plan is carried in so receiving can show what changed"
+    );
     draft.lines[0].qty = "2".to_owned(); // short
     draft.lines[1].qty = "0".to_owned(); // not bought
     state.purchase_remove_line(2); // never bought
