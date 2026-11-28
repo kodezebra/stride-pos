@@ -863,6 +863,7 @@ fn an_unnamed_category_lands_in_general() {
         perishable: false,
         shelf_life_days: String::new(),
         tiers: Vec::new(),
+        quick: true,
         error: None,
     });
     state.save_product();
@@ -874,6 +875,63 @@ fn an_unnamed_category_lands_in_general() {
         .find(|product| product.name == "Hot water")
         .expect("saved with its default category");
     assert_eq!(saved.category, "General");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A new product starts as a quick add; editing one opens every field because
+/// that is when the manager is there to change a specific setting.
+#[test]
+fn new_products_open_quick_and_existing_ones_open_full() {
+    let (mut state, path) = state("product-quick-view", Currency::UGX);
+
+    state.start_product();
+    assert!(
+        state.product_editor.as_ref().expect("new form").quick,
+        "a new product needs only the quick fields"
+    );
+
+    let existing = state.products.first().expect("seeded product").clone();
+    state.edit_product(&existing);
+    assert!(
+        !state.product_editor.as_ref().expect("edit form").quick,
+        "editing shows the configuration fields"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The quick form holds neutral defaults, so saving it straight away produces
+/// a product that can be sold without visiting the detail fields.
+#[test]
+fn a_quick_add_is_sellable_without_any_detail_fields() {
+    let (mut state, path) = state("product-quick-save", Currency::UGX);
+    state.start_product();
+    {
+        let draft = state.product_editor.as_mut().expect("open");
+        draft.name = "Quick sachet".to_owned();
+        draft.price = "30".to_owned();
+        draft.category = "Medicine".to_owned();
+        draft.barcode = "Q-SACHET".to_owned();
+    }
+    state.save_product();
+
+    let saved = state
+        .products
+        .iter()
+        .find(|product| product.name == "Quick sachet")
+        .expect("saved from the quick form")
+        .clone();
+    assert_eq!(saved.unit_label, "unit");
+    assert_eq!(saved.pack_size, 1);
+    assert!(saved.tiers.is_empty());
+    assert_eq!(saved.barcode.as_deref(), Some("Q-SACHET"));
+
+    state.add_to_cart(&saved, 1);
+    assert_eq!(
+        state.cart[0].unit_minor, 30,
+        "the product sells immediately"
+    );
 
     let _ = std::fs::remove_file(path);
 }
