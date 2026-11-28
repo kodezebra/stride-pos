@@ -135,7 +135,8 @@ and the sale is recorded with the name of whoever took it, on Day.
   price, barcode, sku`); a second CSV can update existing products, matching
   first on the shop code and then on the barcode. Stock and cost are never
   written by a file
-- receipts can be previewed but not printed
+- receipts can be previewed, copied as text, or saved as an A4 PDF; there is no
+  direct print dialog yet
 - void, refund and discount have permissions but no screen yet
 - purchases record a unit cost and profit appears in Trends once sales
   with a known cost have happened; there is no full stock valuation yet

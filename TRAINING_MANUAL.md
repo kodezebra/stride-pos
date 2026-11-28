@@ -458,7 +458,8 @@ Pressing **Complete sale** writes the sale, takes the stock out, empties the car
 
 - The **Change** you read before completing is what you hand over.
 - The slip is kept on the sale: `F2` **Today** → open the sale, which shows lines, amount paid, method and change. **Copy receipt** puts it on the clipboard as text, for a WhatsApp confirmation or a dispute.
-- Receipts cannot be printed in this build. Say so plainly and offer the copied text.
+- **Save A4 PDF** writes that same slip to a file; **Open PDF** shows it in the computer's viewer. There is no button that sends it straight to a printer, so if a shop needs paper, print the saved file from the computer.
+- A credit sale carries a marked **CREDIT SALE** block with what has been settled and what is still owed. On a reprint the balance is the balance *as of printing*, not the balance on the sale date.
 
 **If the queue is long:** the cart is already empty after a sale, so `Enter` on the scanner's next barcode starts the next sale. No keypress is needed to "start a new sale".
 
@@ -797,7 +798,7 @@ Tick each item only when the trainee has done it alone, without help. Sign at th
 - [ ] Takes a larger note and gives the right change
 - [ ] Explains rounding in one sentence
 - [ ] Completes a sale and starts a new one
-- [ ] Copies a receipt and knows printed receipts are not available
+- [ ] Copies a receipt, saves it as an A4 PDF, and knows there is no direct print button
 
 **End of day**
 
@@ -910,7 +911,7 @@ IF STUCK     Read the caption under the button.
 | **Pull to waste** | Remove only what is left of one expired batch |
 | **Rounding** | The small cash difference caused by coins no longer circulating |
 | **Approval** | A manager allowing one action for one minute |
-| **Receipt** | The record of one sale; it can be copied, not printed |
+| **Receipt** | The record of one sale; copy it as text or save it as an A4 PDF |
 
 ---
 
@@ -919,7 +920,7 @@ IF STUCK     Read the caption under the button.
 Teach these limits so nobody hunts for a button that is not there.
 
 - **Cash only.** No mobile money, no cards.
-- **No printed receipts.** Copy the receipt as text instead.
+- **No direct print button.** Copy the receipt as text or save it as an A4 PDF and print that file from the computer.
 - **No void, refund, or discount screens.** The permissions exist, the screens do not.
 - **No full stock valuation.** Purchases record a unit cost, and Trends shows profit only for sale lines that had a known cost.
 - **No supplier delivery workflow.** Purchases are a shopping list for the owner's trip; there is no sent order, no invoice, no payment to a supplier.

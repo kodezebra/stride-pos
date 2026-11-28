@@ -27,6 +27,7 @@ Needs a display (X11 or Wayland).
 ```
 apps/desktop/src/
   main.rs       wiring only: open db → migrate → settings → state → shell
+  a4.rs         one sale laid out on A4, written with the shared `printing` crate
   db.rs         schema, migrations, and the SQL behind the screens
   state.rs      everything the UI can change, in one struct
   modules.rs    Sell / Day / Catalog / Restock / Suppliers / Settings
@@ -37,7 +38,7 @@ apps/desktop/src/
   scan.rs       phone-scanner service: config, token, pairing URI, lifecycle
   scan/         protocol validation and the LAN HTTP listener
   firewall.rs   is the listener's port reachable, and the privileged step that opens it
-  settings.rs   terminal + scanner settings (tax and printer later)
+  settings.rs   terminal + scanner settings (tax later; printing needs no setting yet)
   shell.rs      rail, sidebar, workspace, status bar, the modals
 crates/         reserved for product-internal crates
 ```
