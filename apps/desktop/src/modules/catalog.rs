@@ -987,7 +987,9 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
     let mut cancel = false;
 
     modal(ctx, egui::Id::new("pos_product_editor")).show(ctx, |ui| {
-        ui.set_width(460.0);
+        // Wide enough that the pack and break rows do not wrap; the body still
+        // scrolls, so this stays usable on a short till screen.
+        ui.set_width(580.0);
 
         let heading = if draft.id.is_some() {
             "Edit product"
@@ -997,19 +999,11 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
         ui.label(components::semibold(heading).size(TYPE.heading));
         components::caption(
             ui,
-            "The price is stored exactly as entered. The till rounds cash at payment.",
-        );
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Name");
-        ui.add_space(SPACING.xs);
-        components::search_field(ui, &mut draft.name, "Espresso");
-
-        ui.add_space(SPACING.sm);
-        components::field_label(ui, "Shop code (SKU, optional)");
-        ui.add_space(SPACING.xs);
-        text_field(ui, &mut draft.sku, "Your own code", 150.0).on_hover_text(
-            "A reorder key you own. CSV updates match on it first, then on a barcode.",
+            if draft.quick {
+                "Name, price and category are enough to start selling. Add the rest later."
+            } else {
+                "The price is stored exactly as entered. The till rounds cash at payment."
+            },
         );
 
         let each = {
@@ -1021,258 +1015,288 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             }
         };
 
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Sold as");
-        ui.add_space(SPACING.xs);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.xs;
-            text_field(ui, &mut draft.unit_label, "unit", 110.0)
-                .on_hover_text("What one loose item is called.");
-            // Starting words for the shop to tap; the field stays editable so
-            // "strips" or "rolls" are never forced into a preset.
-            egui::ComboBox::from_id_salt("pos_product_unit")
-                .width(116.0)
-                .selected_text("Pick…")
-                .show_ui(ui, |ui| {
-                    for name in UNIT_PRESETS {
-                        if ui.selectable_label(false, *name).clicked() {
-                            draft.unit_label = (*name).to_owned();
-                            ui.close();
-                        }
-                    }
-                });
-        });
-        components::caption(
-            ui,
-            &format!(
-                "One {each} is the base unit. Stock is counted in {each}, even when a pack is sold."
-            ),
-        );
-
-        // Fill before drawing so the field and its explanation agree on the
-        // same frame. Once the operator types a price, the helper steps aside.
-        draft.sync_price_from_pack(currency);
-
-        ui.add_space(SPACING.md);
-        components::field_label(
-            ui,
-            &format!("Selling price per {each} ({})", currency.code()),
-        );
-        ui.add_space(SPACING.xs);
-        let response = text_field(ui, &mut draft.price, "0", 150.0);
-        // A typed price belongs to the operator: stop the pack helper from
-        // replacing it as they keep adjusting the pack price.
-        if response.changed() {
-            draft.note_price_typed();
-        }
-        if draft.price_was_filled_from_pack() {
-            components::caption(
-                ui,
-                "Filled from the pack price. Type your own to override it.",
-            );
-        }
-        if let Some(note) = &cost_note {
-            components::caption(ui, note);
-        }
-
-        ui.add_space(SPACING.md);
-        components::field_label(ui, "Category");
-        ui.add_space(SPACING.xs);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACING.xs;
-            text_field(ui, &mut draft.category, "General", 148.0);
-            // Existing names in a dropdown instead of a wall of chips: the
-            // suggestion list stays one click away without pushing the field
-            // past the modal edge. The field stays editable, because a shop
-            // must still be able to name a new shelf.
-            egui::ComboBox::from_id_salt("pos_product_category")
-                .width(220.0)
-                .selected_text("Pick…")
-                .show_ui(ui, |ui| {
-                    if suggestions.is_empty() {
-                        components::caption(ui, "No other categories yet.");
-                    }
-                    for name in &suggestions {
-                        if ui.selectable_label(false, name).clicked() {
-                            draft.category = name.clone();
-                            ui.close();
-                        }
-                    }
-                });
-        });
-
-        // A product that is not counted yet can start tracking here, whether
-        // it is new or already on the shelf. The button saves the details
-        // first, so a count is never attached to a half-written product.
-        if !draft.tracked && can_track {
-            ui.add_space(SPACING.md);
-            components::field_label(ui, "Stock");
-            ui.add_space(SPACING.xs);
-            if actions::secondary_compact(ui, "Save & track stock")
-                .on_hover_text("Save these details, then count what is on the shelf.")
-                .clicked()
-            {
-                track = true;
-            }
-        }
-
-        // The pack helper runs beside the price field, above, so its note and
-        // the number on screen are always from the same frame.
-
-        // Pack details, breaks and expiry are closed on a new product. The
-        // heading carries the state, so nothing important is hidden silently.
-        ui.add_space(SPACING.md);
-        let pack_heading = components::semibold(format!(
-            "Pack & barcodes · {}",
-            pack_summary(
-                &draft.pack_size,
-                &draft.pack_price,
-                &draft.pack_barcode,
-                &draft.barcode
-            )
-        ))
-        .size(TYPE.body);
-        egui::CollapsingHeader::new(pack_heading)
-            .id_salt("pos_product_pack")
+        // The footer stays outside the scroll area: Save must never scroll out
+        // of reach, however many details a manager expands.
+        let max_height = (ui.ctx().content_rect().height() - 260.0).max(280.0);
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
             .show(ui, |ui| {
+                ui.add_space(SPACING.md);
+                components::field_label(ui, "Name");
+                ui.add_space(SPACING.xs);
+                components::search_field(ui, &mut draft.name, "Espresso");
+
+                // Fill before drawing so the field and its explanation agree on the
+                // same frame. Once the operator types a price, the helper steps aside.
+                draft.sync_price_from_pack(currency);
+
+                ui.add_space(SPACING.md);
+                components::field_label(
+                    ui,
+                    &format!("Selling price per {each} ({})", currency.code()),
+                );
+                ui.add_space(SPACING.xs);
+                let response = text_field(ui, &mut draft.price, "0", 150.0);
+                // A typed price belongs to the operator: stop the pack helper from
+                // replacing it as they keep adjusting the pack price.
+                if response.changed() {
+                    draft.note_price_typed();
+                }
+                if draft.price_was_filled_from_pack() {
+                    components::caption(
+                        ui,
+                        "Filled from the pack price. Type your own to override it.",
+                    );
+                }
+                if let Some(note) = &cost_note {
+                    components::caption(ui, note);
+                }
+
+                ui.add_space(SPACING.md);
+                components::field_label(ui, "Category");
                 ui.add_space(SPACING.xs);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = SPACING.md;
-
-                    ui.vertical(|ui| {
-                        components::field_label(ui, &format!("Units per pack ({each})"));
-                        ui.add_space(SPACING.xs);
-                        text_field(ui, &mut draft.pack_size, "1", 90.0)
-                            .on_hover_text(format!("How many {each} one sealed pack holds."));
-                    });
-
-                    ui.vertical(|ui| {
-                        let size = draft.pack_size.trim().parse::<i64>().unwrap_or(1).max(1);
-                        let pack_label = count_label(size, &each);
-                        components::field_label(
-                            ui,
-                            &format!("Pack price ({pack_label}, {})", currency.code()),
-                        );
-                        ui.add_space(SPACING.xs);
-                        text_field(ui, &mut draft.pack_price, "Optional", 130.0);
-                    });
+                    ui.spacing_mut().item_spacing.x = SPACING.xs;
+                    text_field(ui, &mut draft.category, "General", 148.0);
+                    // Existing names in a dropdown instead of a wall of chips: the
+                    // suggestion list stays one click away without pushing the field
+                    // past the modal edge. The field stays editable, because a shop
+                    // must still be able to name a new shelf.
+                    egui::ComboBox::from_id_salt("pos_product_category")
+                        .width(220.0)
+                        .selected_text("Pick…")
+                        .show_ui(ui, |ui| {
+                            if suggestions.is_empty() {
+                                components::caption(ui, "No other categories yet.");
+                            }
+                            for name in &suggestions {
+                                if ui.selectable_label(false, name).clicked() {
+                                    draft.category = name.clone();
+                                    ui.close();
+                                }
+                            }
+                        });
                 });
-                ui.add_space(SPACING.xs);
-                components::caption(
-                    ui,
-                    "Set to 1 when there is no sealed pack — the pack price and \
-                     pack barcode are then ignored.",
-                );
 
-                ui.add_space(SPACING.sm);
-                components::field_label(ui, "Pack barcode (optional)");
-                ui.add_space(SPACING.xs);
-                text_field(ui, &mut draft.pack_barcode, "On the box", 350.0).on_hover_text(
-                    format!("Scanning this code adds one sealed pack of {each}."),
-                );
-
-                ui.add_space(SPACING.sm);
+                ui.add_space(SPACING.md);
                 components::field_label(ui, "Barcode (optional)");
                 ui.add_space(SPACING.xs);
                 text_field(ui, &mut draft.barcode, "Scanned or typed", 350.0);
-            });
 
-        ui.add_space(SPACING.sm);
-        let breaks_heading = components::semibold(format!(
-            "Quantity breaks · {}",
-            break_summary(draft.tiers.len())
-        ))
-        .size(TYPE.body);
-        egui::CollapsingHeader::new(breaks_heading)
-            .id_salt("pos_product_breaks")
-            .show(ui, |ui| {
-                ui.add_space(SPACING.xs);
-                components::caption(
-                    ui,
-                    &format!(
-                        "Price per {each}, {}. The base price is above.",
-                        currency.code()
-                    ),
-                );
-                if draft.tiers.is_empty() {
-                    components::caption(ui, "None. Every unit costs the price above.");
+                ui.add_space(SPACING.md);
+                let details_label = if draft.quick {
+                    "More details →"
+                } else {
+                    "Fewer details"
+                };
+                if actions::secondary_compact(ui, details_label).clicked() {
+                    draft.quick = !draft.quick;
                 }
-                let mut remove = None;
-                for (index, row) in draft.tiers.iter_mut().enumerate() {
+
+                // Everything below is configuration a manager can add after the
+                // product already exists and sells. Hiding it is a view choice only;
+                // the draft keeps its values and `write_product` still sees them.
+                if !draft.quick {
+                    ui.add_space(SPACING.sm);
+                    components::field_label(ui, "Shop code (SKU, optional)");
+                    ui.add_space(SPACING.xs);
+                    text_field(ui, &mut draft.sku, "Your own code", 150.0).on_hover_text(
+                        "A reorder key you own. CSV updates match on it first, then on a barcode.",
+                    );
+
+                    ui.add_space(SPACING.md);
+                    components::field_label(ui, "Sold as");
+                    ui.add_space(SPACING.xs);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = SPACING.sm;
-                        components::caption(ui, "From");
-                        text_field(ui, &mut row.qty, "10", 70.0);
-                        components::caption(ui, &format!("{each}, each"));
-                        text_field(ui, &mut row.price, "0", 110.0);
-                        if actions::quiet_compact(ui, "Remove").clicked() {
-                            remove = Some(index);
-                        }
+                        ui.spacing_mut().item_spacing.x = SPACING.xs;
+                        text_field(ui, &mut draft.unit_label, "unit", 110.0)
+                            .on_hover_text("What one loose item is called.");
+                        // Starting words for the shop to tap; the field stays editable
+                        // so "strips" or "rolls" are never forced into a preset.
+                        egui::ComboBox::from_id_salt("pos_product_unit")
+                            .width(116.0)
+                            .selected_text("Pick…")
+                            .show_ui(ui, |ui| {
+                                for name in UNIT_PRESETS {
+                                    if ui.selectable_label(false, *name).clicked() {
+                                        draft.unit_label = (*name).to_owned();
+                                        ui.close();
+                                    }
+                                }
+                            });
                     });
-                    ui.add_space(SPACING.xs);
-                }
-                if let Some(index) = remove {
-                    draft.remove_tier(index);
-                }
-                if draft.tiers.len() < MAX_PRICE_BREAKS
-                    && actions::quiet_compact(ui, "Add a break").clicked()
-                {
-                    draft.add_tier();
-                }
-                components::caption(
-                    ui,
-                    "A break prices the whole line once the count reaches it, and cannot cost \
-                     more than the price below it.",
-                );
-            });
+                    components::caption(
+                        ui,
+                        &format!(
+                            "One {each} is the base unit. Stock is counted in {each}, even when a pack is sold."
+                        ),
+                    );
 
-        ui.add_space(SPACING.sm);
-        let expiry_heading = components::semibold(format!(
-            "Expiry · {}",
-            expiry_summary(draft.tracked, draft.perishable, &draft.shelf_life_days)
-        ))
-        .size(TYPE.body);
-        egui::CollapsingHeader::new(expiry_heading)
-            .id_salt("pos_product_expiry")
-            .show(ui, |ui| {
-                ui.add_space(SPACING.xs);
-                // Expiry lives beside tracking, not on the catalog fields.
-                // Tracking is started from Inventory, so this form shows the
-                // flag and explains why it is off rather than offering a switch
-                // the ledger cannot honour.
-                ui.add_enabled_ui(draft.tracked, |ui| {
-                    ui.checkbox(&mut draft.perishable, "Goes off — date every delivery");
-                    ui.add_space(SPACING.xs);
-                    ui.add_enabled_ui(draft.perishable, |ui| {
+                    // A product that is not counted yet can start tracking here,
+                    // whether it is new or already on the shelf. The button saves the
+                    // details first, so a count is never attached to a half-written
+                    // product.
+                    if !draft.tracked && can_track {
+                        ui.add_space(SPACING.md);
+                        components::field_label(ui, "Stock");
+                        ui.add_space(SPACING.xs);
+                        if actions::secondary_compact(ui, "Save & track stock")
+                            .on_hover_text("Save these details, then count what is on the shelf.")
+                            .clicked()
+                        {
+                            track = true;
+                        }
+                    }
+
+                ui.add_space(SPACING.md);
+                let pack_heading = components::semibold(format!(
+                    "Pack & barcodes · {}",
+                    pack_summary(
+                        &draft.pack_size,
+                        &draft.pack_price,
+                        &draft.pack_barcode,
+                        &draft.barcode
+                    )
+                ))
+                .size(TYPE.body);
+                egui::CollapsingHeader::new(pack_heading)
+                    .id_salt("pos_product_pack")
+                    .show(ui, |ui| {
+                        ui.add_space(SPACING.xs);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = SPACING.md;
+
                             ui.vertical(|ui| {
-                                components::field_label(ui, "Usual shelf life (days, optional)");
+                                components::field_label(ui, &format!("Units per pack ({each})"));
                                 ui.add_space(SPACING.xs);
-                                text_field(ui, &mut draft.shelf_life_days, "e.g. 30", 130.0);
+                                text_field(ui, &mut draft.pack_size, "1", 90.0)
+                                    .on_hover_text(format!("How many {each} one sealed pack holds."));
+                            });
+
+                            ui.vertical(|ui| {
+                                let size = draft.pack_size.trim().parse::<i64>().unwrap_or(1).max(1);
+                                let pack_label = count_label(size, &each);
+                                components::field_label(
+                                    ui,
+                                    &format!("Pack price ({pack_label}, {})", currency.code()),
+                                );
+                                ui.add_space(SPACING.xs);
+                                text_field(ui, &mut draft.pack_price, "Optional", 130.0);
                             });
                         });
-                    });
-                });
-                components::caption(
-                    ui,
-                    if draft.tracked {
-                        "The date printed on the pack always wins. The shelf life is a reminder \
-                         for repacked or undated goods."
-                    } else {
-                        "Track this product from Inventory before dating its stock."
-                    },
-                );
-            });
+                        ui.add_space(SPACING.xs);
+                        components::caption(
+                            ui,
+                            "Set to 1 when there is no sealed pack — the pack price and \
+                             pack barcode are then ignored.",
+                        );
 
-        if let Some(error) = &draft.error {
-            ui.add_space(SPACING.sm);
-            ui.label(
-                egui::RichText::new(error)
-                    .size(TYPE.small)
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
+                        ui.add_space(SPACING.sm);
+                        components::field_label(ui, "Pack barcode (optional)");
+                        ui.add_space(SPACING.xs);
+                        text_field(ui, &mut draft.pack_barcode, "On the box", 350.0).on_hover_text(
+                            format!("Scanning this code adds one sealed pack of {each}."),
+                        );
+                    });
+
+                ui.add_space(SPACING.sm);
+                let breaks_heading = components::semibold(format!(
+                    "Quantity breaks · {}",
+                    break_summary(draft.tiers.len())
+                ))
+                .size(TYPE.body);
+                egui::CollapsingHeader::new(breaks_heading)
+                    .id_salt("pos_product_breaks")
+                    .show(ui, |ui| {
+                        ui.add_space(SPACING.xs);
+                        components::caption(
+                            ui,
+                            &format!(
+                                "Price per {each}, {}. The base price is above.",
+                                currency.code()
+                            ),
+                        );
+                        if draft.tiers.is_empty() {
+                            components::caption(ui, "None. Every unit costs the price above.");
+                        }
+                        let mut remove = None;
+                        for (index, row) in draft.tiers.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACING.sm;
+                                components::caption(ui, "From");
+                                text_field(ui, &mut row.qty, "10", 70.0);
+                                components::caption(ui, &format!("{each}, each"));
+                                text_field(ui, &mut row.price, "0", 110.0);
+                                if actions::quiet_compact(ui, "Remove").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+                            ui.add_space(SPACING.xs);
+                        }
+                        if let Some(index) = remove {
+                            draft.remove_tier(index);
+                        }
+                        if draft.tiers.len() < MAX_PRICE_BREAKS
+                            && actions::quiet_compact(ui, "Add a break").clicked()
+                        {
+                            draft.add_tier();
+                        }
+                        components::caption(
+                            ui,
+                            "A break prices the whole line once the count reaches it, and cannot cost \
+                             more than the price below it.",
+                        );
+                    });
+
+                ui.add_space(SPACING.sm);
+                let expiry_heading = components::semibold(format!(
+                    "Expiry · {}",
+                    expiry_summary(draft.tracked, draft.perishable, &draft.shelf_life_days)
+                ))
+                .size(TYPE.body);
+                egui::CollapsingHeader::new(expiry_heading)
+                    .id_salt("pos_product_expiry")
+                    .show(ui, |ui| {
+                        ui.add_space(SPACING.xs);
+                        // Expiry lives beside tracking, not on the catalog fields.
+                        // Tracking is started from Inventory, so this form shows the
+                        // flag and explains why it is off rather than offering a switch
+                        // the ledger cannot honour.
+                        ui.add_enabled_ui(draft.tracked, |ui| {
+                            ui.checkbox(&mut draft.perishable, "Goes off — date every delivery");
+                            ui.add_space(SPACING.xs);
+                            ui.add_enabled_ui(draft.perishable, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACING.md;
+                                    ui.vertical(|ui| {
+                                        components::field_label(ui, "Usual shelf life (days, optional)");
+                                        ui.add_space(SPACING.xs);
+                                        text_field(ui, &mut draft.shelf_life_days, "e.g. 30", 130.0);
+                                    });
+                                });
+                            });
+                        });
+                        components::caption(
+                            ui,
+                            if draft.tracked {
+                                "The date printed on the pack always wins. The shelf life is a reminder \
+                                 for repacked or undated goods."
+                            } else {
+                                "Track this product from Inventory before dating its stock."
+                            },
+                        );
+                    });
+                }
+
+                if let Some(error) = &draft.error {
+                    ui.add_space(SPACING.sm);
+                    ui.label(
+                        egui::RichText::new(error)
+                            .size(TYPE.small)
+                            .color(ui.visuals().error_fg_color),
+                    );
+                }
+        });
 
         actions::footer(ui, |ui| {
             if actions::primary(ui, "Save").clicked() {

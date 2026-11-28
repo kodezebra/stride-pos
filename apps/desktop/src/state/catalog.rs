@@ -37,6 +37,9 @@ pub struct ProductDraft {
     /// cleared field stays theirs: the helper must not grab an empty box back
     /// and turn the next keystroke into "283".
     pub(super) price_typed: bool,
+    /// Whether the editor shows only the fields a new product needs. A view
+    /// choice, not product data: it is never written and never read from a row.
+    pub(crate) quick: bool,
     /// Whether the ledger tracks this product. Only a tracked product can be
     /// perishable, because a date has to sit on a movement.
     pub tracked: bool,
@@ -95,6 +98,7 @@ impl ProductDraft {
             perishable: false,
             shelf_life_days: String::new(),
             tiers: Vec::new(),
+            quick: true,
             error: None,
         }
     }
@@ -403,6 +407,9 @@ impl State {
                     price: plain_amount(tier.price_minor, self.currency),
                 })
                 .collect(),
+            // Editing means the manager came to fix a specific setting, so
+            // every field is on screen from the start.
+            quick: false,
             error: None,
         });
         self.product_delete = None;
