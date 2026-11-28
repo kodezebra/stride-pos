@@ -1006,6 +1006,37 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
             },
         );
 
+        // Above the scroll area on purpose: a control that reveals the rest of
+        // the form must never be the first thing a scroll hides. The chevron is
+        // a real icon — a text arrow is not in the bundled fonts.
+        {
+            let palette = theme::current(ui.ctx());
+            let label = if draft.quick {
+                "More details"
+            } else {
+                "Fewer details"
+            };
+            let icon = if draft.quick {
+                Icon::CHEVRON_DOWN
+            } else {
+                Icon::CHEVRON_LEFT
+            };
+            let text = egui::RichText::new(label)
+                .size(TYPE.button)
+                .family(theme::semibold())
+                .color(egui::Color32::from(palette.text));
+            let button = egui::Button::image_and_text(
+                icon.image(16.0, egui::Color32::from(palette.text_muted)),
+                text,
+            )
+            .min_size(egui::vec2(0.0, 36.0))
+            .corner_radius(egui::CornerRadius::same(RADII.sm as u8));
+            if ui.add(button).clicked() {
+                draft.quick = !draft.quick;
+            }
+        }
+        ui.add_space(SPACING.sm);
+
         let each = {
             let label = draft.unit_label.trim();
             if label.is_empty() {
@@ -1082,16 +1113,6 @@ pub fn product_editor_modal(ctx: &egui::Context, state: &mut State) {
                 components::field_label(ui, "Barcode (optional)");
                 ui.add_space(SPACING.xs);
                 text_field(ui, &mut draft.barcode, "Scanned or typed", 350.0);
-
-                ui.add_space(SPACING.md);
-                let details_label = if draft.quick {
-                    "More details →"
-                } else {
-                    "Fewer details"
-                };
-                if actions::secondary_compact(ui, details_label).clicked() {
-                    draft.quick = !draft.quick;
-                }
 
                 // Everything below is configuration a manager can add after the
                 // product already exists and sells. Hiding it is a view choice only;
