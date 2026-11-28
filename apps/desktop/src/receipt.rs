@@ -65,6 +65,199 @@ impl<'a> Paper<'a> {
     }
 }
 
+/// One line of the canonical slip, in the order a customer reads it.
+///
+/// Both the clipboard text and the A4 PDF render these rows. Keeping the
+/// content in one place matters most for the conditional lines — tax, rounding,
+/// a second tender, an unsettled credit sale — because two renderers that each
+/// decide whether to print one are two receipts that disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// The merchant, centred and emphasised.
+    Shop(String),
+    /// A centred secondary line: address, phone, tax id, policy, footer.
+    Centered(String),
+    /// A label on the left and a figure on the right.
+    Pair {
+        label: String,
+        value: String,
+        strong: bool,
+    },
+    /// A line that stands alone, such as "no line items were recorded".
+    Bare(String),
+    /// Vertical air.
+    Blank,
+    /// A section break; text renders it as a blank line, paper as a rule.
+    Divider,
+    /// A credit sale always gets a marked block, even once settled.
+    Credit {
+        settled: String,
+        balance: String,
+        note: Option<String>,
+    },
+}
+
+/// The whole slip, as ordered content.
+///
+/// `note` is a short qualifier for a reprint, where the balance on paper is the
+/// balance now rather than the balance when the sale was rung up. A text slip
+/// handed to a customer at the till passes `None`.
+pub fn rows(
+    detail: &SaleDetail,
+    paper: &Paper<'_>,
+    currency: Currency,
+    note: Option<&str>,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+
+    out.push(Row::Shop(
+        non_empty(paper.shop).unwrap_or(crate::APP_NAME).to_owned(),
+    ));
+    for line in [
+        non_empty(paper.address).map(str::to_owned),
+        non_empty(paper.phone).map(|phone| format!("Tel: {phone}")),
+        non_empty(paper.tax_number).map(|tax| format!("Tax/VAT: {tax}")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.push(Row::Centered(line));
+    }
+    out.push(Row::Blank);
+
+    let (date, time) = stamp_parts(&detail.created_at);
+    out.push(Row::Pair {
+        label: receipt_number(detail),
+        value: date,
+        strong: false,
+    });
+    let left = meta_left(&time, detail);
+    let right = if paper.show_cashier {
+        cashier(detail)
+    } else {
+        String::new()
+    };
+    out.push(Row::Pair {
+        label: left,
+        value: right,
+        strong: false,
+    });
+    if let Some(name) = detail.customer_name.as_deref().and_then(non_empty) {
+        out.push(Row::Pair {
+            label: name.to_owned(),
+            value: String::new(),
+            strong: false,
+        });
+    }
+    out.push(Row::Divider);
+
+    if detail.lines.is_empty() {
+        out.push(Row::Bare(
+            "No line items were recorded on this sale.".to_owned(),
+        ));
+    }
+    for line in &detail.lines {
+        out.push(Row::Pair {
+            label: item_label(line),
+            value: amount(line.total_minor, currency),
+            strong: false,
+        });
+    }
+    out.push(Row::Divider);
+
+    if detail.discount_minor > 0 || detail.rounding_minor != 0 {
+        out.push(Row::Pair {
+            label: "Subtotal".to_owned(),
+            value: amount(detail.total_minor + detail.discount_minor, currency),
+            strong: false,
+        });
+    }
+    if detail.discount_minor > 0 {
+        out.push(Row::Pair {
+            label: discount_label(detail),
+            value: amount(-detail.discount_minor, currency),
+            strong: false,
+        });
+    }
+    if detail.tax_minor > 0 {
+        out.push(Row::Pair {
+            label: "Pre-tax".to_owned(),
+            value: amount(detail.total_minor - detail.tax_minor, currency),
+            strong: false,
+        });
+        out.push(Row::Pair {
+            label: format!("Tax (@ {}%)", detail.tax_minor * 100 / detail.total_minor),
+            value: amount(detail.tax_minor, currency),
+            strong: false,
+        });
+    }
+    if detail.rounding_minor != 0 {
+        out.push(Row::Pair {
+            label: if detail.rounding_minor < 0 {
+                "Rounded down".to_owned()
+            } else {
+                "Rounded up".to_owned()
+            },
+            value: amount(detail.rounding_minor, currency),
+            strong: false,
+        });
+    }
+    out.push(Row::Pair {
+        label: format!("Total ({})", currency.code()),
+        value: amount(detail.paid_minor, currency),
+        strong: true,
+    });
+
+    if detail.payments.is_empty() {
+        if detail.tendered_minor != 0 {
+            out.push(Row::Pair {
+                label: format!("Paid by {}", detail.method),
+                value: amount(detail.tendered_minor, currency),
+                strong: false,
+            });
+        }
+    } else {
+        for payment in &detail.payments {
+            out.push(Row::Pair {
+                label: format!(
+                    "Paid by {}",
+                    crate::state::payment_method_label(&payment.method)
+                ),
+                value: amount(payment.tendered_minor, currency),
+                strong: false,
+            });
+            if let Some(reference) = &payment.reference {
+                out.push(Row::Pair {
+                    label: "Ref".to_owned(),
+                    value: reference.clone(),
+                    strong: false,
+                });
+            }
+        }
+    }
+    if detail.change_minor != 0 {
+        out.push(Row::Pair {
+            label: "Change".to_owned(),
+            value: amount(detail.change_minor, currency),
+            strong: false,
+        });
+    }
+    if detail.is_on_credit {
+        out.push(Row::Credit {
+            settled: amount(detail.settled_minor, currency),
+            balance: amount(detail.balance_minor, currency),
+            note: note.map(str::to_owned),
+        });
+    }
+
+    out.push(Row::Blank);
+    if let Some(policy) = non_empty(paper.return_policy) {
+        out.push(Row::Centered(policy.to_owned()));
+    }
+    out.push(Row::Centered(paper.footer_text().to_owned()));
+    out
+}
+
 /// A short, realistic sale for Settings → Receipt. Deliberately not a real
 /// sale: a preview that borrowed the last sale would disappear on a fresh till
 /// and change under the owner while they typed.
@@ -298,7 +491,17 @@ pub fn body(
             Weight::Change,
         );
     }
-    if detail.is_on_credit && detail.balance_minor != 0 {
+    if detail.is_on_credit {
+        // A credit sale is marked even once settled: a slip that looks like a
+        // cash sale is the wrong answer when a customer asks what they owe.
+        ui.add_space(SPACING.xs);
+        components::caption(ui, "CREDIT SALE");
+        row(
+            ui,
+            "Settled so far",
+            &amount(detail.settled_minor, currency),
+            Weight::Plain,
+        );
         row(
             ui,
             "Balance due",
@@ -327,132 +530,31 @@ pub fn body(
 /// because there is no big green figure above it to do that job.
 pub fn plain(detail: &SaleDetail, paper: &Paper<'_>, currency: Currency) -> String {
     let mut out = String::new();
-
-    out.push_str(non_empty(paper.shop).unwrap_or(crate::APP_NAME));
-    out.push('\n');
-    if let Some(address) = non_empty(paper.address) {
-        out.push_str(address);
-        out.push('\n');
-    }
-    if let Some(phone) = non_empty(paper.phone) {
-        out.push_str(&format!("Tel: {phone}\n"));
-    }
-    if let Some(tax) = non_empty(paper.tax_number) {
-        out.push_str(&format!("Tax/VAT: {tax}\n"));
-    }
-    out.push('\n');
-    let (date, time) = stamp_parts(&detail.created_at);
-    push_pair(&mut out, &receipt_number(detail), &date);
-    let left = meta_left(&time, detail);
-    let right = if paper.show_cashier {
-        cashier(detail)
-    } else {
-        String::new()
-    };
-    push_pair(&mut out, &left, &right);
-    if let Some(name) = detail.customer_name.as_deref().and_then(non_empty) {
-        push_pair(&mut out, name, "");
-    }
-    out.push('\n');
-
-    if detail.lines.is_empty() {
-        out.push_str("No line items were recorded on this sale.\n");
-    }
-    for line in &detail.lines {
-        out.push_str(&text_row(
-            &item_label(line),
-            &amount(line.total_minor, currency),
-        ));
-        out.push('\n');
-    }
-
-    out.push('\n');
-    if detail.discount_minor > 0 || detail.rounding_minor != 0 {
-        out.push_str(&text_row(
-            "Subtotal",
-            &amount(detail.total_minor + detail.discount_minor, currency),
-        ));
-        out.push('\n');
-    }
-    if detail.discount_minor > 0 {
-        out.push_str(&text_row(
-            &discount_label(detail),
-            &amount(-detail.discount_minor, currency),
-        ));
-        out.push('\n');
-    }
-    if detail.tax_minor > 0 {
-        out.push_str(&text_row(
-            "Pre-tax",
-            &amount(detail.total_minor - detail.tax_minor, currency),
-        ));
-        out.push('\n');
-        out.push_str(&text_row(
-            &format!("Tax (@ {}%)", detail.tax_minor * 100 / detail.total_minor),
-            &amount(detail.tax_minor, currency),
-        ));
-        out.push('\n');
-    }
-    if detail.rounding_minor != 0 {
-        let direction = if detail.rounding_minor < 0 {
-            "Rounded down"
-        } else {
-            "Rounded up"
-        };
-        out.push_str(&text_row(
-            direction,
-            &amount(detail.rounding_minor, currency),
-        ));
-        out.push('\n');
-    }
-    out.push_str(&text_row(
-        &format!("Total ({})", currency.code()),
-        &amount(detail.paid_minor, currency),
-    ));
-    out.push('\n');
-    if detail.payments.is_empty() {
-        if detail.tendered_minor != 0 {
-            out.push_str(&text_row(
-                &format!("Paid by {}", detail.method),
-                &amount(detail.tendered_minor, currency),
-            ));
-            out.push('\n');
-        }
-    } else {
-        for payment in &detail.payments {
-            out.push_str(&text_row(
-                &format!(
-                    "Paid by {}",
-                    crate::state::payment_method_label(&payment.method)
-                ),
-                &amount(payment.tendered_minor, currency),
-            ));
-            out.push('\n');
-            if let Some(reference) = &payment.reference {
-                out.push_str(&text_row("Ref", reference));
+    for row in rows(detail, paper, currency, None) {
+        match row {
+            Row::Shop(line) | Row::Centered(line) | Row::Bare(line) => {
+                out.push_str(&line);
                 out.push('\n');
+            }
+            Row::Pair { label, value, .. } => push_pair(&mut out, &label, &value),
+            Row::Blank | Row::Divider => out.push('\n'),
+            Row::Credit {
+                settled,
+                balance,
+                note,
+            } => {
+                out.push_str("CREDIT SALE\n");
+                out.push_str(&text_row("Settled so far", &settled));
+                out.push('\n');
+                out.push_str(&text_row("Balance due", &balance));
+                out.push('\n');
+                if let Some(note) = note {
+                    out.push_str(&note);
+                    out.push('\n');
+                }
             }
         }
     }
-    if detail.change_minor != 0 {
-        out.push_str(&text_row("Change", &amount(detail.change_minor, currency)));
-        out.push('\n');
-    }
-    if detail.is_on_credit && detail.balance_minor != 0 {
-        out.push_str(&text_row(
-            "Balance due",
-            &amount(detail.balance_minor, currency),
-        ));
-        out.push('\n');
-    }
-
-    out.push('\n');
-    if let Some(policy) = non_empty(paper.return_policy) {
-        out.push_str(policy);
-        out.push('\n');
-    }
-    out.push_str(paper.footer_text());
-    out.push('\n');
     out
 }
 

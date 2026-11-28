@@ -5,6 +5,7 @@
 //!
 //! | file          | role                                              |
 //! |---------------|---------------------------------------------------|
+//! | `a4.rs`       | one sale laid out on A4, written by `printing`       |
 //! | `actions.rs`  | the one action hierarchy: primary, secondary, quiet |
 //! | `db.rs`       | schema and the few reads the shell needs           |
 //! | `dialog.rs`   | the computer's own file chooser, on a thread       |
@@ -21,6 +22,7 @@
 //! | `settings.rs` | terminal configuration: appearance, later tax/printer |
 //! | `shell.rs`    | the frame: rail, sidebar, workspace, status bar    |
 
+mod a4;
 mod actions;
 mod auth;
 mod category_seeds;

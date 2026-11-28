@@ -18,9 +18,14 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
     let shop = state.settings.shop_name().to_owned();
     let paper = crate::receipt::Paper::from_receipt(&shop, &state.settings.receipt);
     let copy_text = crate::receipt::plain(detail, &paper, currency);
+    // Built before the modal opens: the dialog blocks the thread, and the PDF
+    // is pure data, so nothing needs the UI borrow while the operator browses.
+    let pdf = crate::a4::sale_pdf(detail, &paper, currency, true);
 
     let mut close = false;
     let mut copied = false;
+    let mut saved_path: Option<std::path::PathBuf> = None;
+    let mut status: Option<String> = None;
 
     modal(ctx, egui::Id::new("pos_sale_detail")).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -47,8 +52,41 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
                 ui.ctx().copy_text(copy_text.clone());
                 copied = true;
             }
+            if actions::secondary(ui, "Save A4 PDF")
+                .on_hover_text("Write this receipt as an A4 PDF file")
+                .clicked()
+            {
+                let name = crate::a4::file_name(detail);
+                let dialog = rfd::FileDialog::new()
+                    .set_title("Save the receipt as a PDF")
+                    .set_file_name(&name)
+                    .add_filter("PDF", &["pdf"]);
+                if let Some(path) = dialog.save_file() {
+                    match std::fs::write(&path, &pdf) {
+                        Ok(()) => {
+                            status = Some(format!("Saved {}", path.display()));
+                            saved_path = Some(path);
+                        }
+                        Err(error) => {
+                            status = Some(format!("Could not save the PDF: {error}"));
+                        }
+                    }
+                }
+            }
+            if let Some(path) = saved_path.as_ref()
+                && actions::secondary(ui, "Open PDF")
+                    .on_hover_text("Open the saved file in the computer's PDF viewer")
+                    .clicked()
+            {
+                status = match crate::a4::open_in_viewer(path) {
+                    Ok(()) => None,
+                    Err(error) => Some(format!("Could not open the PDF: {error}")),
+                };
+            }
         });
-        if copied {
+        if let Some(message) = &status {
+            components::caption(ui, message);
+        } else if copied {
             components::caption(ui, "Copied to the clipboard.");
         }
     });

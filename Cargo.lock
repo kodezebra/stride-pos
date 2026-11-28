@@ -537,6 +537,7 @@ dependencies = [
  "getrandom 0.3.4",
  "lan-http",
  "money",
+ "printing",
  "qrcode",
  "rfd",
  "rusqlite",
@@ -2426,6 +2427,11 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "printing"
+version = "0.1.0"
+source = "git+https://github.com/kodezebra/stride-libs?rev=0c18ec5d52f6bb714b60f662d3828a887d7de155#0c18ec5d52f6bb714b60f662d3828a887d7de155"
 
 [[package]]
 name = "proc-macro-crate"

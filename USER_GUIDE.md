@@ -42,7 +42,7 @@ one file on that machine.
 **What it does not do yet**
 
 - Payments are **cash only** — no mobile money, no cards
-- Receipts can be previewed and copied as text, but not printed
+- Receipts can be copied as text or saved as an A4 PDF file; there is no direct print dialog yet
 - Void, refund and discount have roles defined but **no screens**
 - Stock counting tracks units, not cost — there is no full stock valuation yet
 - Profit appears only for sale lines that had a known cost; it is not a complete
@@ -227,7 +227,9 @@ This is the whole counter flow, from idle till to done.
      to dismiss, and the receipt is kept on the sale.
 9. Open **Today** (`F2`) → the sale whenever you need the slip again — lines,
    amount paid, method, change. **Copy receipt** puts it on the clipboard as
-   text.
+   text. **Save A4 PDF** writes the same slip to a file at A4 size; **Open PDF**
+   shows that file in the computer's own viewer. A credit sale always carries a
+   marked credit block with what has been settled and what is still due.
 10. Questions mid-sale? The cart stays put — even if the till auto-locks after
     five idle minutes, nothing is lost.
 
@@ -882,7 +884,7 @@ internet, ever — do not port-forward it.
 ## 11. Known limits of this build
 
 - Cash only; no mobile money or card tender UI (`payments.method` is `cash`)
-- No printed receipts — copy the confirmation slip as text instead
+- No direct printing — save the slip as an A4 PDF and print that file from the computer if needed
 - Void / refund / discount / drawer-open are permissioned but have no screens
 - Stock counting tracks units, not value; a purchase can record a unit cost, but there
   is no full stock valuation
