@@ -20,7 +20,16 @@ pub fn sale_detail_modal(ctx: &egui::Context, state: &mut State) {
     let copy_text = crate::receipt::plain(detail, &paper, currency);
     // Built before the modal opens: the dialog blocks the thread, and the PDF
     // is pure data, so nothing needs the UI borrow while the operator browses.
-    let pdf = crate::a4::sale_pdf(detail, &paper, currency, true);
+    // The shop's accent comes from the installed theme, so paper and screen
+    // agree without a second setting to keep in step.
+    let accent = ui_kit::theme::current(ctx).accent;
+    let pdf = crate::a4::sale_pdf(
+        detail,
+        &paper,
+        currency,
+        true,
+        printing::Color::new(accent.r, accent.g, accent.b),
+    );
 
     let mut close = false;
     let mut copied = false;
