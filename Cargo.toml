@@ -26,7 +26,7 @@ config = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d3
 app-boot = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
 money = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
 lan-http = { git = "https://github.com/kodezebra/stride-libs", rev = "850679a724d319db72e832155f72fd59aa957792" }
-printing = { git = "https://github.com/kodezebra/stride-libs", rev = "0c18ec5d52f6bb714b60f662d3828a887d7de155" }
+printing = { git = "https://github.com/kodezebra/stride-libs", rev = "1201424aa4dcc70a05723b6a48b903499e0d849c" }
 
 # ---- third-party ---------------------------------------------------------
 # Versions are pinned to what is already cached in ~/.cargo/registry, so a
